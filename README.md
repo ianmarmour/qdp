@@ -123,9 +123,10 @@ sudo usermod -aG input "$USER"
 ```
 
 Log out and in again for the group change to apply. Without access the host
-logs a warning and ignores input. The client also sends the gamepads
-connected to it while its window has focus, and plays the rumble the host's
-games set on them. A Linux host presents each as a virtual Xbox 360
+logs a warning and ignores input. Touches on the client's window reach Linux
+and Windows hosts as a touchscreen, which macOS hosts decline. The client also
+sends the gamepads connected to it while its window has focus, and plays the
+rumble the host's games set on them. A Linux host presents each as a virtual Xbox 360
 controller; hosts on other systems decline them. On Windows the host sends input with
 `SendInput`; Windows keeps it from reaching programs run as administrator unless
 the host runs as administrator too, and from the sign-in screen and elevation

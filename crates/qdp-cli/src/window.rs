@@ -6,6 +6,7 @@
 //! [`FrameSlot`] and wakes the event loop with an [`EventLoopProxy`]; the window
 //! tells the session it closed through a [`CloseSignal`].
 
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +16,8 @@ use std::time::{Duration, Instant};
 use qdp::message::{CursorImage, PointerKind, PointerMode};
 use qdp_codec::Yuv420Frame;
 use qdp_runtime::{
-    CursorWarp, FrameInfo, FrameSink, InputHandle, PointerButton, SinkControl, UserInput, WarpKind,
+    CursorWarp, FrameInfo, FrameSink, InputHandle, PointerButton, SinkControl, TouchPhase,
+    UserInput, WarpKind,
 };
 use softbuffer::{Context, Surface};
 use tokio::sync::Notify;
@@ -23,7 +25,8 @@ use tracing::{debug, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{
-    DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+    DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, Touch,
+    WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
@@ -213,6 +216,8 @@ pub struct WindowApp {
     captured: bool,
     /// The modifier keys held.
     modifiers: ModifiersState,
+    /// The fingers touching the window.
+    fingers: HashSet<u64>,
     /// The user's gamepads, if they can be watched.
     #[cfg(feature = "gamepad")]
     gamepads: Option<qdp_desktop::GamepadCapture>,
@@ -243,6 +248,7 @@ impl WindowApp {
             pointer_mode: PointerKind::Absolute,
             captured: false,
             modifiers: ModifiersState::empty(),
+            fingers: HashSet::new(),
             #[cfg(feature = "gamepad")]
             gamepads: qdp_desktop::GamepadCapture::start(input.clone())
                 .inspect_err(|error| warn!(error, "gamepads are not sent"))
@@ -424,20 +430,55 @@ impl WindowApp {
 
     /// Sends the pointer's position on the monitor, if it is over the picture.
     fn pointer_moved(&self, position: PhysicalPosition<f64>) {
+        if let Some((x, y)) = self.monitor_position(position) {
+            self.input.send(UserInput::PointerMoved { x, y });
+        }
+    }
+
+    /// Returns where a position in the window falls on the host's monitor, in
+    /// its pixels, or `None` while no picture is shown.
+    fn monitor_position(&self, position: PhysicalPosition<f64>) -> Option<(f64, f64)> {
         let (Some(display), Some(frame)) = (&self.display, &self.current) else {
-            return;
+            return None;
         };
         let size = display.window.inner_size();
-        let Some(placement) = Placement::fit(
+        let placement = Placement::fit(
             frame.width,
             frame.height,
             size.width as usize,
             size.height as usize,
-        ) else {
+        )?;
+        Some(placement.to_frame(position.x, position.y, frame.width, frame.height))
+    }
+
+    /// Sends a finger touching, moving or lifting. While fingers touch, the
+    /// pointer events some platforms make from them are not sent.
+    fn touch(&mut self, touch: Touch) {
+        let phase = match touch.phase {
+            winit::event::TouchPhase::Started => TouchPhase::Down,
+            winit::event::TouchPhase::Moved => TouchPhase::Move,
+            winit::event::TouchPhase::Ended => TouchPhase::Up,
+            winit::event::TouchPhase::Cancelled => TouchPhase::Cancel,
+        };
+        match phase {
+            TouchPhase::Down => {
+                self.fingers.insert(touch.id);
+            }
+            TouchPhase::Up | TouchPhase::Cancel => {
+                self.fingers.remove(&touch.id);
+            }
+            TouchPhase::Move => {}
+        }
+        let Some((x, y)) = self.monitor_position(touch.location) else {
             return;
         };
-        let (x, y) = placement.to_frame(position.x, position.y, frame.width, frame.height);
-        self.input.send(UserInput::PointerMoved { x, y });
+        self.input.send(UserInput::Touch {
+            finger: touch.id,
+            phase,
+            x,
+            y,
+            pressure: touch.force.map(|force| force.normalized()),
+        });
     }
 
     /// Sends a button press or release.
@@ -646,6 +687,10 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.key(&event),
+            WindowEvent::Touch(touch) => self.touch(touch),
+            // Pointer events made from touches are not sent: the touches are.
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. }
+                if !self.fingers.is_empty() => {}
             WindowEvent::CursorMoved { position, .. } if !self.captured => {
                 self.stop_following();
                 self.pointer_moved(position);
@@ -668,6 +713,7 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 }
                 if !focused {
                     self.release_pointer();
+                    self.fingers.clear();
                     self.input.send(UserInput::ReleaseAll);
                 }
             }

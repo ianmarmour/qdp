@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use qdp::input::{InputEvent, total_delta};
 use qdp::message::{
     DeviceId, DeviceKind, GamepadOutput, GamepadReport, KeyboardInfo, KeyboardLeds, KeyboardReport,
-    MouseReport, PointerButtons, PointerKind, PointerReport, TextReport,
+    MouseReport, PointerButtons, PointerKind, PointerReport, TextReport, TouchContact,
+    TouchContactFlags, TouchscreenReport,
 };
 use tracing::debug;
 
@@ -53,6 +54,36 @@ impl PointerButton {
             Self::Forward => PointerButtons::FORWARD,
         }
     }
+}
+
+/// What happened to a touch contact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TouchPhase {
+    /// It started touching.
+    Down,
+    /// It moved, or stayed where it was while others changed.
+    Move,
+    /// It lifted.
+    Up,
+    /// It ended without effect, as after palm rejection or when the session
+    /// lost focus.
+    Cancel,
+}
+
+/// One contact in a touchscreen frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TouchPoint {
+    /// Identifies the contact while it touches.
+    pub id: u8,
+    /// What happened to it.
+    pub phase: TouchPhase,
+    /// Its horizontal desktop position, in 1/256 pixel.
+    pub x: i32,
+    /// Its vertical desktop position, in 1/256 pixel.
+    pub y: i32,
+    /// Its pressure, from 0 to 65535, or 0 if the touchscreen does not sense
+    /// pressure.
+    pub pressure: u16,
 }
 
 /// One thing the host's input injector does.
@@ -102,6 +133,9 @@ pub enum InputAction {
     },
     /// Removes a gamepad, as when the client detaches it.
     GamepadRemoved(DeviceId),
+    /// Changes a touchscreen's contacts together: every contact that touched
+    /// or touches, each with what happened to it.
+    Touch(Vec<TouchPoint>),
 }
 
 /// Performs input actions on the host's desktop.
@@ -129,6 +163,12 @@ pub trait InputInjector: Send {
     /// do, and absolute otherwise.
     fn pointer_mode(&mut self) -> PointerKind {
         PointerKind::Absolute
+    }
+
+    /// Returns whether the injector can perform touches, so that the host
+    /// accepts touchscreens.
+    fn supports_touch(&self) -> bool {
+        false
     }
 
     /// Returns whether the injector can present gamepads to the host's
@@ -193,6 +233,8 @@ enum DeviceState {
     Text,
     /// A gamepad.
     Gamepad(GamepadReport),
+    /// A touchscreen, with the contacts touching.
+    Touchscreen(Vec<TouchContact>),
 }
 
 /// The standard devices of one session and their last applied states.
@@ -212,6 +254,7 @@ impl StandardInput {
             DeviceKind::MOUSE => DeviceState::Mouse(MouseReport::default()),
             DeviceKind::TEXT => DeviceState::Text,
             DeviceKind::GAMEPAD => DeviceState::Gamepad(GamepadReport::default()),
+            DeviceKind::TOUCHSCREEN => DeviceState::Touchscreen(Vec::new()),
             _ => return false,
         };
         self.devices.insert(device_id, state);
@@ -347,8 +390,57 @@ impl StandardInput {
                 Ok(_) => {}
                 Err(_) => debug!("malformed gamepad report skipped"),
             },
+            DeviceState::Touchscreen(previous) => match TouchscreenReport::decode(&event.data) {
+                Ok(report) => {
+                    let points = touch_points(previous, &report.contacts);
+                    if !points.is_empty() {
+                        actions.push(InputAction::Touch(points));
+                    }
+                    *previous = report.contacts;
+                    previous
+                        .retain(|contact| !contact.flags.contains(TouchContactFlags::CANCELLED));
+                }
+                Err(_) => debug!("malformed touchscreen report skipped"),
+            },
         }
         actions
+    }
+}
+
+/// Returns the touch frame between two lists of contacts, or nothing if no
+/// contact changed: every contact still touching moves, so that the frame
+/// lists them all.
+fn touch_points(previous: &[TouchContact], current: &[TouchContact]) -> Vec<TouchPoint> {
+    if previous == current {
+        return Vec::new();
+    }
+    let mut points: Vec<TouchPoint> = previous
+        .iter()
+        .filter(|old| current.iter().all(|contact| contact.id != old.id))
+        .map(|old| touch_point(old, TouchPhase::Up))
+        .collect();
+    for contact in current {
+        let touching = previous.iter().any(|old| old.id == contact.id);
+        let cancelled = contact.flags.contains(TouchContactFlags::CANCELLED);
+        match (touching, cancelled) {
+            (true, true) => points.push(touch_point(contact, TouchPhase::Cancel)),
+            (true, false) => points.push(touch_point(contact, TouchPhase::Move)),
+            (false, false) => points.push(touch_point(contact, TouchPhase::Down)),
+            // A contact cancelled before it was seen never touched.
+            (false, true) => {}
+        }
+    }
+    points
+}
+
+/// Returns a contact as a point of a touch frame.
+fn touch_point(contact: &TouchContact, phase: TouchPhase) -> TouchPoint {
+    TouchPoint {
+        id: contact.id,
+        phase,
+        x: contact.x,
+        y: contact.y,
+        pressure: contact.pressure,
     }
 }
 
@@ -429,6 +521,16 @@ fn release(device_id: DeviceId, state: &DeviceState) -> Vec<InputAction> {
             button_actions(report.buttons, PointerButtons::default(), &mut actions);
         }
         DeviceState::Text => {}
+        DeviceState::Touchscreen(contacts) => {
+            if !contacts.is_empty() {
+                actions.push(InputAction::Touch(
+                    contacts
+                        .iter()
+                        .map(|contact| touch_point(contact, TouchPhase::Cancel))
+                        .collect(),
+                ));
+            }
+        }
         DeviceState::Gamepad(report) => {
             let rest = gamepad_at_rest(report);
             if rest != *report {
@@ -470,6 +572,7 @@ fn at_rest(state: &DeviceState) -> DeviceState {
         }),
         DeviceState::Text => DeviceState::Text,
         DeviceState::Gamepad(report) => DeviceState::Gamepad(gamepad_at_rest(report)),
+        DeviceState::Touchscreen(_) => DeviceState::Touchscreen(Vec::new()),
     }
 }
 
@@ -490,6 +593,9 @@ mod tests {
 
     /// The gamepad's Device ID in the tests.
     const GAMEPAD: DeviceId = DeviceId(VarInt::from_u32(16));
+
+    /// The touchscreen's Device ID in the tests.
+    const TOUCHSCREEN: DeviceId = DeviceId(VarInt::from_u32(5));
 
     /// Returns an event carrying `data` from `device_id`.
     fn event(device_id: DeviceId, data: Vec<u8>) -> InputEvent {
@@ -763,5 +869,66 @@ mod tests {
             ]
         );
         assert!(apply(&mut input).is_empty());
+    }
+
+    /// Returns a touchscreen contact.
+    fn contact(id: u8, x: i32, flags: TouchContactFlags) -> TouchContact {
+        TouchContact {
+            id,
+            flags,
+            x,
+            y: 0,
+            pressure: 0,
+        }
+    }
+
+    /// Returns the contacts and phases of the one touch frame among
+    /// `actions`, or nothing if there is none.
+    fn phases(actions: &[InputAction]) -> Vec<(u8, TouchPhase, i32)> {
+        match actions {
+            [InputAction::Touch(points)] => points
+                .iter()
+                .map(|point| (point.id, point.phase, point.x))
+                .collect(),
+            [] => Vec::new(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Touchscreen reports become frames listing every contact that touched
+    /// or touches, and releasing cancels the contacts still down.
+    #[test]
+    fn touchscreen_frames() {
+        let mut input = devices();
+        assert!(input.attach(TOUCHSCREEN, DeviceKind::TOUCHSCREEN));
+        let mut apply = |contacts: Vec<TouchContact>| {
+            let actions = input.apply(
+                &event(TOUCHSCREEN, TouchscreenReport { contacts }.to_bytes()),
+                Positions::Apply,
+                PointerKind::Absolute,
+            );
+            phases(&actions)
+        };
+        let none = TouchContactFlags::default();
+        assert_eq!(
+            apply(vec![contact(0, 10, none)]),
+            [(0, TouchPhase::Down, 10)]
+        );
+        assert!(apply(vec![contact(0, 10, none)]).is_empty());
+        assert_eq!(
+            apply(vec![contact(0, 12, none), contact(1, 50, none)]),
+            [(0, TouchPhase::Move, 12), (1, TouchPhase::Down, 50)]
+        );
+        assert_eq!(
+            apply(vec![
+                contact(1, 50, TouchContactFlags::CANCELLED),
+                contact(2, 70, TouchContactFlags::CANCELLED)
+            ]),
+            [(0, TouchPhase::Up, 12), (1, TouchPhase::Cancel, 50)]
+        );
+        assert!(apply(Vec::new()).is_empty());
+        assert_eq!(apply(vec![contact(3, 5, none)]), [(3, TouchPhase::Down, 5)]);
+        assert_eq!(phases(&input.release_all()), [(3, TouchPhase::Cancel, 5)]);
+        assert!(input.release_all().is_empty());
     }
 }

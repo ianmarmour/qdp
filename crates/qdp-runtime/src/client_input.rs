@@ -10,12 +10,13 @@ use qdp::input::{DeviceRest, ReportKind};
 use qdp::message::{
     DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, GamepadButtons, GamepadOutput,
     GamepadReport, KeyboardReport, MouseReport, PointerButtons, PointerKind, PointerReport,
-    TextReport,
+    TextReport, TouchContactFlags, TouchscreenReport,
 };
 use qdp::wire::VarInt;
 use tokio::sync::Notify;
 
-use crate::host_input::PointerButton;
+use crate::client_touch::Touchscreen;
+use crate::host_input::{PointerButton, TouchPhase};
 
 /// The keyboard's Device ID.
 pub(crate) const KEYBOARD_ID: DeviceId = DeviceId(VarInt::from_u32(1));
@@ -28,6 +29,12 @@ pub(crate) const MOUSE_ID: DeviceId = DeviceId(VarInt::from_u32(3));
 
 /// The text device's Device ID.
 pub(crate) const TEXT_ID: DeviceId = DeviceId(VarInt::from_u32(4));
+
+/// The touchscreen's Device ID.
+pub(crate) const TOUCHSCREEN_ID: DeviceId = DeviceId(VarInt::from_u32(5));
+
+/// The pressure the touchscreen reports for a full press.
+const FULL_PRESSURE: f64 = 65_535.0;
 
 /// Positions and motion are sent in 1/256 of a pixel or device count
 /// (Section 1.5.6).
@@ -84,6 +91,19 @@ pub enum UserInput {
     },
     /// Text was committed without key presses, as by an input method.
     Text(String),
+    /// A finger touched, moved on, or left the monitor.
+    Touch {
+        /// Identifies the finger while it touches.
+        finger: u64,
+        /// What it did.
+        phase: TouchPhase,
+        /// The horizontal position on the monitor, in pixels.
+        x: f64,
+        /// The vertical position on the monitor, in pixels.
+        y: f64,
+        /// How hard it presses, from 0 to 1, if the screen senses it.
+        pressure: Option<f64>,
+    },
     /// A gamepad was connected; `slot` names it in later input.
     GamepadConnected {
         /// The gamepad's number, unique while it is connected.
@@ -224,6 +244,8 @@ pub(crate) struct ClientDevices {
     pointer_mode: PointerKind,
     /// The monitor's top-left corner on the host's desktop, in pixels.
     monitor_origin: (i32, i32),
+    /// The fingers touching the monitor.
+    touchscreen: Touchscreen,
     /// The connected gamepads, by slot: their Device IDs and states.
     gamepads: HashMap<u32, (DeviceId, GamepadReport)>,
     /// The Device ID of the last gamepad attached.
@@ -239,6 +261,7 @@ impl Default for ClientDevices {
             mouse_remainder: (0.0, 0.0),
             pointer_mode: PointerKind::Absolute,
             monitor_origin: (0, 0),
+            touchscreen: Touchscreen::default(),
             gamepads: HashMap::new(),
             last_gamepad_id: FIRST_GAMEPAD_ID - 1,
         }
@@ -404,8 +427,7 @@ impl ClientDevices {
                 vec![self.keyboard_report()]
             }
             UserInput::PointerMoved { x, y } => {
-                let x = ((f64::from(self.monitor_origin.0) + x) * SUBUNITS).round() as i32;
-                let y = ((f64::from(self.monitor_origin.1) + y) * SUBUNITS).round() as i32;
+                let (x, y) = self.desktop_position(x, y);
                 if (x, y) == (self.pointer.x, self.pointer.y) {
                     return Vec::new();
                 }
@@ -468,8 +490,26 @@ impl ClientDevices {
                     rest: DeviceRest::AtRest,
                 })
                 .collect(),
+            UserInput::Touch {
+                finger,
+                phase,
+                x,
+                y,
+                pressure,
+            } => {
+                let pressure = (pressure.unwrap_or(0.0).clamp(0.0, 1.0) * FULL_PRESSURE) as u16;
+                let position = self.desktop_position(x, y);
+                self.touchscreen
+                    .touch(finger, phase, position, pressure)
+                    .map(|(report, kind)| Self::touchscreen_report(&report, kind))
+                    .into_iter()
+                    .collect()
+            }
             UserInput::ReleaseAll => {
                 let mut reports = Vec::new();
+                if let Some(report) = self.touchscreen.cancel_all() {
+                    reports.push(Self::touchscreen_report(&report, ReportKind::Transition));
+                }
                 if self.keyboard != KeyboardReport::default() {
                     self.keyboard = KeyboardReport::default();
                     reports.push(self.keyboard_report());
@@ -506,6 +546,30 @@ impl ClientDevices {
             UserInput::GamepadConnected { .. } | UserInput::GamepadDisconnected { .. } => {
                 Vec::new()
             }
+        }
+    }
+
+    /// Returns a position on the monitor, in pixels, as a desktop position in
+    /// 1/256 pixel.
+    fn desktop_position(&self, x: f64, y: f64) -> (i32, i32) {
+        (
+            ((f64::from(self.monitor_origin.0) + x) * SUBUNITS).round() as i32,
+            ((f64::from(self.monitor_origin.1) + y) * SUBUNITS).round() as i32,
+        )
+    }
+
+    /// Returns a touchscreen report for the input sender. The touchscreen is
+    /// at rest once no contact remains, cancelled ones included.
+    fn touchscreen_report(report: &TouchscreenReport, kind: ReportKind) -> PendingReport {
+        let touching = report
+            .contacts
+            .iter()
+            .any(|contact| !contact.flags.contains(TouchContactFlags::CANCELLED));
+        PendingReport {
+            device_id: TOUCHSCREEN_ID,
+            data: report.to_bytes(),
+            kind,
+            rest: rest(touching),
         }
     }
 

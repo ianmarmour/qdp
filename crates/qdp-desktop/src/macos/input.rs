@@ -287,6 +287,8 @@ impl InputInjector for QuartzInjector {
             InputAction::Gamepad { .. } | InputAction::GamepadRemoved(_) => {
                 Err("Quartz events cannot present gamepads".to_owned())
             }
+            // The host does not accept touchscreens: macOS has no touch events.
+            InputAction::Touch(_) => Err("Quartz events cannot touch".to_owned()),
         }
     }
 
