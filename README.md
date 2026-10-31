@@ -141,8 +141,9 @@ pointer, as games do, the client captures its pointer and sends raw mouse
 motion; Ctrl+Alt+Shift+Z releases it, and a click captures it again. Linux and
 macOS hosts cannot tell when an application captures the pointer, so they do
 the same while one keeps the pointer hidden over the captured monitor for half
-a second, as games that draw their own pointer do, and switch back as soon as
-it shows again. The client
+a second, as games that draw their own pointer do, and switch back once it has
+shown it again for half a second with no button held, so that a pointer a game
+shows only while dragging does not switch modes in the middle of the drag. The client
 also tells the host its keyboard layout, and Windows hosts switch to the same
 one. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write
