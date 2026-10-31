@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 use qdp::input::{InputEvent, InputReceiver};
 use qdp::message::{
     Av1Profiles, BlockGrid, Capability, Chroma, ClientMonitorId, ControlMessage, CursorId,
-    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId, DeviceStatus, DeviceStatusCode,
-    DisplayConfig, DisplayConfigId, DisplayRequestId, FeedbackRecord, FrameHeader, HostHello,
-    HostMonitor, HostMonitorFlags, ImageSerial, InputClasses, KeyboardOutput, MinorVersion,
-    MonitorId, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamHeader, StreamId, VideoCodec,
-    VideoCodecCapability, VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
+    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId, DeviceKind, DeviceStatus,
+    DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequestId, FeatureStatus,
+    FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags, ImageSerial,
+    InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT, PointerKind,
+    PointerMode, StreamHeader, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags,
+    VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{HostConfig, HostEvent};
@@ -30,6 +31,9 @@ use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
 use crate::host_cursor::{CursorUpdate, HostCursor};
 use crate::host_input::{InputAction, InputInjector, Positions, StandardInput};
 use crate::host_output::{DeviceOutputs, OutputReport};
+use crate::host_passthrough::{
+    self, FeatureRequest, PassthroughDevice, PassthroughLink, PassthroughPolicy,
+};
 use crate::media::{CursorState, FrameSource};
 use crate::send_stats::{SendStats, queue_delay};
 use crate::{HostAuthenticator, RuntimeError, is_normal_close};
@@ -96,6 +100,8 @@ pub struct HostOptions {
     pub frame_rate: u32,
     /// How the host encodes video.
     pub encoder: EncoderTuning,
+    /// Which passthrough devices the host accepts.
+    pub passthrough: PassthroughPolicy,
 }
 
 /// What happened during one session.
@@ -111,8 +117,9 @@ pub struct HostSummary {
     pub input_reports: u64,
 }
 
-/// Returns the input classes the host can inject with `injector`.
-fn input_classes(injector: &dyn InputInjector) -> InputClasses {
+/// Returns the input classes the host can inject with `injector`, accepting
+/// passthrough devices unless `passthrough` is off.
+fn input_classes(injector: &dyn InputInjector, passthrough: PassthroughPolicy) -> InputClasses {
     let mut classes = InputClasses::KEYBOARD
         .union(InputClasses::POINTER)
         .union(InputClasses::MOUSE);
@@ -127,6 +134,9 @@ fn input_classes(injector: &dyn InputInjector) -> InputClasses {
     }
     if injector.supports_gamepads() {
         classes = classes.union(InputClasses::GAMEPAD);
+    }
+    if injector.supports_passthrough() && passthrough != PassthroughPolicy::Off {
+        classes = classes.union(InputClasses::PASSTHROUGH);
     }
     classes
 }
@@ -205,6 +215,10 @@ struct ActiveHost {
     pointer_mode: PointerKind,
     /// When the last `INPUT` datagram arrived.
     last_input_at: Instant,
+    /// Which passthrough devices the host accepts.
+    passthrough_policy: PassthroughPolicy,
+    /// The passthrough devices' output streams and feature requests.
+    passthrough: PassthroughLink,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
@@ -233,7 +247,11 @@ pub async fn serve(
             minor_version: MinorVersion::CURRENT,
             host_name: options.host_name.clone(),
             auth_methods: options.authenticator.methods(),
-            capabilities: capabilities(input_classes(&*injector), directions, &audio),
+            capabilities: capabilities(
+                input_classes(&*injector, options.passthrough),
+                directions,
+                &audio,
+            ),
         },
         failure_reason: FAILURE_REASON.to_owned(),
     };
@@ -261,7 +279,13 @@ pub async fn serve(
                 driver.session().respond_auth(response, now)?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
-                answer_attach(&mut driver, &attach, &mut devices)?;
+                answer_attach(
+                    &mut driver,
+                    &attach,
+                    &mut devices,
+                    &mut *injector,
+                    options.passthrough,
+                )?;
             }
             HostEvent::Message(ControlMessage::KeyboardInfo(keyboard)) => {
                 info!(
@@ -349,6 +373,8 @@ pub async fn serve(
         audio,
         pointer_mode: PointerKind::Absolute,
         last_input_at: Instant::now(),
+        passthrough_policy: options.passthrough,
+        passthrough: PassthroughLink::default(),
     };
     active.update_outputs(Instant::now())?;
     if let Some(link) = &mut active.clipboard {
@@ -378,11 +404,14 @@ fn client_stream_policy(header: &StreamHeader, clipboard_limit: Option<usize>) -
 
 /// Answers a `DEVICE_ATTACH`, accepting the standard devices this host
 /// supports whose input class the session negotiated (Section 4.6.5), and
-/// returns whether the device was accepted.
+/// the passthrough devices `policy` allows, which `injector` presents
+/// (Section 8.2.5). Returns whether the device was accepted.
 fn answer_attach(
     driver: &mut HostDriver,
     attach: &DeviceAttach,
     devices: &mut StandardInput,
+    injector: &mut dyn InputInjector,
+    policy: PassthroughPolicy,
 ) -> Result<bool, RuntimeError> {
     let negotiated = attach.kind.input_class().is_some_and(|class| {
         driver
@@ -390,20 +419,48 @@ fn answer_attach(
             .negotiated()
             .is_some_and(|negotiated| negotiated.supports_input(class))
     });
-    let accepted = negotiated && devices.attach(attach.device_id, attach.kind);
-    let status = if accepted {
-        DeviceStatusCode::Accepted
-    } else {
-        DeviceStatusCode::Unsupported
+    let outcome = match (&attach.passthrough, negotiated) {
+        (_, false) => Err((DeviceStatusCode::Unsupported, String::new())),
+        (Some(info), true) if attach.kind == DeviceKind::PASSTHROUGH => {
+            host_passthrough::check(policy, info).and_then(|()| {
+                let device = PassthroughDevice {
+                    device_id: attach.device_id,
+                    name: attach.name.clone(),
+                    info: info.clone(),
+                };
+                injector
+                    .attach_passthrough(&device)
+                    .map_err(|error| (DeviceStatusCode::Failed, error))?;
+                devices.attach_passthrough(attach.device_id, &info.rest_reports);
+                Ok(())
+            })
+        }
+        (_, true) => {
+            if devices.attach(attach.device_id, attach.kind) {
+                Ok(())
+            } else {
+                Err((DeviceStatusCode::Unsupported, String::new()))
+            }
+        }
+    };
+    let (status, reason) = match &outcome {
+        Ok(()) => (DeviceStatusCode::Accepted, String::new()),
+        Err((status, reason)) => {
+            debug!(
+                device = attach.device_id.0.into_inner(),
+                reason, "device refused"
+            );
+            (*status, reason.clone())
+        }
     };
     driver
         .session()
         .send(&ControlMessage::DeviceStatus(DeviceStatus {
             device_id: attach.device_id,
             status,
-            reason: String::new(),
+            reason,
         }))?;
-    Ok(accepted)
+    Ok(outcome.is_ok())
 }
 
 /// Returns the configuration of one monitor of `width × height` with one AV1
@@ -458,6 +515,7 @@ impl ActiveHost {
                 self.clipboard.as_ref().map(ClipboardLink::poll_timeout),
                 self.outputs.poll_timeout(),
                 self.input_silence_deadline(),
+                self.passthrough.poll_timeout(),
             ]
             .into_iter()
             .flatten()
@@ -504,7 +562,12 @@ impl ActiveHost {
             if let Some(ack) = self.input.poll_ack(now) {
                 self.send(ack.to_bytes())?;
             }
-            if self.outputs.poll_timeout().is_some_and(|due| due <= now) {
+            if self.outputs.poll_timeout().is_some_and(|due| due <= now)
+                || self
+                    .passthrough
+                    .poll_timeout()
+                    .is_some_and(|due| due <= now)
+            {
                 self.update_outputs(now)?;
             }
             if self.pending_since.is_none() && now >= next_frame_at {
@@ -673,6 +736,39 @@ impl ActiveHost {
         for datagram in datagrams {
             self.send(datagram)?;
         }
+        self.update_passthrough(now)
+    }
+
+    /// Sends the output reports the host's applications sent passthrough
+    /// devices, relays their feature report requests, and fails those the
+    /// client has not answered in time (Sections 8.8.2 and 8.8.3).
+    fn update_passthrough(&mut self, now: Instant) -> Result<(), RuntimeError> {
+        let outputs: Vec<(DeviceId, Vec<u8>)> = self
+            .injector
+            .passthrough_outputs()
+            .into_iter()
+            .filter(|(device_id, _)| self.devices.contains(*device_id))
+            .collect();
+        self.passthrough
+            .send_outputs(self.driver.connection(), outputs);
+        let (requests, unknown): (Vec<FeatureRequest>, Vec<FeatureRequest>) = self
+            .injector
+            .feature_requests()
+            .into_iter()
+            .partition(|request| self.devices.contains(request.device_id));
+        for request in unknown {
+            self.injector
+                .answer_feature(request.token, FeatureStatus::Failed, &[]);
+        }
+        for request in self.passthrough.requests(requests, now) {
+            self.driver
+                .session()
+                .send(&ControlMessage::HidFeatureRequest(request))?;
+        }
+        for token in self.passthrough.expired(now) {
+            self.injector
+                .answer_feature(token, FeatureStatus::Failed, &[]);
+        }
         Ok(())
     }
 
@@ -769,7 +865,13 @@ impl ActiveHost {
                     .send(&ControlMessage::DisplayConfig(self.display_config.clone()))?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
-                if answer_attach(&mut self.driver, &attach, &mut self.devices)? {
+                if answer_attach(
+                    &mut self.driver,
+                    &attach,
+                    &mut self.devices,
+                    &mut *self.injector,
+                    self.passthrough_policy,
+                )? {
                     self.update_outputs(Instant::now())?;
                 }
             }
@@ -777,6 +879,15 @@ impl ActiveHost {
                 let actions = self.devices.detach(detach.device_id);
                 self.inject(&actions);
                 self.outputs.remove(detach.device_id);
+                for token in self.passthrough.remove(detach.device_id) {
+                    self.injector
+                        .answer_feature(token, FeatureStatus::Failed, &[]);
+                }
+            }
+            HostEvent::Message(ControlMessage::HidFeatureResponse(response)) => {
+                if let Some((token, status, report)) = self.passthrough.response(response) {
+                    self.injector.answer_feature(token, status, &report);
+                }
             }
             HostEvent::Message(ControlMessage::KeyboardInfo(keyboard)) => {
                 info!(

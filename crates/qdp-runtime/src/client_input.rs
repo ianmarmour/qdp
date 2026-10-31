@@ -8,13 +8,15 @@ use std::sync::{Arc, Mutex};
 
 use qdp::input::{DeviceRest, ReportKind};
 use qdp::message::{
-    DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, GamepadButtons, GamepadOutput,
-    GamepadReport, KeyboardReport, MouseReport, PenFlags, PenReport, PointerButtons, PointerKind,
-    PointerReport, TextReport, TouchContactFlags, TouchscreenReport,
+    DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, FeatureOperation, FeatureRequestId,
+    FeatureStatus, GamepadButtons, GamepadOutput, GamepadReport, KeyboardReport, MouseReport,
+    PassthroughInfo, PenFlags, PenReport, PointerButtons, PointerKind, PointerReport, TextReport,
+    TouchContactFlags, TouchscreenReport,
 };
 use qdp::wire::VarInt;
 use tokio::sync::Notify;
 
+use crate::client_passthrough::PassthroughDevices;
 use crate::client_touch::Touchscreen;
 use crate::host_input::{PointerButton, TouchPhase};
 
@@ -162,20 +164,76 @@ pub enum UserInput {
         /// Its complete state.
         report: GamepadReport,
     },
+    /// A device the user chose to pass through was connected; `slot` names
+    /// it in later input (Section 8.2.5).
+    PassthroughConnected {
+        /// The device's number, unique while it is connected.
+        slot: u32,
+        /// Its product name.
+        name: String,
+        /// Its bus, IDs, report descriptor and rest reports.
+        info: PassthroughInfo,
+    },
+    /// A passed-through device was disconnected.
+    PassthroughDisconnected {
+        /// The device's number.
+        slot: u32,
+    },
+    /// A passed-through device produced an input report.
+    PassthroughReport {
+        /// The device's number.
+        slot: u32,
+        /// The report as the device produced it, starting with its report ID
+        /// byte, 0 if its descriptor uses no report IDs.
+        report: Vec<u8>,
+    },
+    /// The outcome of a feature report operation the host asked for
+    /// (Section 8.8.3).
+    FeatureResponse {
+        /// The request answered.
+        request_id: FeatureRequestId,
+        /// Whether it succeeded.
+        status: FeatureStatus,
+        /// The whole report, starting with its report ID byte, for a
+        /// successful read; otherwise empty.
+        report: Vec<u8>,
+    },
     /// Everything held is released, as when the window loses focus.
     ReleaseAll,
 }
 
-/// What the session sends back to the user's devices.
+/// A gamepad's rumble and LED, from the host's applications (Section 8.4.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceFeedback {
-    /// A gamepad's rumble and LED, from the host's applications (Section
-    /// 8.4.7).
-    Gamepad {
-        /// The gamepad's number.
+pub struct GamepadFeedback {
+    /// The gamepad's number.
+    pub slot: u32,
+    /// The output to apply.
+    pub output: GamepadOutput,
+}
+
+/// What the session sends back to passed-through devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PassthroughFeedback {
+    /// An output report for a passed-through device, to write to it in order
+    /// without delaying anything else (Section 8.8.2).
+    Output {
+        /// The device's number.
         slot: u32,
-        /// The output to apply.
-        output: GamepadOutput,
+        /// The report, starting with its report ID byte.
+        report: Vec<u8>,
+    },
+    /// A feature report operation the host's applications asked of a
+    /// passed-through device, to answer with
+    /// [`UserInput::FeatureResponse`] (Section 8.8.3).
+    FeatureRequest {
+        /// The device's number.
+        slot: u32,
+        /// The request, to answer with.
+        request_id: FeatureRequestId,
+        /// Read or write.
+        operation: FeatureOperation,
+        /// The report ID byte for a read, or the whole report for a write.
+        report: Vec<u8>,
     },
 }
 
@@ -183,18 +241,21 @@ pub enum DeviceFeedback {
 /// the session reads it from.
 pub fn input_channel() -> (InputHandle, InputQueue) {
     let (sender, receiver) = mpsc::channel();
-    let (feedback_sender, feedback) = mpsc::channel();
+    let (gamepad_sender, gamepad_feedback) = mpsc::channel();
+    let (passthrough_sender, passthrough_feedback) = mpsc::channel();
     let wake = Arc::new(Notify::new());
     (
         InputHandle {
             sender,
             wake: Arc::clone(&wake),
-            feedback: Arc::new(Mutex::new(feedback)),
+            gamepad_feedback: Arc::new(Mutex::new(gamepad_feedback)),
+            passthrough_feedback: Arc::new(Mutex::new(passthrough_feedback)),
         },
         InputQueue {
             receiver,
             wake,
-            feedback: feedback_sender,
+            gamepad_feedback: gamepad_sender,
+            passthrough_feedback: passthrough_sender,
         },
     )
 }
@@ -206,8 +267,10 @@ pub struct InputHandle {
     sender: Sender<UserInput>,
     /// Wakes the session.
     wake: Arc<Notify>,
-    /// What the session sends back to the devices.
-    feedback: Arc<Mutex<Receiver<DeviceFeedback>>>,
+    /// What the session sends back to gamepads.
+    gamepad_feedback: Arc<Mutex<Receiver<GamepadFeedback>>>,
+    /// What the session sends back to passed-through devices.
+    passthrough_feedback: Arc<Mutex<Receiver<PassthroughFeedback>>>,
 }
 
 impl InputHandle {
@@ -218,9 +281,15 @@ impl InputHandle {
         sent
     }
 
-    /// Returns the next feedback for the user's devices, if any is waiting.
-    pub fn try_feedback(&self) -> Option<DeviceFeedback> {
-        self.feedback.lock().ok()?.try_recv().ok()
+    /// Returns the next feedback for the user's gamepads, if any is waiting.
+    pub fn try_gamepad_feedback(&self) -> Option<GamepadFeedback> {
+        self.gamepad_feedback.lock().ok()?.try_recv().ok()
+    }
+
+    /// Returns the next feedback for passed-through devices, if any is
+    /// waiting.
+    pub fn try_passthrough_feedback(&self) -> Option<PassthroughFeedback> {
+        self.passthrough_feedback.lock().ok()?.try_recv().ok()
     }
 }
 
@@ -231,14 +300,21 @@ pub struct InputQueue {
     receiver: Receiver<UserInput>,
     /// Notified when input arrives.
     wake: Arc<Notify>,
-    /// Sends feedback to the devices.
-    feedback: Sender<DeviceFeedback>,
+    /// Sends feedback to gamepads.
+    gamepad_feedback: Sender<GamepadFeedback>,
+    /// Sends feedback to passed-through devices.
+    passthrough_feedback: Sender<PassthroughFeedback>,
 }
 
 impl InputQueue {
-    /// Sends feedback to the user's devices.
-    pub(crate) fn send_feedback(&self, feedback: DeviceFeedback) {
-        let _ = self.feedback.send(feedback);
+    /// Sends feedback to the user's gamepads.
+    pub(crate) fn send_gamepad_feedback(&self, feedback: GamepadFeedback) {
+        let _ = self.gamepad_feedback.send(feedback);
+    }
+
+    /// Sends feedback to passed-through devices.
+    pub(crate) fn send_passthrough_feedback(&self, feedback: PassthroughFeedback) {
+        let _ = self.passthrough_feedback.send(feedback);
     }
 
     /// Returns the next input waiting, if any.
@@ -287,8 +363,10 @@ pub(crate) struct ClientDevices {
     pen: PenReport,
     /// The connected gamepads, by slot: their Device IDs and states.
     gamepads: HashMap<u32, (DeviceId, GamepadReport)>,
-    /// The Device ID of the last gamepad attached.
-    last_gamepad_id: u64,
+    /// The passed-through devices.
+    passthrough: PassthroughDevices,
+    /// The Device ID of the last gamepad or passthrough device attached.
+    last_device_id: u64,
 }
 
 impl Default for ClientDevices {
@@ -303,13 +381,15 @@ impl Default for ClientDevices {
             touchscreen: Touchscreen::default(),
             pen: PenReport::default(),
             gamepads: HashMap::new(),
-            last_gamepad_id: FIRST_GAMEPAD_ID - 1,
+            passthrough: PassthroughDevices::default(),
+            last_device_id: FIRST_DYNAMIC_ID - 1,
         }
     }
 }
 
-/// The Device ID of the first gamepad; the standard devices use lower ones.
-const FIRST_GAMEPAD_ID: u64 = 16;
+/// The Device ID of the first gamepad or passthrough device; the standard
+/// devices use lower ones.
+const FIRST_DYNAMIC_ID: u64 = 16;
 
 /// The Standard Gamepad buttons the triggers set (Section 8.4.7).
 const TRIGGER_BUTTONS: [u32; 2] = [6, 7];
@@ -326,8 +406,7 @@ impl ClientDevices {
         features: DeviceFeatures,
         name: String,
     ) -> DeviceAttach {
-        self.last_gamepad_id += 1;
-        let device_id = DeviceId(VarInt::new(self.last_gamepad_id).unwrap_or(VarInt::MAX));
+        let device_id = self.next_device_id();
         self.gamepads
             .insert(slot, (device_id, GamepadReport::default()));
         DeviceAttach {
@@ -338,6 +417,42 @@ impl ClientDevices {
             touchpad: None,
             passthrough: None,
         }
+    }
+
+    /// Returns the Device ID of the next device the user connects: they are
+    /// never reused within a session (Section 8.2.1).
+    fn next_device_id(&mut self) -> DeviceId {
+        self.last_device_id += 1;
+        DeviceId(VarInt::new(self.last_device_id).unwrap_or(VarInt::MAX))
+    }
+
+    /// Starts tracking a passthrough device, returning the `DEVICE_ATTACH`
+    /// that offers it to the host.
+    pub(crate) fn connect_passthrough(
+        &mut self,
+        slot: u32,
+        name: String,
+        info: PassthroughInfo,
+    ) -> DeviceAttach {
+        let device_id = self.next_device_id();
+        self.passthrough.connect(slot, device_id, name, info)
+    }
+
+    /// Stops tracking a passthrough device, returning its Device ID to
+    /// detach.
+    pub(crate) fn disconnect_passthrough(&mut self, slot: u32) -> Option<DeviceId> {
+        self.passthrough.disconnect(slot)
+    }
+
+    /// Returns the slot of a passthrough device's Device ID.
+    pub(crate) fn passthrough_slot(&self, device_id: DeviceId) -> Option<u32> {
+        self.passthrough.slot(device_id)
+    }
+
+    /// Returns the reports a passthrough device's state needs once the host
+    /// accepts it.
+    pub(crate) fn passthrough_state(&self, device_id: DeviceId) -> Vec<PendingReport> {
+        self.passthrough.state(device_id)
     }
 
     /// Stops tracking a gamepad, returning its Device ID to detach.
@@ -572,8 +687,11 @@ impl ClientDevices {
                 self.pen = report;
                 vec![self.pen_report(kind)]
             }
+            UserInput::PassthroughReport { slot, report } => {
+                self.passthrough.report(slot, report).into_iter().collect()
+            }
             UserInput::ReleaseAll => {
-                let mut reports = Vec::new();
+                let mut reports = self.passthrough.release_all();
                 if self.pen.flags != PenFlags::default() {
                     self.pen.flags = PenFlags::default();
                     self.pen.pressure = 0;
@@ -613,11 +731,14 @@ impl ClientDevices {
                 let previous = std::mem::replace(state, report);
                 vec![Self::gamepad_report(*device_id, &previous, state)]
             }
-            // Gamepads come and go through `DEVICE_ATTACH` and
-            // `DEVICE_DETACH`, not reports.
-            UserInput::GamepadConnected { .. } | UserInput::GamepadDisconnected { .. } => {
-                Vec::new()
-            }
+            // Gamepads and passthrough devices come and go through
+            // `DEVICE_ATTACH` and `DEVICE_DETACH`, and feature responses are
+            // control messages, not reports.
+            UserInput::GamepadConnected { .. }
+            | UserInput::GamepadDisconnected { .. }
+            | UserInput::PassthroughConnected { .. }
+            | UserInput::PassthroughDisconnected { .. }
+            | UserInput::FeatureResponse { .. } => Vec::new(),
         }
     }
 

@@ -9,19 +9,22 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use qdp::auth::scram::ScramCredentials;
+use qdp::hid::ReportDescriptor;
 use qdp::message::{
-    CursorImage, DeviceFeatures, DeviceId, GamepadButtons, GamepadOutput, GamepadReport,
-    KeyboardInfo, LayoutPlatform, PenFlags, PenReport, PointerKind, PointerMode,
+    BusType, CursorImage, DeviceFeatures, DeviceId, FeatureOperation, FeatureStatus,
+    GamepadButtons, GamepadOutput, GamepadReport, KeyboardInfo, LayoutPlatform, PassthroughInfo,
+    PenFlags, PenReport, PointerKind, PointerMode,
 };
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
     ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
-    DeviceFeedback, DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAudio,
-    HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput,
-    PenInput, Playout, PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
-    TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
+    DisplaySize, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource, GamepadFeedback,
+    HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue,
+    NoInput, PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, Playout,
+    PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
+    TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -339,6 +342,7 @@ fn start_host(
             quantizer: 60,
             threads: 2,
         },
+        passthrough: PassthroughPolicy::default(),
     };
     let task = tokio::spawn(async move {
         let connection = endpoint.accept().await.expect("a client")?;
@@ -1103,7 +1107,7 @@ struct GamepadWatcher {
     /// Where the input goes.
     input: InputHandle,
     /// The rumble the client was asked to play.
-    feedback: Vec<DeviceFeedback>,
+    feedback: Vec<GamepadFeedback>,
     /// The frames presented.
     frames: usize,
 }
@@ -1123,7 +1127,7 @@ impl FrameSink for GamepadWatcher {
             }));
         }
         self.feedback
-            .extend(std::iter::from_fn(|| self.input.try_feedback()));
+            .extend(std::iter::from_fn(|| self.input.try_gamepad_feedback()));
         if !self.feedback.is_empty() || self.frames >= CLIPBOARD_FRAMES {
             SinkControl::Stop
         } else {
@@ -1184,7 +1188,7 @@ async fn gamepad_rumbles() {
         .unwrap();
     assert_eq!(
         watcher.feedback,
-        [DeviceFeedback::Gamepad {
+        [GamepadFeedback {
             slot: 0,
             output: RUMBLE
         }]
@@ -1205,4 +1209,261 @@ async fn gamepad_rumbles() {
     };
     assert_eq!(*report, held);
     assert_eq!((*rest, rest_id), (GamepadReport::default(), device_id));
+}
+
+/// A gamepad's report descriptor: 16 buttons, two 8-bit axes and a hat
+/// switch in input report 1, and a 4-byte output report 2.
+const PASSTHROUGH_GAMEPAD: &[u8] = &[
+    0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x10, 0x15, 0x00,
+    0x25, 0x01, 0x75, 0x01, 0x95, 0x10, 0x81, 0x02, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00,
+    0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02, 0x09, 0x39, 0x15, 0x00, 0x25, 0x07, 0x75,
+    0x04, 0x95, 0x01, 0x81, 0x42, 0x81, 0x03, 0x85, 0x02, 0x06, 0x00, 0xff, 0x09, 0x01, 0x26, 0xff,
+    0x00, 0x75, 0x08, 0x95, 0x04, 0x91, 0x02, 0xc0,
+];
+
+/// The boot keyboard's report descriptor, which the host's policy refuses.
+const PASSTHROUGH_KEYBOARD: &[u8] = &[
+    0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0xc0,
+];
+
+/// The input report the client's passthrough gamepad sends: button 1 held.
+const PASSTHROUGH_REPORT: &[u8] = &[0x01, 0x01, 0x00, 0x80, 0x80, 0x08];
+
+/// The output report the host's applications send the gamepad.
+const PASSTHROUGH_OUTPUT: &[u8] = &[0x02, 0xaa, 0xbb, 0xcc, 0xdd];
+
+/// The token of the host application's feature report read.
+const FEATURE_TOKEN: u64 = 9;
+
+/// The feature report the client's gamepad returns.
+const FEATURE_REPORT: &[u8] = &[0x03, 0x55];
+
+/// What the passthrough host saw.
+#[derive(Debug, Default)]
+struct PassthroughLog {
+    /// The names of the devices it presented.
+    attached: Vec<String>,
+    /// The input reports delivered.
+    reports: Vec<Vec<u8>>,
+    /// The answers to its feature request.
+    answers: Vec<(u64, FeatureStatus, Vec<u8>)>,
+}
+
+/// An injector presenting passthrough devices, whose applications send an
+/// output report and read a feature report once a device reports.
+#[derive(Debug, Clone, Default)]
+struct PassthroughHost {
+    /// What it saw, shared with the test.
+    log: Arc<Mutex<PassthroughLog>>,
+    /// The output reports and feature requests waiting to be collected.
+    pending: Option<(DeviceId, bool)>,
+}
+
+impl InputInjector for PassthroughHost {
+    fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        if let InputAction::PassthroughReport { device_id, report } = action {
+            let mut log = self.log.lock().unwrap();
+            if log.reports.is_empty() {
+                self.pending = Some((*device_id, true));
+            }
+            log.reports.push(report.clone());
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "passthrough host"
+    }
+
+    fn supports_passthrough(&self) -> bool {
+        true
+    }
+
+    fn attach_passthrough(&mut self, device: &PassthroughDevice) -> Result<(), String> {
+        self.log.lock().unwrap().attached.push(device.name.clone());
+        Ok(())
+    }
+
+    fn passthrough_outputs(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
+        match &mut self.pending {
+            Some((device_id, output @ true)) => {
+                *output = false;
+                vec![(*device_id, PASSTHROUGH_OUTPUT.to_vec())]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn feature_requests(&mut self) -> Vec<FeatureRequest> {
+        match self.pending.take() {
+            Some((device_id, false)) => vec![FeatureRequest {
+                device_id,
+                token: FEATURE_TOKEN,
+                operation: FeatureOperation::Get,
+                report: vec![FEATURE_REPORT[0]],
+            }],
+            other => {
+                self.pending = other;
+                Vec::new()
+            }
+        }
+    }
+
+    fn answer_feature(&mut self, token: u64, status: FeatureStatus, report: &[u8]) {
+        self.log
+            .lock()
+            .unwrap()
+            .answers
+            .push((token, status, report.to_vec()));
+    }
+}
+
+/// Returns the passthrough information of a device with `descriptor`.
+fn passthrough_info(descriptor: &[u8]) -> PassthroughInfo {
+    let rest_reports = ReportDescriptor::parse(descriptor)
+        .map(|parsed| parsed.rest_reports())
+        .unwrap_or_default();
+    PassthroughInfo {
+        bus_type: BusType::USB,
+        vendor_id: 0x1234,
+        product_id: 0x5678,
+        version: 0x0100,
+        report_descriptor: descriptor.to_vec(),
+        rest_reports,
+    }
+}
+
+/// Passes a gamepad and a keyboard through, reports from the gamepad, and
+/// answers the host's feature request, streaming until both directions
+/// have been seen.
+struct PassthroughWatcher {
+    /// Where the input goes.
+    input: InputHandle,
+    /// The output reports the client was asked to write.
+    outputs: Vec<(u32, Vec<u8>)>,
+    /// The frames presented since the feature request was answered.
+    frames_since_answer: Option<usize>,
+    /// The frames presented.
+    frames: usize,
+}
+
+impl FrameSink for PassthroughWatcher {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        if self.frames == INPUT_FRAME {
+            for (slot, name, descriptor) in [
+                (1, "Passthrough pad", PASSTHROUGH_GAMEPAD),
+                (2, "Passthrough keyboard", PASSTHROUGH_KEYBOARD),
+            ] {
+                assert!(self.input.send(UserInput::PassthroughConnected {
+                    slot,
+                    name: name.to_owned(),
+                    info: passthrough_info(descriptor),
+                }));
+            }
+            // Sent before the host accepts the device, the report is held
+            // back until it does.
+            assert!(self.input.send(UserInput::PassthroughReport {
+                slot: 1,
+                report: PASSTHROUGH_REPORT.to_vec(),
+            }));
+        }
+        while let Some(feedback) = self.input.try_passthrough_feedback() {
+            match feedback {
+                PassthroughFeedback::Output { slot, report } => {
+                    self.outputs.push((slot, report));
+                }
+                PassthroughFeedback::FeatureRequest {
+                    request_id, report, ..
+                } => {
+                    assert_eq!(report, [FEATURE_REPORT[0]]);
+                    assert!(self.input.send(UserInput::FeatureResponse {
+                        request_id,
+                        status: FeatureStatus::Ok,
+                        report: FEATURE_REPORT.to_vec(),
+                    }));
+                    self.frames_since_answer = Some(0);
+                }
+            }
+        }
+        if let Some(frames) = &mut self.frames_since_answer {
+            *frames += 1;
+        }
+        if self.frames_since_answer.is_some_and(|frames| frames > 30)
+            || self.frames >= CLIPBOARD_FRAMES
+        {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+}
+
+/// A game controller passed through reaches the host, whose policy refuses
+/// a keyboard; the host's output report and feature request reach the
+/// client, the client's answer reaches the host, and the device returns to
+/// rest when the session ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn passthrough_round_trip() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let injector = PassthroughHost::default();
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(injector.clone()),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let (handle, queue) = input_channel();
+    let mut watcher = PassthroughWatcher {
+        input: handle,
+        outputs: Vec::new(),
+        frames_since_answer: None,
+        frames: 0,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut watcher,
+            Some(queue),
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("the session finishes in time")
+    .unwrap();
+    endpoint.wait_idle().await;
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    assert_eq!(watcher.outputs, [(1, PASSTHROUGH_OUTPUT.to_vec())]);
+    let log = injector.log.lock().unwrap();
+    assert_eq!(log.attached, ["Passthrough pad"]);
+    let rest = passthrough_info(PASSTHROUGH_GAMEPAD).rest_reports;
+    assert_eq!(
+        log.reports,
+        [PASSTHROUGH_REPORT.to_vec(), rest[0].clone()],
+        "the report, then the rest report when the session ends"
+    );
+    assert_eq!(
+        log.answers,
+        [(FEATURE_TOKEN, FeatureStatus::Ok, FEATURE_REPORT.to_vec())]
+    );
 }

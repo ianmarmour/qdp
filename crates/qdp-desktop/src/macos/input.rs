@@ -299,6 +299,11 @@ impl InputInjector for QuartzInjector {
             }
             // The host does not accept touchscreens: macOS has no touch events.
             InputAction::Touch(_) => Err("Quartz events cannot touch".to_owned()),
+            // The host does not accept passthrough devices: macOS creates
+            // virtual HID devices only for entitled apps.
+            InputAction::PassthroughReport { .. } | InputAction::PassthroughRemoved(_) => {
+                Err("Quartz events cannot present HID devices".to_owned())
+            }
             InputAction::Pen(report) => {
                 let position = self.global_position(report.x, report.y);
                 self.position = position;

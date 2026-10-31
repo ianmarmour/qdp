@@ -173,6 +173,7 @@ async fn serve(args: ServeArgs) -> CliResult {
             quantizer: args.quantizer,
             threads: 0,
         },
+        passthrough: args.passthrough,
     });
 
     let endpoint = HostEndpoint::bind(args.listen, identity)

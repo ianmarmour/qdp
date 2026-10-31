@@ -249,6 +249,11 @@ impl Translator {
             InputAction::Touch(_) | InputAction::Pen(_) => {
                 return Err("SendInput cannot touch".to_owned());
             }
+            // The host does not accept passthrough devices: Windows has no
+            // way to create HID devices without a driver.
+            InputAction::PassthroughReport { .. } | InputAction::PassthroughRemoved(_) => {
+                return Err("SendInput cannot present HID devices".to_owned());
+            }
         })
     }
 }

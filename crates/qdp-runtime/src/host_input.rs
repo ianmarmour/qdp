@@ -6,15 +6,17 @@
 //! performs only the differences: keys pressed and released, buttons, motion
 //! and scrolling.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use qdp::input::{InputEvent, total_delta};
 use qdp::message::{
-    DeviceId, DeviceKind, GamepadOutput, GamepadReport, KeyboardInfo, KeyboardLeds, KeyboardReport,
-    MouseReport, PenFlags, PenReport, PointerButtons, PointerKind, PointerReport, TextReport,
-    TouchContact, TouchContactFlags, TouchscreenReport,
+    DeviceId, DeviceKind, FeatureStatus, GamepadOutput, GamepadReport, KeyboardInfo, KeyboardLeds,
+    KeyboardReport, MouseReport, PenFlags, PenReport, PointerButtons, PointerKind, PointerReport,
+    TextReport, TouchContact, TouchContactFlags, TouchscreenReport,
 };
 use tracing::debug;
+
+use crate::host_passthrough::{FeatureRequest, PassthroughDevice};
 
 /// The buttons a pointer or mouse report can hold, in report bit order.
 const BUTTONS: [PointerButton; 5] = [
@@ -139,6 +141,16 @@ pub enum InputAction {
     /// Sets the pen's state: where it is, whether it is in range or touching,
     /// and how it is held. Out of range, it has left the surface.
     Pen(PenReport),
+    /// Delivers an input report of a passthrough device, starting with its
+    /// report ID byte, as the physical device produced it.
+    PassthroughReport {
+        /// The device.
+        device_id: DeviceId,
+        /// The report.
+        report: Vec<u8>,
+    },
+    /// Removes a passthrough device, as when the client detaches it.
+    PassthroughRemoved(DeviceId),
 }
 
 /// Performs input actions on the host's desktop.
@@ -178,6 +190,38 @@ pub trait InputInjector: Send {
     /// accepts pens.
     fn supports_pen(&self) -> bool {
         false
+    }
+
+    /// Returns whether the injector can present passthrough devices to the
+    /// host's applications, on a platform that confines them to the
+    /// session's user or seat (Section 8.2.5).
+    fn supports_passthrough(&self) -> bool {
+        false
+    }
+
+    /// Presents a passthrough device to the host's applications, at rest.
+    fn attach_passthrough(&mut self, device: &PassthroughDevice) -> Result<(), String> {
+        let _ = device;
+        Err("this host cannot present passthrough devices".to_owned())
+    }
+
+    /// Returns the output reports the host's applications sent passthrough
+    /// devices since the last call, in order, each starting with its report
+    /// ID byte.
+    fn passthrough_outputs(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
+        Vec::new()
+    }
+
+    /// Returns the feature report operations the host's applications asked of
+    /// passthrough devices since the last call.
+    fn feature_requests(&mut self) -> Vec<FeatureRequest> {
+        Vec::new()
+    }
+
+    /// Answers a feature report request with the client's outcome: the whole
+    /// report, starting with its report ID byte, for a successful read.
+    fn answer_feature(&mut self, token: u64, status: FeatureStatus, report: &[u8]) {
+        let _ = (token, status, report);
     }
 
     /// Returns whether the injector can present gamepads to the host's
@@ -246,6 +290,14 @@ enum DeviceState {
     Touchscreen(Vec<TouchContact>),
     /// A pen.
     Pen(PenReport),
+    /// A passthrough device, with its input reports at rest and as last
+    /// applied, by report ID.
+    Passthrough {
+        /// The reports with every control at rest.
+        rest: BTreeMap<u8, Vec<u8>>,
+        /// The reports last applied.
+        current: BTreeMap<u8, Vec<u8>>,
+    },
 }
 
 /// The standard devices of one session and their last applied states.
@@ -271,6 +323,22 @@ impl StandardInput {
         };
         self.devices.insert(device_id, state);
         true
+    }
+
+    /// Adds an accepted passthrough device, at rest, with its rest reports,
+    /// each starting with its report ID byte.
+    pub(crate) fn attach_passthrough(&mut self, device_id: DeviceId, rest_reports: &[Vec<u8>]) {
+        let rest: BTreeMap<u8, Vec<u8>> = rest_reports
+            .iter()
+            .filter_map(|report| Some((*report.first()?, report.clone())))
+            .collect();
+        self.devices.insert(
+            device_id,
+            DeviceState::Passthrough {
+                current: rest.clone(),
+                rest,
+            },
+        );
     }
 
     /// Returns the accepted keyboards.
@@ -300,8 +368,12 @@ impl StandardInput {
             return Vec::new();
         };
         let mut actions = release(device_id, &state);
-        if matches!(state, DeviceState::Gamepad(_)) {
-            actions.push(InputAction::GamepadRemoved(device_id));
+        match state {
+            DeviceState::Gamepad(_) => actions.push(InputAction::GamepadRemoved(device_id)),
+            DeviceState::Passthrough { .. } => {
+                actions.push(InputAction::PassthroughRemoved(device_id));
+            }
+            _ => {}
         }
         actions
     }
@@ -428,6 +500,17 @@ impl StandardInput {
                 Ok(_) => {}
                 Err(_) => debug!("malformed pen report skipped"),
             },
+            DeviceState::Passthrough { current, .. } => {
+                let Some(&report_id) = event.data.first() else {
+                    debug!("empty passthrough report skipped");
+                    return actions;
+                };
+                current.insert(report_id, event.data.clone());
+                actions.push(InputAction::PassthroughReport {
+                    device_id: event.device_id,
+                    report: event.data.clone(),
+                });
+            }
         }
         actions
     }
@@ -445,6 +528,9 @@ fn holds(state: &DeviceState) -> bool {
         ]
         .into_iter()
         .any(|flag| report.flags.contains(flag)),
+        DeviceState::Passthrough { rest, current } => current
+            .iter()
+            .any(|(report_id, report)| rest.get(report_id).is_some_and(|rest| rest != report)),
         _ => *state != at_rest(state),
     }
 }
@@ -587,6 +673,20 @@ fn release(device_id: DeviceId, state: &DeviceState) -> Vec<InputAction> {
                 actions.push(InputAction::Pen(pen_at_rest(report)));
             }
         }
+        DeviceState::Passthrough { rest, current } => {
+            // Inject the rest report of every report ID away from rest.
+            actions.extend(
+                current
+                    .iter()
+                    .filter_map(|(report_id, report)| {
+                        rest.get(report_id).filter(|rest| *rest != report)
+                    })
+                    .map(|rest| InputAction::PassthroughReport {
+                        device_id,
+                        report: rest.clone(),
+                    }),
+            );
+        }
         DeviceState::Gamepad(report) => {
             let rest = gamepad_at_rest(report);
             if rest != *report {
@@ -630,6 +730,15 @@ fn at_rest(state: &DeviceState) -> DeviceState {
         DeviceState::Gamepad(report) => DeviceState::Gamepad(gamepad_at_rest(report)),
         DeviceState::Touchscreen(_) => DeviceState::Touchscreen(Vec::new()),
         DeviceState::Pen(report) => DeviceState::Pen(pen_at_rest(report)),
+        DeviceState::Passthrough { rest, current } => DeviceState::Passthrough {
+            rest: rest.clone(),
+            current: current
+                .iter()
+                .map(|(report_id, report)| {
+                    (*report_id, rest.get(report_id).unwrap_or(report).clone())
+                })
+                .collect(),
+        },
     }
 }
 

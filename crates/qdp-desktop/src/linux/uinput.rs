@@ -298,7 +298,9 @@ impl Translator {
             | InputAction::Gamepad { .. }
             | InputAction::GamepadRemoved(_)
             | InputAction::Touch(_)
-            | InputAction::Pen(_) => {
+            | InputAction::Pen(_)
+            | InputAction::PassthroughReport { .. }
+            | InputAction::PassthroughRemoved(_) => {
                 return None;
             }
         };
