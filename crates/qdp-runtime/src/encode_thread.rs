@@ -17,7 +17,7 @@ use tokio::sync::{Notify, oneshot};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::media::{CursorState, FrameSource, changed_blocks};
+use crate::media::{CursorState, FrameSource, WantedDisplay, changed_blocks};
 
 /// The name of the encoder thread, as debuggers and profilers show it.
 const THREAD_NAME: &str = "qdp-encoder";
@@ -37,6 +37,9 @@ pub(crate) struct EncodeJob {
     pub(crate) settings: EncoderSettings,
     /// The quantizer rate control chose for the frame (Section 5.5).
     pub(crate) quantizer: u8,
+    /// The display the client asks the captured monitor to match, which
+    /// the thread asks the source for whenever it changes.
+    pub(crate) display: Option<WantedDisplay>,
 }
 
 /// One frame the encoder produced.
@@ -82,6 +85,7 @@ impl EncoderThread {
     /// hold driver state that must stay on the thread that created it.
     pub(crate) async fn spawn(
         source: Box<dyn FrameSource>,
+        matched: Option<WantedDisplay>,
         settings: EncoderSettings,
         preference: CodecPreference,
     ) -> Result<(Self, String), RuntimeError> {
@@ -102,6 +106,7 @@ impl EncoderThread {
                 };
                 let _ = opened_sender.send(Ok(encoder.description().to_owned()));
                 let opened = OpenEncoder { encoder, settings };
+                let source = MatchingSource { source, matched };
                 run(source, opened, preference, &jobs, &result_sender, &notify);
             })
             .map_err(|error| RuntimeError::Capture(error.to_string()))?;
@@ -160,10 +165,37 @@ struct OpenEncoder {
     settings: EncoderSettings,
 }
 
+/// A source, and the display it was last asked to match.
+struct MatchingSource {
+    /// The source.
+    source: Box<dyn FrameSource>,
+    /// The display it was last asked to match, whether or not it could.
+    matched: Option<WantedDisplay>,
+}
+
+impl MatchingSource {
+    /// Asks the source to match `wanted`, if it was not asked already.
+    fn follow(&mut self, wanted: Option<WantedDisplay>) {
+        if wanted == self.matched {
+            return;
+        }
+        self.matched = wanted;
+        if let Some(wanted) = wanted {
+            if self.source.match_display(&wanted) {
+                info!(
+                    width = wanted.width,
+                    height = wanted.height,
+                    "the captured monitor matches the client's display"
+                );
+            }
+        }
+    }
+}
+
 /// The thread's loop: one result for each job, until the job channel closes or
 /// the result channel is dropped.
 fn run(
-    mut source: Box<dyn FrameSource>,
+    mut source: MatchingSource,
     mut opened: OpenEncoder,
     preference: CodecPreference,
     jobs: &Receiver<EncodeJob>,
@@ -175,6 +207,7 @@ fn run(
     let mut last_capture = None;
     let mut next_input_index = 0;
     while let Ok(job) = jobs.recv() {
+        source.follow(job.display);
         if stream != Some(job.stream_id) {
             // A new stream starts with a key frame, which needs no earlier
             // frame to compare against.
@@ -184,7 +217,7 @@ fn run(
         let grid = BlockGrid::for_monitor(job.settings.width as u32, job.settings.height as u32);
         let captured_at = Instant::now();
         let outputs = encode_one(
-            &mut *source,
+            &mut *source.source,
             &mut opened,
             preference,
             job,
@@ -336,6 +369,7 @@ mod tests {
         };
         let (thread, description) = EncoderThread::spawn(
             Box::new(TestPattern::new(width, height)),
+            None,
             settings,
             CodecPreference::Software,
         )
@@ -354,6 +388,7 @@ mod tests {
             stream_id,
             settings,
             quantizer: settings.quantizer,
+            display: None,
         };
         let jobs = [
             job(KeyFrameRequest::Force, first, settings),

@@ -82,7 +82,7 @@ pub use lock_keys::LockKeys;
 pub use media::{
     CursorShape, CursorState, CursorWarp, DesktopScale, DisplayTiming, FrameInfo, FrameSink,
     FrameSource, PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl,
-    TestPattern, WarpKind, changed_blocks,
+    TestPattern, WantedDisplay, WarpKind, changed_blocks,
 };
 pub use resumption::{DEFAULT_RESUMPTION_LIFETIME, ResumptionSlot};
 
