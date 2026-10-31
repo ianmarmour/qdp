@@ -274,11 +274,9 @@ impl FrameSource for MacScreenCapture {
 
     fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
         let frame = self.latest.wait(TIMEOUT).map_err(RuntimeError::Capture)?;
-        if (frame.width(), frame.height()) != self.size {
-            return Err(RuntimeError::Capture(
-                "the display's size changed".to_owned(),
-            ));
-        }
+        // A display that changes size sends frames of its new size, which
+        // the host follows with a new stream.
+        self.size = (frame.width(), frame.height());
         Ok(frame)
     }
 

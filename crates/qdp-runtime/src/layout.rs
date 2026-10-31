@@ -4,10 +4,10 @@
 //! the video, and the host converts them to its operating system's pixels
 //! (Section 1.5.6).
 
-use qdp::wire::VarInt;
+use qdp::message::CursorWarp;
+use qdp::wire::{SignedVarInt, VarInt};
 
 use crate::host_input::{InputAction, TouchPoint};
-use crate::media::{CursorState, PointerPosition};
 
 /// The smallest monitor side QDP allows (Section 6.3).
 const MIN_SIDE: usize = 16;
@@ -76,14 +76,6 @@ impl VideoLayout {
         rescale(y, self.capture.1, self.video.1)
     }
 
-    /// Converts a position in the capture's pixels to the host desktop's.
-    pub(crate) fn position_in_video(&self, (x, y): (i32, i32)) -> (i32, i32) {
-        (
-            rescale(x, self.video.0, self.capture.0),
-            rescale(y, self.video.1, self.capture.1),
-        )
-    }
-
     /// Returns the Scale to send with a cursor image drawn for `scale`, so
     /// that the client draws it at its size relative to the captured monitor
     /// rather than to the smaller video (Section 9.2).
@@ -96,18 +88,20 @@ impl VideoLayout {
             .unwrap_or(VarInt::MAX)
     }
 
-    /// Returns a captured pointer with its position in the host desktop.
-    pub(crate) fn cursor_in_video(&self, state: &CursorState) -> CursorState {
-        let position = match state.position {
-            PointerPosition::At(x, y) => {
-                let (x, y) = self.position_in_video((x, y));
-                PointerPosition::At(x, y)
-            }
-            other => other,
+    /// Returns a warp to a position in the capture's pixels, in 1/256
+    /// pixel, with its position in the host desktop's.
+    pub(crate) fn warp_in_video(&self, warp: CursorWarp) -> CursorWarp {
+        let convert = |value: SignedVarInt, to: usize, from: usize| {
+            let scaled = i128::from(value.into_inner()) * to as i128 / from.max(1) as i128;
+            i64::try_from(scaled)
+                .ok()
+                .and_then(|scaled| SignedVarInt::new(scaled).ok())
+                .unwrap_or(value)
         };
-        CursorState {
-            position,
-            shape: state.shape.clone(),
+        CursorWarp {
+            x: convert(warp.x, self.video.0, self.capture.0),
+            y: convert(warp.y, self.video.1, self.capture.1),
+            ..warp
         }
     }
 
@@ -151,6 +145,8 @@ fn rescale(value: i32, to: usize, from: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qdp::message::{WarpFlags, WarpId};
+
     use crate::host_input::TouchPhase;
 
     /// The video fits every bound, keeps its shape and is never enlarged.
@@ -198,21 +194,26 @@ mod tests {
             layout.action_in_capture(InputAction::KeyDown(4)),
             InputAction::KeyDown(4)
         );
-        assert_eq!(layout.position_in_video((1000, 2000)), (500, 1000));
         assert_eq!(
             layout.cursor_scale(VarInt::from_u32(100)),
             VarInt::from_u32(200)
         );
-        let pointer = CursorState {
-            position: PointerPosition::At(640, 360),
-            shape: None,
+        let warp = CursorWarp {
+            warp_id: WarpId(VarInt::from_u32(4)),
+            flags: WarpFlags::FOLLOW,
+            x: SignedVarInt::new(640 * 256).unwrap(),
+            y: SignedVarInt::new(-360 * 256).unwrap(),
         };
+        let converted = layout.warp_in_video(warp);
         assert_eq!(
-            layout.cursor_in_video(&pointer).position,
-            PointerPosition::At(320, 180)
+            (converted.x.into_inner(), converted.y.into_inner()),
+            (320 * 256, -180 * 256)
+        );
+        assert_eq!(
+            (converted.warp_id, converted.flags),
+            (warp.warp_id, warp.flags)
         );
         let unscaled = VideoLayout::fit((1920, 1080), &[]);
-        assert_eq!(unscaled.position_in_video((7, 9)), (7, 9));
         assert_eq!(
             unscaled.cursor_scale(VarInt::from_u32(150)),
             VarInt::from_u32(150)

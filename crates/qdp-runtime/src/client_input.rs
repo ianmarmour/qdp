@@ -16,6 +16,7 @@ use qdp::message::{
 use qdp::wire::VarInt;
 use tokio::sync::Notify;
 
+use crate::client::DisplaySize;
 use crate::client_passthrough::PassthroughDevices;
 use crate::client_touch::Touchscreen;
 use crate::host_input::{PointerButton, TouchPhase};
@@ -225,6 +226,9 @@ pub enum UserInput {
     },
     /// Everything held is released, as when the window loses focus.
     ReleaseAll,
+    /// The display the session is shown on changed size, refresh rate or
+    /// scale, as when the user resizes the window (Section 6.2).
+    Display(DisplaySize),
 }
 
 /// A gamepad's rumble and LED, from the host's applications (Section 8.4.7).
@@ -860,7 +864,8 @@ impl ClientDevices {
             | UserInput::TouchpadDisconnected { .. }
             | UserInput::PassthroughConnected { .. }
             | UserInput::PassthroughDisconnected { .. }
-            | UserInput::FeatureResponse { .. } => Vec::new(),
+            | UserInput::FeatureResponse { .. }
+            | UserInput::Display(_) => Vec::new(),
         }
     }
 

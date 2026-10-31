@@ -78,6 +78,10 @@ struct Collector {
     warps: Vec<CursorWarp>,
     /// The size the host scales the pattern to, if it does.
     scaled: Option<(usize, usize)>,
+    /// The number and size of each presented frame.
+    sizes: Vec<(u64, (usize, usize))>,
+    /// The display to change to after the given number of frames, if any.
+    resize: Option<(usize, DisplaySize)>,
 }
 
 /// Where the cursor source's pointer is, in pixels.
@@ -292,6 +296,12 @@ impl FrameSink for Collector {
         let expected = TestPattern::frame(WIDTH, HEIGHT, number - 1).scaled(width, height);
         let psnr = frame.luma_psnr(&expected).unwrap_or(0.0);
         self.frames.push((number, psnr, info));
+        self.sizes.push((number, (frame.width(), frame.height())));
+        if let (Some((after, display)), Some(input)) = (self.resize, &self.input) {
+            if self.frames.len() == after {
+                assert!(input.send(UserInput::Display(display)));
+            }
+        }
         if self.frames.len() == INPUT_FRAME {
             if let Some(input) = &self.input {
                 for action in test_input() {
@@ -622,6 +632,149 @@ async fn video_scales_to_the_display() {
         x: 20 * 256,
         y: 40 * 256
     }));
+}
+
+/// A client whose display shrinks during the session gets a new stream at
+/// the new size, starting again from Frame Number 1, without a decoding
+/// failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn display_changes_during_the_session() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    let half = DisplaySize {
+        width: WIDTH as u32 / 2,
+        height: HEIGHT as u32 / 2,
+        ..options.display
+    };
+    let (handle, queue) = input_channel();
+    let mut collector = Collector {
+        input: Some(handle),
+        resize: Some((INPUT_FRAME, half)),
+        ..Collector::default()
+    };
+    let summary = tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut collector,
+            Some(queue),
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("streaming finishes in time")
+    .unwrap();
+    assert_eq!(summary.decode_failures, 0);
+    endpoint.wait_idle().await;
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+
+    let full = (WIDTH, HEIGHT);
+    let smaller = (WIDTH / 2, HEIGHT / 2);
+    let changed = collector
+        .sizes
+        .iter()
+        .position(|(_, size)| *size == smaller)
+        .expect("frames of the new size arrive");
+    assert!(changed >= INPUT_FRAME);
+    assert!(
+        collector.sizes[..changed]
+            .iter()
+            .all(|(_, size)| *size == full)
+    );
+    assert!(
+        collector.sizes[changed..]
+            .iter()
+            .all(|(_, size)| *size == smaller)
+    );
+    let numbers: Vec<u64> = collector.sizes[changed..]
+        .iter()
+        .map(|(number, _)| *number)
+        .collect();
+    assert_eq!(numbers, (1..=numbers.len() as u64).collect::<Vec<_>>());
+}
+
+/// A test pattern whose monitor shrinks to half its size after a few
+/// captures, as when a local user changes the resolution.
+struct ShrinkingPattern {
+    /// The captures so far.
+    captures: usize,
+}
+
+impl FrameSource for ShrinkingPattern {
+    fn size(&self) -> (usize, usize) {
+        if self.captures < INPUT_FRAME {
+            (WIDTH, HEIGHT)
+        } else {
+            (WIDTH / 2, HEIGHT / 2)
+        }
+    }
+
+    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
+        let (width, height) = self.size();
+        self.captures += 1;
+        Ok(TestPattern::frame(width, height, self.captures as u64))
+    }
+}
+
+/// When the host's monitor changes size, the host follows it on its own
+/// with a new stream of the new size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_follows_its_monitor() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let (address, pin, host) = start_host(
+        authenticator,
+        Box::new(ShrinkingPattern { captures: 0 }),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
+    let credentials = ClientCredentials::Token(TOKEN.to_vec());
+    let collector = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials, None))
+        .await
+        .expect("streaming finishes in time")
+        .unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    let smaller = (WIDTH / 2, HEIGHT / 2);
+    let changed = collector
+        .sizes
+        .iter()
+        .position(|(_, size)| *size == smaller)
+        .expect("frames of the new size arrive");
+    assert!(changed > 0);
+    assert_eq!(collector.sizes[changed].0, 1);
+    assert!(
+        collector.sizes[changed..]
+            .iter()
+            .all(|(_, size)| *size == smaller)
+    );
 }
 
 /// A pointer the host captures apart from its frames reaches the client as

@@ -7,13 +7,12 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use qdp::input::{DeviceClass, InputSender};
 use qdp::message::{
-    Av1Profiles, Capability, ClientHello, ClientMonitor, ClientMonitorFlags, ClientMonitorId,
-    ControlMessage, CursorImage, Datagram, DatagramPayload, DeviceAttach, DeviceDetach,
-    DeviceFeatures, DeviceId, DeviceKind, DeviceOutput, DeviceStatusCode, DisplayConfig,
-    DisplayRequest, DisplayRequestId, FeatureStatus, FeedbackRecord, FragmentFlags, GamepadOutput,
-    HidFeatureRequest, HidFeatureResponse, InputClasses, KeyboardInfo, KeyframeRequest,
-    MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader, StreamId, VideoCodec,
-    VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer, WarpFlags,
+    Av1Profiles, Capability, ClientHello, ControlMessage, CursorImage, Datagram, DatagramPayload,
+    DeviceAttach, DeviceDetach, DeviceFeatures, DeviceId, DeviceKind, DeviceOutput,
+    DeviceStatusCode, DisplayConfig, DisplayConfigId, FeatureStatus, FeedbackRecord, FragmentFlags,
+    GamepadOutput, HidFeatureRequest, HidFeatureResponse, InputClasses, KeyboardInfo,
+    KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader, StreamId,
+    VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer, WarpFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, Negotiated};
@@ -29,6 +28,7 @@ use tracing::{debug, info, warn};
 use crate::audio::{ClientAudio, ClientAudioStreams};
 use crate::auth::ClientAuthExchange;
 use crate::client_cursor::{ClientCursor, CursorChange};
+use crate::client_display::DisplayRequests;
 use crate::client_input::{
     ClientDevices, GamepadFeedback, InputQueue, KEYBOARD_ID, MOUSE_ID, PEN_ID, POINTER_ID,
     PassthroughFeedback, TEXT_ID, TOUCHSCREEN_ID, UserInput,
@@ -41,9 +41,6 @@ use crate::clipboard::{
 use crate::media::{CursorWarp, FrameInfo, FrameSink, SinkControl, WarpKind};
 use crate::stream_format::StreamFormat;
 use crate::{ClientCredentials, RuntimeError, close_on_error};
-
-/// The client's identifier for its one display area.
-const DISPLAY_AREA_ID: ClientMonitorId = ClientMonitorId(VarInt::from_u32(1));
 
 /// The largest frame the client's AV1 capability advertises.
 const MAX_FRAME_DIMENSION: u32 = 8192;
@@ -214,26 +211,6 @@ fn client_hello(
     hello
 }
 
-/// Returns the client's display request.
-fn display_request(display: DisplaySize) -> DisplayRequest {
-    DisplayRequest {
-        request_id: DisplayRequestId(VarInt::from_u32(1)),
-        monitors: vec![ClientMonitor {
-            id: DISPLAY_AREA_ID,
-            flags: ClientMonitorFlags::PRIMARY,
-            x: SignedVarInt::ZERO,
-            y: SignedVarInt::ZERO,
-            width: VarInt::from_u32(display.width),
-            height: VarInt::from_u32(display.height),
-            refresh_rate: VarInt::from_u32(display.refresh_millihertz),
-            scale: VarInt::from_u32(display.scale_percent),
-            physical_width: VarInt::ZERO,
-            physical_height: VarInt::ZERO,
-            peak_luminance: VarInt::ZERO,
-        }],
-    }
-}
-
 /// One video stream the client receives.
 struct ReceivedStream {
     /// Reassembly, decode ordering and feedback.
@@ -244,6 +221,9 @@ struct ReceivedStream {
     size: (usize, usize),
     /// The format its key frames are checked against.
     format: StreamFormat,
+    /// The newest `DISPLAY_CONFIG` that defines the stream: once its frames
+    /// are shown, the user's positions use that configuration's layout.
+    config_id: DisplayConfigId,
 }
 
 /// Datagrams for streams whose `DISPLAY_CONFIG` has not arrived (Section 3.7.3).
@@ -321,6 +301,8 @@ struct ActiveClient<'a> {
     rumbling: HashMap<DeviceId, Instant>,
     /// The output reports arriving for passthrough devices.
     hid_outputs: HidOutputs,
+    /// The display the session is shown on, and the requests describing it.
+    display: DisplayRequests,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
@@ -363,6 +345,7 @@ async fn run_session(
     let mut auth = ClientAuthExchange::new(options.credentials.clone(), binding);
     let mut display_config = None;
     let mut early_messages = Vec::new();
+    let (display, first_request) = DisplayRequests::start(options.display, Instant::now());
     loop {
         match driver.next_event().await? {
             ClientEvent::HostHello(hello) => {
@@ -378,9 +361,7 @@ async fn run_session(
                 // A failure closes the connection with QDP_AUTH_FAILED.
                 auth.finish(&result)?;
                 let session = driver.session();
-                session.send(&ControlMessage::DisplayRequest(display_request(
-                    options.display,
-                )))?;
+                session.send(&ControlMessage::DisplayRequest(first_request.clone()))?;
                 for (device_id, kind, name) in STANDARD_DEVICES {
                     if !supports_kind(session.negotiated(), kind) {
                         continue;
@@ -439,6 +420,7 @@ async fn run_session(
         cursor: ClientCursor::default(),
         monitor_origin: (0.0, 0.0),
         clipboard,
+        display,
     };
     if let Some(config) = display_config {
         active.configure(&config)?;
@@ -713,7 +695,6 @@ impl ActiveClient<'_> {
 
     /// Replaces the video streams with those of `config` (Section 6.3.1).
     fn configure(&mut self, config: &DisplayConfig) -> Result<(), RuntimeError> {
-        self.input.set_display_config(config.config_id);
         if let Some(monitor) = config.monitors.first() {
             let coordinate =
                 |value: SignedVarInt| i32::try_from(value.into_inner()).unwrap_or_default();
@@ -725,14 +706,17 @@ impl ActiveClient<'_> {
             );
         }
         let mut streams = HashMap::new();
+        let mut new_streams = false;
         for stream in &config.streams {
             if stream.layer != VideoLayer::Motion {
                 continue;
             }
-            if let Some(existing) = self.streams.remove(&stream.stream_id) {
+            if let Some(mut existing) = self.streams.remove(&stream.stream_id) {
+                existing.config_id = config.config_id;
                 streams.insert(stream.stream_id, existing);
                 continue;
             }
+            new_streams = true;
             let Some(monitor) = config
                 .monitors
                 .iter()
@@ -763,10 +747,16 @@ impl ActiveClient<'_> {
                         monitor.height.into_inner() as usize,
                     ),
                     format: StreamFormat::new(*stream, MAX_LEVEL),
+                    config_id: config.config_id,
                 },
             );
         }
         self.streams = streams;
+        // The user points at the picture shown, which changes only once a
+        // new stream's first frame is (Section 8.3).
+        if !new_streams {
+            self.input.set_display_config(config.config_id);
+        }
         for datagram in self.early.take() {
             self.handle_datagram(datagram)?;
         }
@@ -783,6 +773,7 @@ impl ActiveClient<'_> {
                 .filter_map(|stream| stream.receiver.poll_timeout(smoothed_rtt))
                 .chain(Some(self.sync.next_ping_at()))
                 .chain(self.input.poll_timeout(smoothed_rtt))
+                .chain(self.display.poll_timeout())
                 .chain(self.clipboard.as_ref().map(ClipboardLink::poll_timeout))
                 .chain(self.rumbling.values().map(|last| *last + RUMBLE_TIMEOUT))
                 .min();
@@ -818,6 +809,11 @@ impl ActiveClient<'_> {
             }
             self.stop_stale_rumble(now);
             self.send_input(smoothed_rtt, now)?;
+            if let Some(request) = self.display.poll_request(now) {
+                self.driver
+                    .session()
+                    .send(&ControlMessage::DisplayRequest(request))?;
+            }
         }
     }
 
@@ -903,6 +899,7 @@ impl ActiveClient<'_> {
                                 .send(&ControlMessage::DeviceDetach(DeviceDetach { device_id }))?;
                         }
                     }
+                    UserInput::Display(display) => self.display.display_changed(display),
                     UserInput::FeatureResponse {
                         request_id,
                         status,
@@ -1016,6 +1013,7 @@ impl ActiveClient<'_> {
                         };
                         self.summary.frames_presented += 1;
                         let control = self.sink.present(&picture, info);
+                        self.input.set_display_config(stream.config_id);
                         stream
                             .receiver
                             .frame_presented(frame.frame_number, Some(Instant::now()));

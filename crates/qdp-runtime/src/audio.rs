@@ -25,6 +25,7 @@ use tracing::{debug, warn};
 
 use crate::RuntimeError;
 use crate::audio_receiver::AudioReceiver;
+use crate::stream_ids::StreamIds;
 
 /// The sample rate of every stream and device: Opus requires 48 kHz, and
 /// PCM allows it (Section 7.3).
@@ -57,9 +58,6 @@ const CAPTURE_WAIT: Duration = Duration::from_millis(100);
 /// The loss the microphone's forward error correction is tuned for, in
 /// percent: the client has no loss reports for its own stream.
 const CAPTURE_EXPECTED_LOSS: u8 = 10;
-
-/// The first Stream ID of audio streams; video uses the lower ones.
-const FIRST_AUDIO_STREAM_ID: u64 = 16;
 
 /// The names of the audio threads, as debuggers and profilers show them.
 const SENDER_THREAD: &str = "qdp-audio-send";
@@ -604,8 +602,6 @@ pub(crate) struct HostAudioStreams {
     capture: Option<AudioPlayer>,
     /// The Config ID of the last `AUDIO_CONFIG`.
     config_id: u64,
-    /// The Stream ID of the last stream defined.
-    last_stream_id: u64,
     /// Whether the session is active, so that packets may be sent.
     active: SessionActive,
 }
@@ -618,7 +614,6 @@ impl HostAudioStreams {
             playback: None,
             capture: None,
             config_id: 0,
-            last_stream_id: FIRST_AUDIO_STREAM_ID - 1,
             active: SessionActive::default(),
         }
     }
@@ -630,22 +625,17 @@ impl HostAudioStreams {
         self.active.activate();
     }
 
-    /// Returns the next Stream ID: any change of parameters needs a new one
-    /// (Section 7.3).
-    fn next_stream_id(&mut self) -> StreamId {
-        self.last_stream_id += 1;
-        StreamId(VarInt::new(self.last_stream_id).unwrap_or(VarInt::MAX))
-    }
-
     /// Answers an `AUDIO_REQUEST`: stops the current streams, defines new ones
-    /// the client asked for and both endpoints can carry, starts them, and
-    /// returns the `AUDIO_CONFIG` that describes them.
+    /// the client asked for and both endpoints can carry, with new IDs from
+    /// `stream_ids`, starts them, and returns the `AUDIO_CONFIG` that
+    /// describes them.
     pub(crate) fn configure(
         &mut self,
         request: &AudioRequest,
         negotiated: &Negotiated,
         connection: &quinn::Connection,
         clock: SessionClock,
+        stream_ids: &mut StreamIds,
     ) -> Result<AudioConfig, RuntimeError> {
         if let Some(desktop) = self.playback.take().and_then(AudioSender::stop) {
             self.devices.desktop = Some(desktop);
@@ -674,7 +664,7 @@ impl HostAudioStreams {
                 .flatten();
             match format {
                 Some(format) => {
-                    let stream_id = self.next_stream_id();
+                    let stream_id = stream_ids.next();
                     let kind = (AudioContent::General, PacketLimit::Path);
                     let sender = AudioSender::spawn(
                         desktop,
@@ -702,7 +692,7 @@ impl HostAudioStreams {
                 .flatten();
             match format {
                 Some(format) => {
-                    let stream_id = self.next_stream_id();
+                    let stream_id = stream_ids.next();
                     self.capture = Some(AudioPlayer::spawn(microphone, stream_id, format)?);
                     streams.push(stream_config(stream_id, AudioDirection::Capture, format));
                 }

@@ -97,7 +97,8 @@ pub trait FrameSource: Send {
     /// Returns the width and height of the frames, in pixels.
     fn size(&self) -> (usize, usize);
 
-    /// Returns the current frame.
+    /// Returns the current frame. When the monitor changes size, the frames
+    /// take the new size, and [`FrameSource::size`] returns it from then on.
     fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError>;
 
     /// Returns the pointer as of the last capture, for sources that capture
