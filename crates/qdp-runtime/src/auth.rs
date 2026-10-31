@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use qdp::auth::precis::prepare_username;
 use qdp::auth::scram::{
     ChannelBinding, ClientFirst, ScramClient, ScramClientFinal, ScramCredentials, ScramServer,
 };
@@ -18,8 +19,16 @@ const NONCE_LENGTH: usize = 18;
 /// The length of the secret from which credentials for unknown users derive.
 const HOST_SECRET_LENGTH: usize = 32;
 
-/// The iteration count of the stand-in credentials for unknown users.
-const UNKNOWN_USER_ITERATIONS: u32 = 600_000;
+/// The PBKDF2 iteration count of credentials derived from passwords, which
+/// OWASP recommends for PBKDF2-HMAC-SHA256.
+const PASSWORD_ITERATIONS: u32 = 600_000;
+
+/// The iteration count of the stand-in credentials for unknown users, the same
+/// as for known users so that the two cannot be told apart.
+const UNKNOWN_USER_ITERATIONS: u32 = PASSWORD_ITERATIONS;
+
+/// The length of a random salt.
+const SALT_LENGTH: usize = 16;
 
 /// Returns `length` bytes from the system's secure random number generator.
 fn random_bytes<const LENGTH: usize>() -> Result<[u8; LENGTH], RuntimeError> {
@@ -66,9 +75,21 @@ impl HostAuthenticator {
         self.tokens.push(token);
     }
 
-    /// Accepts the user `username` with SCRAM-SHA-256-PLUS.
+    /// Accepts the user `username` with SCRAM-SHA-256-PLUS. The name must already
+    /// be prepared with RFC 8265, as [`HostAuthenticator::add_password`] does.
     pub fn add_user(&mut self, username: String, credentials: ScramCredentials) {
         self.users.insert(username, credentials);
+    }
+
+    /// Accepts `username` with `password` over SCRAM-SHA-256-PLUS, deriving the
+    /// stored credentials with a random salt. Only the credentials are kept, not
+    /// the password.
+    pub fn add_password(&mut self, username: &str, password: &str) -> Result<(), RuntimeError> {
+        let username = prepare_username(username).map_err(|_| RuntimeError::InvalidUsername)?;
+        let salt = random_bytes::<SALT_LENGTH>()?.to_vec();
+        let credentials = ScramCredentials::derive(password, salt, PASSWORD_ITERATIONS)?;
+        self.users.insert(username, credentials);
+        Ok(())
     }
 
     /// Returns the methods to offer, in order of preference.

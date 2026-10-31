@@ -318,11 +318,11 @@ impl ActiveClient<'_> {
                 .filter_map(|stream| stream.receiver.poll_timeout(smoothed_rtt))
                 .chain(Some(self.sync.next_ping_at()))
                 .min();
-            match self.driver.next_input(deadline).await {
+            match self.driver.next_input(deadline, None).await {
                 Ok(DriverInput::Event(ClientEvent::Message(ControlMessage::DisplayConfig(
                     config,
                 )))) => self.configure(&config)?,
-                Ok(DriverInput::Event(_) | DriverInput::Deadline) => {}
+                Ok(DriverInput::Event(_) | DriverInput::Deadline | DriverInput::Wake) => {}
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(datagram)?,
                 Err(error) if crate::is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),

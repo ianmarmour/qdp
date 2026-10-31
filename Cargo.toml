@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/qdp", "crates/qdp-codec", "crates/qdp-quic", "crates/qdp-runtime"]
+members = [
+    "crates/qdp",
+    "crates/qdp-cli",
+    "crates/qdp-codec",
+    "crates/qdp-quic",
+    "crates/qdp-runtime",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +21,7 @@ libc = { version = "0.2.172", default-features = false }
 qdp = { path = "crates/qdp" }
 qdp-codec = { path = "crates/qdp-codec" }
 qdp-quic = { path = "crates/qdp-quic" }
+qdp-runtime = { path = "crates/qdp-runtime" }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rav1d = { version = "1.1.0", default-features = false, features = ["asm", "bitdepth_8", "bitdepth_16"] }
 rav1e = { version = "0.8.1", default-features = false, features = ["asm", "threading"] }
@@ -24,6 +31,7 @@ rustls = { version = "0.23.31", default-features = false, features = ["ring", "s
 thiserror = { version = "2.0.17", default-features = false }
 tokio = { version = "1.47", default-features = false }
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["ansi", "fmt", "std"] }
 unicode-normalization = { version = "0.1.24", default-features = false }
 
 [workspace.lints.rust]

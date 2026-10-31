@@ -84,6 +84,31 @@ impl HostIdentity {
         KeyPin::of_certificate(certificate)
     }
 
+    /// Creates an identity from a DER-encoded certificate and a DER-encoded
+    /// PKCS #8 private key, as [`HostIdentity::to_der`] returns them.
+    pub fn from_der(certificate: Vec<u8>, private_key: Vec<u8>) -> Result<Self, TransportError> {
+        let identity = Self {
+            certificate_chain: vec![CertificateDer::from(certificate)],
+            private_key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key)),
+        };
+        // Parsing the pin checks that the certificate is well formed.
+        identity.key_pin()?;
+        Ok(identity)
+    }
+
+    /// Returns the end-entity certificate and the private key, DER-encoded, for
+    /// storing the identity. The key is PKCS #8 for generated identities.
+    pub fn to_der(&self) -> Result<(Vec<u8>, Vec<u8>), TransportError> {
+        let certificate = self
+            .certificate_chain
+            .first()
+            .ok_or(TransportError::Config("the certificate chain is empty"))?;
+        Ok((
+            certificate.as_ref().to_vec(),
+            self.private_key.secret_der().to_vec(),
+        ))
+    }
+
     /// Returns a copy of the identity, for building more than one TLS
     /// configuration.
     pub fn clone_key(&self) -> Self {
@@ -110,5 +135,15 @@ mod tests {
             format!("{:?}", KeyPin([0xab; 32])).len(),
             "KeyPin()".len() + 64
         );
+    }
+
+    /// An identity survives storage as DER.
+    #[test]
+    fn der_round_trip() {
+        let identity = HostIdentity::generate_self_signed(vec!["host".to_owned()]).unwrap();
+        let (certificate, key) = identity.to_der().unwrap();
+        let restored = HostIdentity::from_der(certificate, key).unwrap();
+        assert_eq!(restored.key_pin().unwrap(), identity.key_pin().unwrap());
+        assert!(HostIdentity::from_der(vec![1, 2, 3], vec![4]).is_err());
     }
 }

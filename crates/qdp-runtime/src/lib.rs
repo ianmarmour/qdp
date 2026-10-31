@@ -17,6 +17,7 @@
 
 mod auth;
 mod client;
+mod encode_thread;
 mod host;
 mod media;
 
@@ -59,6 +60,9 @@ pub enum RuntimeError {
     /// The host rejected the client's credentials.
     #[error("authentication failed: {0}")]
     AuthenticationFailed(String),
+    /// A user name cannot be prepared with RFC 8265.
+    #[error("the user name contains disallowed characters")]
+    InvalidUsername,
     /// The system's random number generator failed.
     #[error("the random number generator failed")]
     Random,
