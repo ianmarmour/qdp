@@ -13,7 +13,10 @@
 //! - [`message`] holds the typed control messages and datagrams, built on [`wire`].
 //! - [`session`] holds the sans-I/O state machines that run the control stream for
 //!   a client and a host (Section 4).
+//! - [`auth`] implements SCRAM-SHA-256-PLUS for the Auth Data of the session
+//!   (Section 4.4.4).
 
+pub mod auth;
 pub mod message;
 pub mod registry;
 pub mod session;
