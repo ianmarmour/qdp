@@ -42,8 +42,19 @@ const STEP_UP: u8 = 12;
 /// The quantizer steps the quality is raised by at once.
 const STEP_DOWN: u8 = 2;
 
-/// How long after the quality was lowered it may be raised again.
+/// How long after the quality was last lowered, or a reason to lower it
+/// last appeared, it may be raised again.
 const RAISE_DELAY: Duration = Duration::from_millis(500);
+
+/// The shortest time between two lowerings of the quality. The reasons to
+/// lower it arrive for several frames before a lower quality can take
+/// effect, and lower it once rather than once each.
+const LOWER_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How far above the configured quantizer the quality may be lowered.
+/// Beyond it the host skips frames rather than send pictures too degraded
+/// to read.
+const MAX_RISE: u8 = 60;
 
 /// The shortest time between two raises of the quality.
 const RAISE_INTERVAL: Duration = Duration::from_millis(100);
@@ -57,6 +68,9 @@ pub(crate) struct RateControl {
     quantizer: u8,
     /// When the quality was last lowered.
     lowered_at: Option<Instant>,
+    /// When a reason to lower the quality last appeared, whether or not it
+    /// was lowered.
+    pressed_at: Option<Instant>,
     /// When the quality was last raised.
     raised_at: Option<Instant>,
     /// How many frames in a row showed a queue.
@@ -70,6 +84,7 @@ impl RateControl {
             best,
             quantizer: best,
             lowered_at: None,
+            pressed_at: None,
             raised_at: None,
             queued_frames: 0,
         }
@@ -100,8 +115,8 @@ impl RateControl {
     }
 
     /// Notes that a frame of `bytes` bytes was sent on `path`, one frame
-    /// interval after the last. Key frames are larger by nature and only
-    /// ever lower the quality.
+    /// interval after the last. Key frames are larger by nature, and
+    /// neither lower nor raise the quality.
     pub(crate) fn frame_sent(
         &mut self,
         bytes: usize,
@@ -110,34 +125,42 @@ impl RateControl {
         frame_interval: Duration,
         now: Instant,
     ) {
+        if key_frame {
+            return;
+        }
         let Some(share) = transmission_share(bytes, path, frame_interval) else {
             return;
         };
         if share > HIGH_SHARE {
             self.lower(now);
-        } else if share < LOW_SHARE && !key_frame {
+        } else if share < LOW_SHARE {
             self.raise(now);
         }
     }
 
-    /// Lowers the quality, down to the largest quantizer.
+    /// Lowers the quality, at most once every [`LOWER_INTERVAL`] and down
+    /// to [`MAX_RISE`] above the best.
     fn lower(&mut self, now: Instant) {
-        self.lowered_at = Some(now);
-        let quantizer = self.quantizer.saturating_add(STEP_UP);
+        self.pressed_at = Some(now);
+        if !settled(self.lowered_at, LOWER_INTERVAL, now) {
+            return;
+        }
+        let worst = self.best.saturating_add(MAX_RISE);
+        let quantizer = self.quantizer.saturating_add(STEP_UP).min(worst);
         if quantizer != self.quantizer {
+            self.lowered_at = Some(now);
             debug!(quantizer, "video quality lowered");
             self.quantizer = quantizer;
         }
     }
 
-    /// Raises the quality toward the best, if it was not lowered recently.
+    /// Raises the quality toward the best, if there was no reason to lower
+    /// it recently.
     fn raise(&mut self, now: Instant) {
-        let settled = |since: Option<Instant>, wait: Duration| {
-            since.is_none_or(|since| now.saturating_duration_since(since) >= wait)
-        };
         if self.quantizer == self.best
-            || !settled(self.lowered_at, RAISE_DELAY)
-            || !settled(self.raised_at, RAISE_INTERVAL)
+            || !settled(self.lowered_at, RAISE_DELAY, now)
+            || !settled(self.pressed_at, RAISE_DELAY, now)
+            || !settled(self.raised_at, RAISE_INTERVAL, now)
         {
             return;
         }
@@ -147,14 +170,23 @@ impl RateControl {
     }
 }
 
+/// Returns whether at least `wait` has passed since `since`, at `now`, or
+/// nothing happened at all.
+fn settled(since: Option<Instant>, wait: Duration, now: Instant) -> bool {
+    since.is_none_or(|since| now.saturating_duration_since(since) >= wait)
+}
+
 /// Finds the queuing delay frames meet on the path from their `FRAME_TIMING`
-/// records (Section 5.5.3). The client-clock time a frame's last fragment
+/// records (Section 5.5.3). The client-clock time a frame's first fragment
 /// arrived, less the host-clock time it was sent, is the clocks' constant
-/// offset plus the frame's transit time; less the smallest such difference
-/// of the last few seconds, it is the queuing delay.
+/// offset plus the fragment's transit time; less the smallest such
+/// difference of the last few seconds, it is the queuing delay. The first
+/// fragment is the one measured because the others wait behind the
+/// frame's own earlier fragments as they are paced out, which a large frame
+/// would otherwise show as a queue.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct QueueDetector {
-    /// When recent frames' last fragments were sent, on the host clock,
+    /// When recent frames' first fragments were sent, on the host clock,
     /// oldest first. Key frames are left out: they are large by nature.
     sent: VecDeque<(StreamId, FrameNumber, Timestamp)>,
     /// The differences that may yet be the smallest of the window, with
@@ -163,7 +195,7 @@ pub(crate) struct QueueDetector {
 }
 
 impl QueueDetector {
-    /// Notes when a frame's last fragment was sent, on the host clock.
+    /// Notes when a frame's first fragment was sent, on the host clock.
     pub(crate) fn frame_sent(
         &mut self,
         stream_id: StreamId,
@@ -186,7 +218,7 @@ impl QueueDetector {
         let &(_, _, sent) = self.sent.iter().find(|(stream_id, frame_number, _)| {
             (*stream_id, *frame_number) == (record.stream_id, record.frame_number)
         })?;
-        let arrived = i64::try_from(record.last_fragment_time.as_micros()).ok()?;
+        let arrived = i64::try_from(record.first_fragment_time.as_micros()).ok()?;
         let difference = arrived - i64::try_from(sent.as_micros()).ok()?;
         while self
             .smallest
@@ -239,7 +271,8 @@ mod tests {
     }
 
     /// Frames too large for the path, and skipped frames, lower the
-    /// quality at once; small frames raise it slowly back to the best.
+    /// quality, once for a burst of them; small frames raise it slowly back
+    /// to the best, once there has been no reason to lower it for a while.
     #[test]
     fn follows_the_path() {
         let start = Instant::now();
@@ -248,18 +281,26 @@ mod tests {
         let path = path(100_000);
         rate.frame_sent(100_000, false, &path, INTERVAL, start);
         assert_eq!(rate.quantizer(), 100 + STEP_UP);
-        rate.frame_skipped(start);
+        // The frames that follow before the lower quality takes effect
+        // lower it no further.
+        rate.frame_skipped(start + INTERVAL);
+        rate.frame_sent(100_000, false, &path, INTERVAL, start + 2 * INTERVAL);
+        assert_eq!(rate.quantizer(), 100 + STEP_UP);
+        let pressed = start + LOWER_INTERVAL;
+        rate.frame_skipped(pressed);
+        assert_eq!(rate.quantizer(), 100 + 2 * STEP_UP);
+        // Key frames are large by nature, and change nothing.
+        rate.frame_sent(1_000_000, true, &path, INTERVAL, pressed + LOWER_INTERVAL);
         assert_eq!(rate.quantizer(), 100 + 2 * STEP_UP);
 
-        // Small frames raise it only once the lowering has settled.
-        rate.frame_sent(1_000, false, &path, INTERVAL, start + RAISE_DELAY / 2);
+        // Small frames raise it only once the reasons to lower it stopped.
+        rate.frame_sent(1_000, false, &path, INTERVAL, pressed + RAISE_DELAY / 2);
         assert_eq!(rate.quantizer(), 100 + 2 * STEP_UP);
-        let later = start + RAISE_DELAY;
+        let later = pressed + RAISE_DELAY;
         rate.frame_sent(1_000, false, &path, INTERVAL, later);
         assert_eq!(rate.quantizer(), 100 + 2 * STEP_UP - STEP_DOWN);
         rate.frame_sent(1_000, false, &path, INTERVAL, later);
         assert_eq!(rate.quantizer(), 100 + 2 * STEP_UP - STEP_DOWN);
-        // Key frames never raise it.
         rate.frame_sent(1_000, true, &path, INTERVAL, later + RAISE_INTERVAL);
         assert_eq!(rate.quantizer(), 100 + 2 * STEP_UP - STEP_DOWN);
 
@@ -271,15 +312,28 @@ mod tests {
         assert_eq!(rate.quantizer(), 100);
     }
 
-    /// Returns the timing record of frame `number` of stream 1, whose last
-    /// fragment arrived at `arrived` microseconds on the client clock.
+    /// The quality is lowered no further than a fixed distance from the
+    /// best.
+    #[test]
+    fn lowers_within_bounds() {
+        let start = Instant::now();
+        let mut rate = RateControl::new(100);
+        for step in 0..20 {
+            rate.frame_skipped(start + LOWER_INTERVAL * step);
+        }
+        assert_eq!(rate.quantizer(), 100 + MAX_RISE);
+    }
+
+    /// Returns the timing record of frame `number` of stream 1, whose first
+    /// fragment arrived at `arrived` microseconds on the client clock, and
+    /// its last 10 ms later, as a large frame's does.
     fn timing(number: u32, arrived: u32) -> FrameTimingRecord {
         let timestamp = |micros: u32| Timestamp(VarInt::from_u32(micros));
         FrameTimingRecord {
             stream_id: StreamId(VarInt::from_u32(1)),
             frame_number: FrameNumber(VarInt::from_u32(number)),
             first_fragment_time: timestamp(arrived),
-            last_fragment_time: timestamp(arrived),
+            last_fragment_time: timestamp(arrived + 10_000),
             decoded_time: timestamp(0),
             presented_time: timestamp(0),
         }
@@ -349,7 +403,7 @@ mod tests {
         assert_eq!(rate.quantizer(), 250);
         rate.frame_skipped(start);
         assert_eq!(rate.quantizer(), u8::MAX);
-        rate.frame_skipped(start);
+        rate.frame_skipped(start + LOWER_INTERVAL);
         assert_eq!(rate.quantizer(), u8::MAX);
     }
 }
