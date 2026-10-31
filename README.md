@@ -61,8 +61,12 @@ distributions install with Mesa (`mesa-va-drivers`) or Intel's media driver
 `VAEntrypointEncSlice` when hardware encoding is available. The host logs which
 encoder it uses, and `--encoder software` or `--encoder hardware` forces one.
 
-For now the host streams a test pattern. Screen capture, input and hardware
-decoding come next. Run `qdp help` for every option, and set `QDP_LOG=debug`
+Clients decode on the GPU where they can: on Macs with hardware AV1 decoding
+(Apple M3 and newer) through VideoToolbox, falling back to software decoding
+elsewhere or if the hardware cannot handle a stream. `--decoder software` or
+`--decoder hardware` forces one.
+
+For now the host streams a test pattern. Screen capture and input come next. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail.
 
 ## Crates

@@ -18,7 +18,10 @@ use rav1d::src::lib::{
     dav1d_open, dav1d_picture_unref, dav1d_send_data,
 };
 
-use crate::{CodecError, Yuv420Frame};
+use crate::{CodecError, VideoDecoder, Yuv420Frame};
+
+/// How [`Av1Decoder`] describes itself.
+pub(crate) const SOFTWARE_DECODER: &str = "rav1d (software)";
 
 /// The bit depth of the pictures this decoder returns.
 const BIT_DEPTH: i32 = 8;
@@ -129,6 +132,16 @@ impl Av1Decoder {
         // once, here.
         unsafe { dav1d_picture_unref(Some(NonNull::from(&mut picture))) };
         frame
+    }
+}
+
+impl VideoDecoder for Av1Decoder {
+    fn decode(&mut self, temporal_unit: &[u8]) -> Result<Yuv420Frame, CodecError> {
+        Av1Decoder::decode(self, temporal_unit)
+    }
+
+    fn description(&self) -> &str {
+        SOFTWARE_DECODER
     }
 }
 

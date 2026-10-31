@@ -16,7 +16,7 @@ use qdp::session::ClientEvent;
 use qdp::time::{ClockSync, SessionClock, answer_ping};
 use qdp::video::VideoReceiver;
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::Av1Decoder;
+use qdp_codec::{CodecPreference, VideoDecoder, open_decoder};
 use qdp_quic::{ClientDriver, DriverInput, QdpConnection, TransportError};
 use tracing::{debug, info, warn};
 
@@ -65,8 +65,10 @@ pub struct ClientOptions {
     pub credentials: ClientCredentials,
     /// The display the session is shown on.
     pub display: DisplaySize,
-    /// The number of decoder threads, or 0 to choose automatically.
+    /// The number of software decoder threads, or 0 to choose automatically.
     pub decoder_threads: u32,
+    /// Whether to decode in hardware or software.
+    pub decoder: CodecPreference,
 }
 
 /// What happened during one session.
@@ -135,7 +137,7 @@ struct ReceivedStream {
     /// Reassembly, decode ordering and feedback.
     receiver: VideoReceiver,
     /// The decoder.
-    decoder: Av1Decoder,
+    decoder: Box<dyn VideoDecoder>,
     /// The monitor's size, to which decoded frames are cropped.
     size: (usize, usize),
 }
@@ -189,8 +191,10 @@ struct ActiveClient<'a> {
     streams: HashMap<StreamId, ReceivedStream>,
     /// Datagrams for streams not yet defined.
     early: EarlyBuffer,
-    /// The decoder thread count.
+    /// The software decoder thread count.
     decoder_threads: u32,
+    /// Whether to decode in hardware or software.
+    decoder_preference: CodecPreference,
     /// The session's statistics.
     summary: ClientSummary,
 }
@@ -257,6 +261,7 @@ pub async fn run(
         streams: HashMap::new(),
         early: EarlyBuffer::default(),
         decoder_threads: options.decoder_threads,
+        decoder_preference: options.decoder,
         summary: ClientSummary::default(),
     };
     if let Some(config) = display_config {
@@ -284,10 +289,12 @@ impl ActiveClient<'_> {
             else {
                 continue;
             };
+            let decoder = open_decoder(self.decoder_threads, self.decoder_preference)?;
             info!(
                 stream = stream.stream_id.0.into_inner(),
                 width = monitor.width.into_inner(),
                 height = monitor.height.into_inner(),
+                decoder = decoder.description(),
                 "video stream"
             );
             streams.insert(
@@ -299,7 +306,7 @@ impl ActiveClient<'_> {
                         monitor.block_grid(),
                         self.clock,
                     ),
-                    decoder: Av1Decoder::new(self.decoder_threads)?,
+                    decoder,
                     size: (
                         monitor.width.into_inner() as usize,
                         monitor.height.into_inner() as usize,

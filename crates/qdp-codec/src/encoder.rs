@@ -9,14 +9,10 @@ use rav1e::config::{Config, EncoderConfig, SpeedSettings};
 use rav1e::data::{EncoderStatus, FrameType, Rational};
 use rav1e::prelude::{FrameParameters, FrameTypeOverride, SceneDetectionSpeed};
 
-use crate::{CodecError, VideoEncoder, Yuv420Frame, to_qdp_temporal_unit};
+use crate::{CodecError, SequenceHeader, VideoEncoder, Yuv420Frame, to_qdp_temporal_unit};
 
 /// The bit depth of the frames this encoder accepts.
 const BIT_DEPTH: usize = 8;
-
-/// The size of the AV1 configuration record header that precedes the sequence
-/// header OBU in rav1e's container sequence header.
-const AV1C_HEADER_LENGTH: usize = 4;
 
 /// The number of luma samples up to which one tile suffices, with two
 /// recommended (Section 6.4.4).
@@ -93,7 +89,8 @@ pub fn tile_count(width: usize, height: usize) -> usize {
 pub struct Av1Encoder {
     /// The rav1e context.
     context: Context<u8>,
-    /// The sequence header OBU, added to key frames that lack one.
+    /// The sequence header OBU of the first key frame, added to later key
+    /// frames that lack one.
     sequence_header: Vec<u8>,
     /// The frame width.
     width: usize,
@@ -148,14 +145,9 @@ impl Av1Encoder {
             .with_threads(settings.threads)
             .new_context()
             .map_err(|error| CodecError::Encoder(error.to_string()))?;
-        let container_header = context.container_sequence_header();
-        let sequence_header = container_header
-            .get(AV1C_HEADER_LENGTH..)
-            .ok_or(CodecError::Encoder("missing sequence header".to_owned()))?
-            .to_vec();
         Ok(Self {
             context,
-            sequence_header,
+            sequence_header: Vec::new(),
             width: settings.width,
             height: settings.height,
         })
@@ -206,6 +198,16 @@ impl Av1Encoder {
             match self.context.receive_packet() {
                 Ok(packet) => {
                     let is_key_frame = packet.frame_type == FrameType::KEY;
+                    if is_key_frame {
+                        if let Some(header) = SequenceHeader::find(&packet.data)? {
+                            self.sequence_header = header.obu().to_vec();
+                        }
+                        if self.sequence_header.is_empty() {
+                            return Err(CodecError::Encoder(
+                                "a key frame has no sequence header".to_owned(),
+                            ));
+                        }
+                    }
                     let temporal_unit =
                         to_qdp_temporal_unit(&packet.data, is_key_frame, &self.sequence_header)?;
                     frames.push(EncodedFrame {
@@ -241,6 +243,35 @@ impl VideoEncoder for Av1Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sequence header parser builds the same configuration record as
+    /// rav1e does for its own stream.
+    #[test]
+    fn configuration_record_matches_rav1e() {
+        let mut encoder = Av1Encoder::new(EncoderSettings {
+            width: 320,
+            height: 192,
+            frame_rate: 60,
+            speed: FASTEST_SPEED,
+            quantizer: 100,
+            threads: 1,
+        })
+        .unwrap();
+        let key = Av1Encoder::encode(
+            &mut encoder,
+            &Yuv420Frame::black(320, 192),
+            KeyFrameRequest::Force,
+        )
+        .unwrap()
+        .remove(0);
+        let header = SequenceHeader::find(&key.temporal_unit).unwrap().unwrap();
+        assert_eq!((header.max_width, header.max_height), (320, 192));
+        // rav1e's record carries only the four fixed bytes, not the OBU.
+        let record = header.codec_configuration_record();
+        assert_eq!(record[..4], encoder.context.container_sequence_header());
+        assert_eq!(record[4..], *header.obu());
+        assert_eq!(encoder.sequence_header, header.obu());
+    }
 
     /// Tile counts follow the table of Section 6.4.4.
     #[test]

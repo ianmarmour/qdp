@@ -3,7 +3,7 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
-use qdp_codec::EncoderPreference;
+use qdp_codec::CodecPreference;
 use qdp_quic::KeyPin;
 
 /// The usage text printed by `qdp help` and on errors.
@@ -35,6 +35,8 @@ Connect options:
   --frames N           Disconnect after N frames
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
   --headless           Open no window; only log statistics
+  --decoder KIND       auto, hardware or software (default auto: the GPU's
+                       decoder when it has one, otherwise software)
 
 Set QDP_LOG to error, warn, info, debug or trace to change the log level.";
 
@@ -97,7 +99,7 @@ pub struct ServeArgs {
     /// The frame rate.
     pub fps: u32,
     /// Whether to encode in hardware or software.
-    pub encoder: EncoderPreference,
+    pub encoder: CodecPreference,
     /// The encoder speed preset.
     pub speed: u8,
     /// The encoder quantizer.
@@ -133,6 +135,8 @@ pub struct ConnectArgs {
     pub output: Option<PathBuf>,
     /// Where to show the stream.
     pub presentation: Presentation,
+    /// Whether to decode in hardware or software.
+    pub decoder: CodecPreference,
 }
 
 /// An error in the command line.
@@ -251,7 +255,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         user: None,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         fps: DEFAULT_FPS,
-        encoder: EncoderPreference::Auto,
+        encoder: CodecPreference::Auto,
         speed: DEFAULT_SPEED,
         quantizer: DEFAULT_QUANTIZER,
     };
@@ -263,7 +267,9 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             "--user" => serve.user = Some(value("--user", &mut arguments)?),
             "--size" => serve.size = parse_size(&value("--size", &mut arguments)?)?,
             "--fps" => serve.fps = parse("--fps", &mut arguments)?,
-            "--encoder" => serve.encoder = parse_encoder(&value("--encoder", &mut arguments)?)?,
+            "--encoder" => {
+                serve.encoder = parse_preference("--encoder", &value("--encoder", &mut arguments)?)?
+            }
             "--speed" => serve.speed = parse("--speed", &mut arguments)?,
             "--quantizer" => serve.quantizer = parse("--quantizer", &mut arguments)?,
             other => return Err(error(format!("unknown option: {other}"))),
@@ -280,14 +286,14 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
     Ok(serve)
 }
 
-/// Parses the value of `--encoder`.
-fn parse_encoder(text: &str) -> Result<EncoderPreference, ArgsError> {
+/// Parses the value of `--encoder` or `--decoder`.
+fn parse_preference(option: &str, text: &str) -> Result<CodecPreference, ArgsError> {
     match text {
-        "auto" => Ok(EncoderPreference::Auto),
-        "hardware" => Ok(EncoderPreference::Hardware),
-        "software" => Ok(EncoderPreference::Software),
+        "auto" => Ok(CodecPreference::Auto),
+        "hardware" => Ok(CodecPreference::Hardware),
+        "software" => Ok(CodecPreference::Software),
         other => Err(error(format!(
-            "--encoder must be auto, hardware or software, not {other}"
+            "{option} must be auto, hardware or software, not {other}"
         ))),
     }
 }
@@ -308,6 +314,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         frames: None,
         output: None,
         presentation: Presentation::Window,
+        decoder: CodecPreference::Auto,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -318,6 +325,10 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--frames" => connect.frames = Some(parse("--frames", &mut arguments)?),
             "--output" => connect.output = Some(value("--output", &mut arguments)?.into()),
             "--headless" => connect.presentation = Presentation::Headless,
+            "--decoder" => {
+                connect.decoder =
+                    parse_preference("--decoder", &value("--decoder", &mut arguments)?)?
+            }
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
@@ -349,12 +360,12 @@ mod tests {
         assert_eq!(serve.size, (640, 480));
         assert_eq!(serve.fps, 30);
         assert_eq!(serve.listen.port(), DEFAULT_PORT);
-        assert_eq!(serve.encoder, EncoderPreference::Auto);
+        assert_eq!(serve.encoder, CodecPreference::Auto);
         let Command::Serve(serve) = parse_line("serve --token abc --encoder software").unwrap()
         else {
             panic!("expected serve");
         };
-        assert_eq!(serve.encoder, EncoderPreference::Software);
+        assert_eq!(serve.encoder, CodecPreference::Software);
         assert!(parse_line("serve --token abc --encoder gpu").is_err());
         assert!(parse_line("serve").is_err());
         assert!(parse_line("serve --token a --size 0x5").is_err());
@@ -381,6 +392,14 @@ mod tests {
             panic!("expected connect");
         };
         assert_eq!(connect.presentation, Presentation::Headless);
+        assert_eq!(connect.decoder, CodecPreference::Auto);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --decoder software"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.decoder, CodecPreference::Software);
         assert!(parse_line(&format!("connect 192.0.2.7:4433 --pin {pin}")).is_err());
         assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
         assert!(parse_line("connect nowhere --pin x --token t").is_err());
