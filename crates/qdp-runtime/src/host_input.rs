@@ -270,6 +270,12 @@ impl StandardInput {
             .collect()
     }
 
+    /// Returns whether any device holds something: a key, button, contact or
+    /// gamepad control away from rest.
+    pub(crate) fn is_holding(&self) -> bool {
+        self.devices.values().any(|state| *state != at_rest(state))
+    }
+
     /// Returns whether a device has been accepted.
     pub(crate) fn contains(&self, device_id: DeviceId) -> bool {
         self.devices.contains_key(&device_id)
@@ -656,10 +662,12 @@ mod tests {
                 InputAction::KeyDown(0x05)
             ]
         );
+        assert!(input.is_holding());
         assert_eq!(
             input.release_all(),
             [InputAction::KeyUp(0x05), InputAction::KeyUp(0xe1)]
         );
+        assert!(!input.is_holding());
         assert!(input.release_all().is_empty());
     }
 
