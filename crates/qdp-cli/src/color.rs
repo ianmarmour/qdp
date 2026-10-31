@@ -31,6 +31,18 @@ const BLUE_FROM_CB: i32 = 138_438;
 /// Half of one unit of the fixed-point result, for rounding.
 const ROUNDING: i32 = 1 << (FRACTION_BITS - 1);
 
+/// The number of fractional bits of the scaling weights.
+const WEIGHT_BITS: u32 = 8;
+
+/// The weight of a whole pixel when scaling.
+const WHOLE: u32 = 1 << WEIGHT_BITS;
+
+/// The red and blue components of a `0x00RRGGBB` pixel, blended together.
+const RED_BLUE: u32 = 0x00ff_00ff;
+
+/// The green component of a `0x00RRGGBB` pixel.
+const GREEN: u32 = 0x0000_ff00;
+
 /// An RGB image with one `0x00RRGGBB` pixel per element, as `softbuffer`
 /// expects.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,25 +170,107 @@ impl Placement {
 }
 
 /// Draws `frame` into a `target_width × target_height` buffer, scaled to fit
-/// with its aspect ratio kept and black bars around it.
+/// with its aspect ratio kept and black bars around it. A picture of the
+/// window's size is copied as it is; any other is scaled bilinearly, so
+/// that edges and text stay smooth rather than turn jagged.
 pub fn scale_into(frame: &RgbFrame, target: &mut [u32], target_width: usize, target_height: usize) {
     target.fill(0);
     let Some(placement) = Placement::fit(frame.width, frame.height, target_width, target_height)
     else {
         return;
     };
-    let source_columns: Vec<usize> = (0..placement.width)
-        .map(|column| column * frame.width / placement.width)
-        .collect();
-    for row in 0..placement.height {
-        let source_row = row * frame.height / placement.height;
-        let source = &frame.pixels[source_row * frame.width..(source_row + 1) * frame.width];
+    let destination_row = |row: usize| {
         let start = (placement.top + row) * target_width + placement.left;
-        let destination = &mut target[start..start + placement.width];
-        for (pixel, &column) in destination.iter_mut().zip(&source_columns) {
-            *pixel = source[column];
+        start..start + placement.width
+    };
+    if (placement.width, placement.height) == (frame.width, frame.height) {
+        for (row, source) in frame.pixels.chunks_exact(frame.width).enumerate() {
+            target[destination_row(row)].copy_from_slice(source);
+        }
+        return;
+    }
+    let columns = samples(frame.width, placement.width);
+    // The two source rows each output row blends, scaled horizontally, with
+    // the source row each holds: consecutive output rows mostly share them.
+    let mut upper = (usize::MAX, vec![0; placement.width]);
+    let mut lower = (usize::MAX, vec![0; placement.width]);
+    for (row, sample) in samples(frame.height, placement.height)
+        .into_iter()
+        .enumerate()
+    {
+        if upper.0 != sample.first {
+            if lower.0 == sample.first {
+                std::mem::swap(&mut upper, &mut lower);
+            } else {
+                scale_row(frame, sample.first, &columns, &mut upper.1);
+                upper.0 = sample.first;
+            }
+        }
+        if lower.0 != sample.second {
+            scale_row(frame, sample.second, &columns, &mut lower.1);
+            lower.0 = sample.second;
+        }
+        let destination = &mut target[destination_row(row)];
+        if sample.weight == 0 {
+            destination.copy_from_slice(&upper.1);
+            continue;
+        }
+        for ((pixel, &top), &bottom) in destination.iter_mut().zip(&upper.1).zip(&lower.1) {
+            *pixel = blend(top, bottom, sample.weight);
         }
     }
+}
+
+/// Where a scaled pixel samples the source along one axis: the two source
+/// pixels about its centre, and the weight of the second, out of
+/// [`WHOLE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sample {
+    /// The source pixel at or before the centre.
+    first: usize,
+    /// The source pixel after it, or the same one at the edge.
+    second: usize,
+    /// How much of the second pixel the scaled one takes.
+    weight: u32,
+}
+
+/// Returns where each of `scaled` pixels samples `source` pixels along one
+/// axis, with the pixels' centres aligned. Both counts are above zero.
+fn samples(source: usize, scaled: usize) -> Vec<Sample> {
+    (0..scaled)
+        .map(|index| {
+            // The centre of scaled pixel `index`, in source pixels:
+            // (index + ½) × source ÷ scaled − ½, in 1/WHOLE of a pixel.
+            let centre =
+                ((2 * index + 1) * source).saturating_sub(scaled) * WHOLE as usize / (2 * scaled);
+            let first = (centre >> WEIGHT_BITS).min(source - 1);
+            Sample {
+                first,
+                second: (first + 1).min(source - 1),
+                weight: (centre % WHOLE as usize) as u32,
+            }
+        })
+        .collect()
+}
+
+/// Scales source row `row` of `frame` horizontally into `scaled`, one pixel
+/// for each of `columns`.
+fn scale_row(frame: &RgbFrame, row: usize, columns: &[Sample], scaled: &mut [u32]) {
+    let source = &frame.pixels[row * frame.width..(row + 1) * frame.width];
+    for (pixel, sample) in scaled.iter_mut().zip(columns) {
+        *pixel = blend(source[sample.first], source[sample.second], sample.weight);
+    }
+}
+
+/// Returns `first` and `second` blended, with `weight` out of [`WHOLE`] of
+/// `second`. Red and blue are blended together, in the bytes that keep them
+/// apart.
+fn blend(first: u32, second: u32, weight: u32) -> u32 {
+    let keep = WHOLE - weight;
+    let red_blue =
+        (((first & RED_BLUE) * keep + (second & RED_BLUE) * weight) >> WEIGHT_BITS) & RED_BLUE;
+    let green = (((first & GREEN) * keep + (second & GREEN) * weight) >> WEIGHT_BITS) & GREEN;
+    red_blue | green
 }
 
 #[cfg(test)]
@@ -219,7 +313,8 @@ mod tests {
         }
     }
 
-    /// Scaling keeps the aspect ratio and centres the image.
+    /// Scaling keeps the aspect ratio and centres the image, blending
+    /// neighbouring pixels.
     #[test]
     fn scales_with_letterboxing() {
         let frame = RgbFrame {
@@ -229,17 +324,47 @@ mod tests {
         };
         let mut target = vec![1; 4 * 4];
         scale_into(&frame, &mut target, 4, 4);
-        // A 2:1 image in a square: two rows of picture between bars.
+        // A 2:1 image in a square: two rows of picture between bars. The
+        // middle pixels' centres lie a quarter and three quarters of the
+        // way from red to blue.
+        let row = [0x00ff_0000, 0x00bf_003f, 0x003f_00bf, 0x0000_00ff];
         assert_eq!(&target[0..4], [0; 4]);
-        assert_eq!(
-            &target[4..8],
-            [0x00ff_0000, 0x00ff_0000, 0x0000_00ff, 0x0000_00ff]
-        );
-        assert_eq!(
-            &target[8..12],
-            [0x00ff_0000, 0x00ff_0000, 0x0000_00ff, 0x0000_00ff]
-        );
+        assert_eq!(&target[4..8], row);
+        assert_eq!(&target[8..12], row);
         assert_eq!(&target[12..16], [0; 4]);
+    }
+
+    /// A picture of the window's size is copied as it is, and scaling
+    /// keeps a uniform picture uniform.
+    #[test]
+    fn copies_and_scales_exactly() {
+        let frame = RgbFrame {
+            width: 3,
+            height: 2,
+            pixels: vec![1, 2, 3, 4, 5, 6],
+        };
+        let mut target = vec![9; 6];
+        scale_into(&frame, &mut target, 3, 2);
+        assert_eq!(target, frame.pixels);
+
+        let grey = RgbFrame {
+            width: 7,
+            height: 5,
+            pixels: vec![0x0080_8080; 35],
+        };
+        let mut target = vec![0; 13 * 9];
+        scale_into(&grey, &mut target, 13, 9);
+        let placement = Placement::fit(7, 5, 13, 9).unwrap();
+        for row in placement.top..placement.top + placement.height {
+            let start = row * 13 + placement.left;
+            assert!(
+                target[start..start + placement.width]
+                    .iter()
+                    .all(|&pixel| pixel == 0x0080_8080)
+            );
+        }
+        assert_eq!(blend(0x00ff_ffff, 0, WHOLE), 0);
+        assert_eq!(blend(0x00ff_ffff, 0, 0), 0x00ff_ffff);
     }
 
     /// Window positions map back to picture pixels, clamped to the picture.
