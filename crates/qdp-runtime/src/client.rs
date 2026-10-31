@@ -1133,6 +1133,7 @@ impl ActiveClient<'_> {
                             frame_number,
                             latency,
                             decoded_at: decoded.decoded_at,
+                            decode_time: decoded.decode_time,
                         };
                         self.summary.frames_presented += 1;
                         let control = self.sink.present(&picture, info);

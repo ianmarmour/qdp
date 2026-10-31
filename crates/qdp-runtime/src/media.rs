@@ -271,6 +271,8 @@ pub struct FrameInfo {
     pub latency: Option<Duration>,
     /// When the frame finished decoding.
     pub decoded_at: Instant,
+    /// How long the decoder took to decode it.
+    pub decode_time: Duration,
 }
 
 /// When a sink shows the frames it is given.
