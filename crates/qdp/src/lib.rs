@@ -15,11 +15,14 @@
 //!   a client and a host (Section 4).
 //! - [`auth`] implements SCRAM-SHA-256-PLUS for the Auth Data of the session
 //!   (Section 4.4.4).
+//! - [`video`] holds the sans-I/O logic of video streams: fragmentation,
+//!   retransmission and loss recovery (Section 6).
 
 pub mod auth;
 pub mod message;
 pub mod registry;
 pub mod session;
+pub mod video;
 pub mod wire;
 
 /// The ALPN token of the draft of the specification this crate implements
