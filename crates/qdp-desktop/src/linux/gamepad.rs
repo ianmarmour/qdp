@@ -18,7 +18,7 @@ use qdp::message::{GamepadButtons, GamepadOutput, GamepadReport};
 use tracing::debug;
 
 use super::uinput::{
-    ABS_X, ABS_Y, EV_ABS, EV_KEY, Event, IOC_READ, IOC_WRITE, Identity, UI_SET_EVBIT,
+    ABS_X, ABS_Y, AxisRange, EV_ABS, EV_KEY, Event, IOC_READ, IOC_WRITE, Identity, UI_SET_EVBIT,
     UI_SET_KEYBIT, VirtualDevice, uinput_request,
 };
 
@@ -309,21 +309,19 @@ impl VirtualGamepad {
             VirtualDevice::set_bit(&file, UI_SET_KEYBIT, code)?;
         }
         VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_ABS)?;
+        let stick = AxisRange {
+            fuzz: STICK_FUZZ,
+            flat: STICK_FLAT,
+            ..AxisRange::new(i32::from(i16::MIN), i32::from(i16::MAX))
+        };
         for axis in STICKS {
-            VirtualDevice::set_axis(
-                &file,
-                axis,
-                i32::from(i16::MIN),
-                i32::from(i16::MAX),
-                STICK_FUZZ,
-                STICK_FLAT,
-            )?;
+            VirtualDevice::set_axis(&file, axis, stick)?;
         }
         for axis in [ABS_Z, ABS_RZ] {
-            VirtualDevice::set_axis(&file, axis, 0, TRIGGER_MAXIMUM, 0, 0)?;
+            VirtualDevice::set_axis(&file, axis, AxisRange::new(0, TRIGGER_MAXIMUM))?;
         }
         for axis in [ABS_HAT0X, ABS_HAT0Y] {
-            VirtualDevice::set_axis(&file, axis, -1, 1, 0, 0)?;
+            VirtualDevice::set_axis(&file, axis, AxisRange::new(-1, 1))?;
         }
         VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_FF)?;
         VirtualDevice::set_bit(&file, UI_SET_FFBIT, FF_RUMBLE)?;

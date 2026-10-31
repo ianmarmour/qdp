@@ -13,6 +13,7 @@ use qdp::message::KeyboardLeds;
 use qdp_runtime::{InputAction, InputInjector, PointerButton};
 
 use super::keycodes::virtual_key;
+use super::pen::TabletPen;
 
 /// QDP positions and motion are in 1/256 pixel or count (Section 1.5.6).
 const SUBUNITS: f64 = 256.0;
@@ -112,6 +113,8 @@ pub struct QuartzInjector {
     held: Vec<PointerButton>,
     /// Scrolling not yet sent as whole lines, in 1/120 detent.
     scroll_remainder: (i32, i32),
+    /// Posts the pen's input.
+    pen: TabletPen,
 }
 
 impl QuartzInjector {
@@ -131,6 +134,16 @@ impl QuartzInjector {
             position,
             held: Vec::new(),
             scroll_remainder: (0, 0),
+            pen: TabletPen::default(),
+        }
+    }
+
+    /// Returns a desktop position in 1/256 pixel as a global position in
+    /// points.
+    fn global_position(&self, x: i32, y: i32) -> CGPoint {
+        CGPoint {
+            x: self.origin.x + f64::from(x) / SUBUNITS * self.scale.0,
+            y: self.origin.y + f64::from(y) / SUBUNITS * self.scale.1,
         }
     }
 
@@ -229,10 +242,7 @@ impl InputInjector for QuartzInjector {
                 self.media_key(key, matches!(action, InputAction::ConsumerKeyDown(_)))
             }
             &InputAction::PointerMoveTo { x, y } => {
-                let position = CGPoint {
-                    x: self.origin.x + f64::from(x) / SUBUNITS * self.scale.0,
-                    y: self.origin.y + f64::from(y) / SUBUNITS * self.scale.1,
-                };
+                let position = self.global_position(x, y);
                 self.move_to(position, None)
             }
             &InputAction::MouseMoveBy { dx, dy } => {
@@ -289,11 +299,20 @@ impl InputInjector for QuartzInjector {
             }
             // The host does not accept touchscreens: macOS has no touch events.
             InputAction::Touch(_) => Err("Quartz events cannot touch".to_owned()),
+            InputAction::Pen(report) => {
+                let position = self.global_position(report.x, report.y);
+                self.position = position;
+                self.pen.set(report, position)
+            }
         }
     }
 
     fn description(&self) -> &str {
         "Quartz events"
+    }
+
+    fn supports_pen(&self) -> bool {
+        true
     }
 
     fn keyboard_leds(&mut self) -> KeyboardLeds {

@@ -12,6 +12,7 @@ mod capture;
 mod cursor;
 mod input;
 mod keycodes;
+mod pen;
 
 #[cfg(feature = "audio")]
 pub use audio::MacDesktopAudio;

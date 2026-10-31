@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use qdp::input::{DeviceRest, ReportKind};
 use qdp::message::{
     DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, GamepadButtons, GamepadOutput,
-    GamepadReport, KeyboardReport, MouseReport, PointerButtons, PointerKind, PointerReport,
-    TextReport, TouchContactFlags, TouchscreenReport,
+    GamepadReport, KeyboardReport, MouseReport, PenFlags, PenReport, PointerButtons, PointerKind,
+    PointerReport, TextReport, TouchContactFlags, TouchscreenReport,
 };
 use qdp::wire::VarInt;
 use tokio::sync::Notify;
@@ -33,8 +33,23 @@ pub(crate) const TEXT_ID: DeviceId = DeviceId(VarInt::from_u32(4));
 /// The touchscreen's Device ID.
 pub(crate) const TOUCHSCREEN_ID: DeviceId = DeviceId(VarInt::from_u32(5));
 
-/// The pressure the touchscreen reports for a full press.
+/// The pen's Device ID.
+pub(crate) const PEN_ID: DeviceId = DeviceId(VarInt::from_u32(6));
+
+/// Pen tilt and twist are sent in 1/100 degree (Section 8.4.5).
+const CENTIDEGREES: f64 = 100.0;
+
+/// The largest pen tilt, in degrees either way.
+const MAX_TILT_DEGREES: f64 = 90.0;
+
+/// The degrees in a full turn of the pen.
+const FULL_TURN_DEGREES: f64 = 360.0;
+
+/// The pressure the touchscreen and pen report for a full press.
 const FULL_PRESSURE: f64 = 65_535.0;
+
+/// The largest pen twist, in 1/100 degree.
+const MAX_TWIST: u16 = 35_999;
 
 /// Positions and motion are sent in 1/256 of a pixel or device count
 /// (Section 1.5.6).
@@ -42,6 +57,26 @@ const SUBUNITS: f64 = 256.0;
 
 /// The most consumer keys a keyboard report holds.
 const CONSUMER_KEY_SLOTS: usize = 4;
+
+/// Where a pen is and how it is held (Section 8.4.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PenInput {
+    /// The horizontal position on the monitor, in pixels.
+    pub x: f64,
+    /// The vertical position on the monitor, in pixels.
+    pub y: f64,
+    /// Whether it is in range, touching with its tip or eraser, and has its
+    /// barrel button pressed.
+    pub flags: PenFlags,
+    /// How hard the tip or eraser presses, from 0 to 1.
+    pub pressure: f64,
+    /// The tilt towards the right, in degrees from -90 to 90.
+    pub tilt_x: f64,
+    /// The tilt towards the user, in degrees from -90 to 90.
+    pub tilt_y: f64,
+    /// The rotation about its own axis, clockwise, in degrees from 0 to 360.
+    pub twist: f64,
+}
 
 /// Something the user did.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +139,8 @@ pub enum UserInput {
         /// How hard it presses, from 0 to 1, if the screen senses it.
         pressure: Option<f64>,
     },
+    /// The pen moved, came into or left range, or touched or lifted.
+    Pen(PenInput),
     /// A gamepad was connected; `slot` names it in later input.
     GamepadConnected {
         /// The gamepad's number, unique while it is connected.
@@ -246,6 +283,8 @@ pub(crate) struct ClientDevices {
     monitor_origin: (i32, i32),
     /// The fingers touching the monitor.
     touchscreen: Touchscreen,
+    /// The pen's state.
+    pen: PenReport,
     /// The connected gamepads, by slot: their Device IDs and states.
     gamepads: HashMap<u32, (DeviceId, GamepadReport)>,
     /// The Device ID of the last gamepad attached.
@@ -262,6 +301,7 @@ impl Default for ClientDevices {
             pointer_mode: PointerKind::Absolute,
             monitor_origin: (0, 0),
             touchscreen: Touchscreen::default(),
+            pen: PenReport::default(),
             gamepads: HashMap::new(),
             last_gamepad_id: FIRST_GAMEPAD_ID - 1,
         }
@@ -505,8 +545,40 @@ impl ClientDevices {
                     .into_iter()
                     .collect()
             }
+            UserInput::Pen(pen) => {
+                let (x, y) = self.desktop_position(pen.x, pen.y);
+                let tilt = |degrees: f64| {
+                    (degrees.clamp(-MAX_TILT_DEGREES, MAX_TILT_DEGREES) * CENTIDEGREES).round()
+                        as i16
+                };
+                let twist = pen.twist.rem_euclid(FULL_TURN_DEGREES) * CENTIDEGREES;
+                let report = PenReport {
+                    flags: pen.flags,
+                    x,
+                    y,
+                    pressure: (pen.pressure.clamp(0.0, 1.0) * FULL_PRESSURE) as u16,
+                    tilt_x: tilt(pen.tilt_x),
+                    tilt_y: tilt(pen.tilt_y),
+                    twist: (twist as u16).min(MAX_TWIST),
+                };
+                if report == self.pen {
+                    return Vec::new();
+                }
+                let kind = if report.flags == self.pen.flags {
+                    ReportKind::Motion
+                } else {
+                    ReportKind::Transition
+                };
+                self.pen = report;
+                vec![self.pen_report(kind)]
+            }
             UserInput::ReleaseAll => {
                 let mut reports = Vec::new();
+                if self.pen.flags != PenFlags::default() {
+                    self.pen.flags = PenFlags::default();
+                    self.pen.pressure = 0;
+                    reports.push(self.pen_report(ReportKind::Transition));
+                }
                 if let Some(report) = self.touchscreen.cancel_all() {
                     reports.push(Self::touchscreen_report(&report, ReportKind::Transition));
                 }
@@ -570,6 +642,24 @@ impl ClientDevices {
             data: report.to_bytes(),
             kind,
             rest: rest(touching),
+        }
+    }
+
+    /// Returns the pen's report of its current state. The pen holds
+    /// something while its tip, eraser or barrel button is down.
+    fn pen_report(&self, kind: ReportKind) -> PendingReport {
+        let holding = [
+            PenFlags::TIP_SWITCH,
+            PenFlags::ERASER,
+            PenFlags::BARREL_SWITCH,
+        ]
+        .into_iter()
+        .any(|flag| self.pen.flags.contains(flag));
+        PendingReport {
+            device_id: PEN_ID,
+            data: self.pen.to_bytes(),
+            kind,
+            rest: rest(holding),
         }
     }
 
@@ -730,6 +820,39 @@ mod tests {
         assert_eq!(released[0].rest, DeviceRest::AtRest);
         assert_eq!(devices.disconnect_gamepad(3), Some(attach.device_id));
         assert_eq!(devices.gamepad_slot(attach.device_id), None);
+    }
+
+    /// Pens report desktop positions, tilt and twist in 1/100 degree, and
+    /// leave range when everything is released.
+    #[test]
+    fn pen() {
+        let mut devices = ClientDevices::default();
+        let hovering = PenInput {
+            x: 10.0,
+            y: 20.0,
+            flags: PenFlags::IN_RANGE,
+            tilt_x: -30.5,
+            twist: 361.0,
+            ..PenInput::default()
+        };
+        let reports = devices.reports(UserInput::Pen(hovering));
+        assert_eq!(reports[0].device_id, PEN_ID);
+        assert_eq!(reports[0].rest, DeviceRest::AtRest);
+        let report = PenReport::decode(&reports[0].data).unwrap();
+        assert_eq!((report.x, report.tilt_x, report.twist), (2560, -3050, 100));
+        assert!(devices.reports(UserInput::Pen(hovering)).is_empty());
+        let touching = PenInput {
+            flags: PenFlags(PenFlags::IN_RANGE.0 | PenFlags::TIP_SWITCH.0),
+            pressure: 0.5,
+            ..hovering
+        };
+        let reports = devices.reports(UserInput::Pen(touching));
+        assert_eq!(reports[0].kind, ReportKind::Transition);
+        assert_eq!(reports[0].rest, DeviceRest::Active);
+        let released = devices.reports(UserInput::ReleaseAll);
+        let report = PenReport::decode(&released[0].data).unwrap();
+        assert_eq!((report.flags, report.pressure), (PenFlags::default(), 0));
+        assert!(devices.reports(UserInput::ReleaseAll).is_empty());
     }
 
     /// Long text is split into several reports.

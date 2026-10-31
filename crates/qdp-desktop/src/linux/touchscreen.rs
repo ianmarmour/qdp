@@ -12,15 +12,9 @@ use qdp::message::MAX_CONTACTS;
 use qdp_runtime::{TouchPhase, TouchPoint};
 
 use super::uinput::{
-    ABS_X, ABS_Y, EV_ABS, EV_KEY, Event, IOC_WRITE, Identity, SUBUNITS, UI_SET_EVBIT,
-    UI_SET_KEYBIT, VirtualDevice, uinput_request,
+    ABS_X, ABS_Y, AxisRange, EV_ABS, EV_KEY, Event, INPUT_PROP_DIRECT, Identity, UI_SET_EVBIT,
+    UI_SET_KEYBIT, UI_SET_PROPBIT, VirtualDevice,
 };
-
-/// `UI_SET_PROPBIT`.
-const UI_SET_PROPBIT: libc::Ioctl = uinput_request(IOC_WRITE, 110, size_of::<libc::c_int>());
-
-/// `INPUT_PROP_DIRECT`: the device is a screen, touched where it shows.
-const INPUT_PROP_DIRECT: u16 = 0x01;
 
 /// `BTN_TOUCH`: whether anything touches.
 const BTN_TOUCH: u16 = 0x14a;
@@ -134,23 +128,20 @@ impl VirtualTouchscreen {
         VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_KEY)?;
         VirtualDevice::set_bit(&file, UI_SET_KEYBIT, BTN_TOUCH)?;
         VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_ABS)?;
-        let maximum = |pixels: u32| {
-            i32::try_from(pixels.max(1))
-                .unwrap_or(i32::MAX / SUBUNITS)
-                .saturating_mul(SUBUNITS)
-                - 1
-        };
         for (axes, extent) in [
             ([ABS_X, ABS_MT_POSITION_X], width),
             ([ABS_Y, ABS_MT_POSITION_Y], height),
         ] {
             for axis in axes {
-                VirtualDevice::set_axis(&file, axis, 0, maximum(extent), 0, 0)?;
+                VirtualDevice::set_axis(&file, axis, AxisRange::desktop(extent))?;
             }
         }
-        VirtualDevice::set_axis(&file, ABS_MT_SLOT, 0, MAX_CONTACTS as i32 - 1, 0, 0)?;
-        VirtualDevice::set_axis(&file, ABS_MT_TRACKING_ID, 0, MAX_TRACKING_ID, 0, 0)?;
-        VirtualDevice::set_axis(&file, ABS_MT_PRESSURE, 0, i32::from(u16::MAX), 0, 0)?;
+        let slots = AxisRange::new(0, MAX_CONTACTS as i32 - 1);
+        VirtualDevice::set_axis(&file, ABS_MT_SLOT, slots)?;
+        let tracking_ids = AxisRange::new(0, MAX_TRACKING_ID);
+        VirtualDevice::set_axis(&file, ABS_MT_TRACKING_ID, tracking_ids)?;
+        let pressure = AxisRange::new(0, i32::from(u16::MAX));
+        VirtualDevice::set_axis(&file, ABS_MT_PRESSURE, pressure)?;
         Ok(Self {
             device: VirtualDevice::create(file, IDENTITY)?,
             translator: Translator::default(),
