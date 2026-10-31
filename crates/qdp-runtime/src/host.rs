@@ -1,5 +1,7 @@
 //! The host's media pipeline: capture, encode, send, and answer feedback.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -103,9 +105,15 @@ pub struct HostSummary {
     pub input_reports: u64,
 }
 
-/// Returns the input classes the host can inject with `injector`, accepting
-/// passthrough devices unless `passthrough` is off.
-fn input_classes(injector: &dyn InputInjector, passthrough: PassthroughPolicy) -> InputClasses {
+/// The error of a configuration message that arrives before the client
+/// authenticated, which the session state machine never lets through.
+const NOT_AUTHENTICATED: RuntimeError =
+    RuntimeError::Config("a configuration message arrived before authentication");
+
+/// Returns the input classes a host can inject with `injector`, accepting
+/// passthrough devices unless `passthrough` is off, for
+/// [`HostDesktop::input_classes`].
+pub fn input_classes(injector: &dyn InputInjector, passthrough: PassthroughPolicy) -> InputClasses {
     let mut classes = InputClasses::KEYBOARD
         .union(InputClasses::POINTER)
         .union(InputClasses::MOUSE);
@@ -213,27 +221,53 @@ struct ActiveHost {
     passthrough: PassthroughLink,
 }
 
+/// What a host session streams from and injects into, once its client has
+/// authenticated.
+pub struct OpenedDesktop {
+    /// The frames the session streams, such as a screen capture, captured
+    /// and encoded on a thread of its own.
+    pub source: Box<dyn FrameSource>,
+    /// Performs the client's input on the host's desktop.
+    pub injector: Box<dyn InputInjector>,
+}
+
+/// Opens a host session's desktop.
+pub type DesktopOpener = Box<
+    dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<OpenedDesktop, RuntimeError>> + Send>>
+        + Send,
+>;
+
+/// A host session's desktop: what it offers, which the client learns before
+/// it authenticates, and how to open it, which happens only once it has. No
+/// screen is captured, no input device created and no clipboard read for a
+/// client that has not authenticated (Section 11.2).
+pub struct HostDesktop {
+    /// The input classes the injector handles, as [`input_classes`] finds
+    /// them.
+    pub input_classes: InputClasses,
+    /// The clipboard to share with the client, if any.
+    pub clipboard: Option<SharedClipboard>,
+    /// The audio devices, which stream only while the session is active.
+    pub audio: HostAudio,
+    /// Opens the screen and the input injector.
+    pub open: DesktopOpener,
+}
+
 /// Runs the host's side of one session on an accepted connection until the
-/// client disconnects, streaming frames from `source`, which is captured and
-/// encoded on a thread of its own, performing the client's input with
-/// `injector`, sharing `clipboard`, if given, with the client, and streaming
-/// audio through `audio`'s devices. `ticket` is the connection's admission,
-/// which records its authentication attempts and, once it authenticates,
-/// makes its session the desktop's one.
+/// client disconnects, with `desktop`, opened once the client authenticates:
+/// streaming its frames, performing the client's input, sharing its
+/// clipboard, if given, with the client, and streaming audio through its
+/// devices. `ticket` is the connection's admission, which records its
+/// authentication attempts and, once it authenticates, makes its session
+/// the desktop's one.
 pub async fn serve(
     connection: QdpConnection,
     ticket: AdmissionTicket,
     options: &HostOptions,
-    source: Box<dyn FrameSource>,
-    injector: Box<dyn InputInjector>,
-    clipboard: Option<SharedClipboard>,
-    audio: HostAudio,
+    desktop: HostDesktop,
 ) -> Result<HostSummary, RuntimeError> {
     let quic = connection.quic().clone();
-    let result = serve_session(
-        connection, ticket, options, source, injector, clipboard, audio,
-    )
-    .await;
+    let result = serve_session(connection, ticket, options, desktop).await;
     close_on_error(&quic, result)
 }
 
@@ -242,10 +276,7 @@ async fn serve_session(
     connection: QdpConnection,
     mut ticket: AdmissionTicket,
     options: &HostOptions,
-    source: Box<dyn FrameSource>,
-    mut injector: Box<dyn InputInjector>,
-    clipboard: Option<SharedClipboard>,
-    audio: HostAudio,
+    desktop: HostDesktop,
 ) -> Result<HostSummary, RuntimeError> {
     if options.authenticator.methods().is_empty() {
         return Err(RuntimeError::Config(
@@ -253,23 +284,19 @@ async fn serve_session(
         ));
     }
     let binding = connection.channel_binding()?;
-    // The clipboard is read from the start, so that its content is known
-    // when the session becomes active.
+    let HostDesktop {
+        input_classes: classes,
+        clipboard,
+        audio,
+        open,
+    } = desktop;
     let directions = clipboard.as_ref().map(|shared| shared.directions);
-    let worker = clipboard
-        .map(|shared| ClipboardWorker::spawn(shared.clipboard))
-        .transpose()
-        .map_err(RuntimeError::Clipboard)?;
     let config = HostConfig {
         host_hello: HostHello {
             minor_version: MinorVersion::CURRENT,
             host_name: options.host_name.clone(),
             auth_methods: options.authenticator.methods(),
-            capabilities: capabilities(
-                input_classes(&*injector, options.passthrough),
-                directions,
-                &audio,
-            ),
+            capabilities: capabilities(classes, directions, &audio),
         },
         failure_reason: FAILURE_REASON.to_owned(),
     };
@@ -291,30 +318,50 @@ async fn serve_session(
         }
     });
     let mut auth = HostAuthExchange::new(&options.authenticator, binding);
+    loop {
+        let Some(event) = next_setup_event(&mut driver).await? else {
+            return Ok(HostSummary::default());
+        };
+        let response = match event {
+            HostEvent::ClientHello(hello) => {
+                info!(client = %hello.client_name, "client hello");
+                continue;
+            }
+            HostEvent::AuthStart { method, auth_data } => auth.start(method, &auth_data),
+            HostEvent::AuthContinue { auth_data } => auth.continue_exchange(&auth_data),
+            HostEvent::Message(_) => return Err(NOT_AUTHENTICATED),
+        };
+        let accepted = matches!(response, AuthResponse::Accept(_));
+        record_attempt(&mut ticket, &response, driver.connection());
+        driver.session().respond_auth(response, Instant::now())?;
+        if accepted {
+            break;
+        }
+    }
+
+    // Only now is the desktop opened, before the messages the client
+    // pipelined are processed (Section 11.2); the clipboard is read from now
+    // on, so that its content is known when the session becomes active.
+    let OpenedDesktop {
+        source,
+        mut injector,
+    } = open().await?;
+    let worker = clipboard
+        .map(|shared| ClipboardWorker::spawn(shared.clipboard))
+        .transpose()
+        .map_err(RuntimeError::Clipboard)?;
     let mut devices = StandardInput::default();
     let mut display_request = None;
     let mut audio_request = None;
-
     loop {
-        let event = match driver.next_event().await {
-            Ok(event) => event,
-            Err(error) if is_normal_close(&error) => return Ok(HostSummary::default()),
-            Err(error) => return Err(error.into()),
+        let Some(event) = next_setup_event(&mut driver).await? else {
+            return Ok(HostSummary::default());
         };
-        let now = Instant::now();
-        match event {
-            HostEvent::ClientHello(hello) => info!(client = %hello.client_name, "client hello"),
-            HostEvent::AuthStart { method, auth_data } => {
-                let response = auth.start(method, &auth_data);
-                record_attempt(&mut ticket, &response, driver.connection());
-                driver.session().respond_auth(response, now)?;
-            }
-            HostEvent::AuthContinue { auth_data } => {
-                let response = auth.continue_exchange(&auth_data);
-                record_attempt(&mut ticket, &response, driver.connection());
-                driver.session().respond_auth(response, now)?;
-            }
-            HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
+        let HostEvent::Message(message) = event else {
+            continue;
+        };
+        match message {
+            ControlMessage::DeviceAttach(attach) => {
                 answer_attach(
                     &mut driver,
                     &attach,
@@ -323,7 +370,7 @@ async fn serve_session(
                     options.passthrough,
                 )?;
             }
-            HostEvent::Message(ControlMessage::KeyboardInfo(keyboard)) => {
+            ControlMessage::KeyboardInfo(keyboard) => {
                 info!(
                     language = keyboard.language,
                     layout = keyboard.layout,
@@ -331,14 +378,10 @@ async fn serve_session(
                 );
                 injector.set_keyboard_layout(&keyboard);
             }
-            HostEvent::Message(ControlMessage::DisplayRequest(request)) => {
-                display_request = Some(request);
-            }
-            HostEvent::Message(ControlMessage::AudioRequest(request)) => {
-                audio_request = Some(request);
-            }
-            HostEvent::Message(ControlMessage::ClientReady(_)) => break,
-            HostEvent::Message(_) => {}
+            ControlMessage::DisplayRequest(request) => display_request = Some(request),
+            ControlMessage::AudioRequest(request) => audio_request = Some(request),
+            ControlMessage::ClientReady(_) => break,
+            _ => {}
         }
     }
 
@@ -438,6 +481,16 @@ async fn serve_session(
     let actions = active.devices.release_all();
     active.inject(&actions, active.display.layout());
     result
+}
+
+/// Returns the next event of a session being set up, or `None` once the
+/// client closed the connection normally.
+async fn next_setup_event(driver: &mut HostDriver) -> Result<Option<HostEvent>, RuntimeError> {
+    match driver.next_event().await {
+        Ok(event) => Ok(Some(event)),
+        Err(error) if is_normal_close(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Records an authentication attempt's outcome in the connection's
