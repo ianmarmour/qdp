@@ -367,6 +367,10 @@ impl InputInjector for SendInputInjector {
         }
     }
 
+    fn detects_pointer_capture(&self) -> bool {
+        true
+    }
+
     /// Returns relative mode while an application has both hidden the pointer
     /// and confined it, as games that read raw mouse motion do.
     fn pointer_mode(&mut self) -> PointerKind {

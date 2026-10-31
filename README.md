@@ -132,7 +132,11 @@ and logs the one it uses.
 The client sends its keyboard, mouse and scrolling to the host while its
 window has focus. When an application on a Windows host hides and confines the
 pointer, as games do, the client captures its pointer and sends raw mouse
-motion; Ctrl+Alt+Shift+Z releases it, and a click captures it again. The client
+motion; Ctrl+Alt+Shift+Z releases it, and a click captures it again. Linux and
+macOS hosts cannot tell when an application captures the pointer, so they do
+the same while one keeps the pointer hidden over the captured monitor for half
+a second, as games that draw their own pointer do, and switch back as soon as
+it shows again. The client
 also tells the host its keyboard layout, and Windows hosts switch to the same
 one. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write

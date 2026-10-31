@@ -33,6 +33,12 @@ const FOLLOW_WINDOW: Duration = Duration::from_millis(500);
 /// positions to the host's own units.
 const WARP_TOLERANCE: i64 = 2;
 
+/// How long an application must keep the pointer hidden over the captured
+/// monitor before the host takes it for captured, where the platform does
+/// not say: long enough that a pointer hidden for a moment, as while typing,
+/// does not capture the client's.
+const HIDDEN_CAPTURE_DELAY: Duration = Duration::from_millis(500);
+
 /// The largest cursor image side, in pixels.
 const MAX_SIDE: u32 = MAX_CURSOR_SIZE as u32;
 
@@ -86,6 +92,9 @@ pub(crate) struct HostCursor {
     last_warp: u64,
     /// When a device the client cannot follow last reported.
     last_unfollowed_input: Option<Instant>,
+    /// Since when an application has kept the pointer hidden over the
+    /// captured monitor, if it does.
+    hidden_since: Option<Instant>,
 }
 
 impl Default for HostCursor {
@@ -103,11 +112,20 @@ impl Default for HostCursor {
             last_position: None,
             last_warp: 0,
             last_unfollowed_input: None,
+            hidden_since: None,
         }
     }
 }
 
 impl HostCursor {
+    /// Returns whether an application has kept the pointer hidden over the
+    /// captured monitor for long enough, at `now`, to take it for captured,
+    /// as games that draw their own pointer do (Section 8.9).
+    pub(crate) fn captured_by_application(&self, now: Instant) -> bool {
+        self.hidden_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= HIDDEN_CAPTURE_DELAY)
+    }
+
     /// Returns the Warp ID of the last `CURSOR_WARP`: positions the client
     /// computed before it are ignored (Section 8.7).
     pub(crate) fn latest_warp(&self) -> WarpId {
@@ -143,6 +161,14 @@ impl HostCursor {
     /// `state`, in order: an image before the `CURSOR_SET` that shows it.
     pub(crate) fn update(&mut self, state: &CursorState, now: Instant) -> Vec<CursorUpdate> {
         let mut updates = Vec::new();
+        // On the monitor without an image to show: an application hid it.
+        // Off the monitor, it is hidden only from the video.
+        let hidden_by_application = matches!(state.position, PointerPosition::At(..))
+            && state
+                .shape
+                .as_ref()
+                .is_none_or(|shape| shape.is_invisible());
+        self.hidden_since = hidden_by_application.then(|| self.hidden_since.unwrap_or(now));
         // A pointer whose image shows nothing is hidden, so that the client
         // hides its own rather than show a transparent image, which not
         // every window system draws as nothing.
@@ -400,6 +426,39 @@ mod tests {
         // The pointer shows again with the game's next visible image.
         let updates = cursor.update(&visible((5, 5), &arrow), now);
         assert_ne!(sets(&updates)[0].cursor_id, CursorId::HIDDEN);
+    }
+
+    /// A pointer an application keeps hidden over the monitor counts as
+    /// captured once it has stayed hidden long enough; one off the monitor,
+    /// or shown again, does not.
+    #[test]
+    fn takes_a_hidden_pointer_for_captured() {
+        let mut cursor = HostCursor::default();
+        let start = Instant::now();
+        let later = start + HIDDEN_CAPTURE_DELAY;
+        let transparent = shape(32, 0);
+        cursor.update(&visible((5, 5), &transparent), start);
+        assert!(!cursor.captured_by_application(start));
+        // Hidden frames that follow keep the time it was first hidden.
+        cursor.update(&visible((6, 5), &transparent), later);
+        assert!(cursor.captured_by_application(later));
+        // Without an image at all, as some desktops send, it stays hidden.
+        let no_image = CursorState {
+            position: PointerPosition::At(6, 5),
+            shape: None,
+        };
+        cursor.update(&no_image, later);
+        assert!(cursor.captured_by_application(later));
+        // Shown again, it is released at once.
+        cursor.update(&visible((6, 5), &shape(8, 1)), later);
+        assert!(!cursor.captured_by_application(later));
+        // On another monitor, it is not hidden by an application.
+        let away = CursorState {
+            position: PointerPosition::Hidden,
+            shape: Some(transparent),
+        };
+        cursor.update(&away, later);
+        assert!(!cursor.captured_by_application(later + HIDDEN_CAPTURE_DELAY));
     }
 
     /// Past 128 shapes, the least recently shown Cursor ID is replaced.
