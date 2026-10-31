@@ -4,6 +4,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
 use qdp_codec::CodecPreference;
+use qdp_desktop::DeviceSelector;
 use qdp_desktop::Microphone;
 use qdp_quic::KeyPin;
 use qdp_runtime::{ClipboardDirections, PassthroughPolicy};
@@ -56,6 +57,9 @@ Connect options:
                        not at all (default both)
   --audio on|off       Play the host's sound (default on)
   --microphone         Send this machine's microphone to the host
+  --passthrough ID     Pass the HID device VENDOR:PRODUCT, in hexadecimal as
+                       lsusb shows it, through to the host as it is
+                       (repeatable; Linux clients)
 
 Set QDP_LOG to error, warn, info, debug or trace to change the log level.";
 
@@ -190,6 +194,8 @@ pub struct ConnectArgs {
     pub audio: Audio,
     /// Whether the user turned the microphone on.
     pub microphone: Microphone,
+    /// The HID devices the user chose to pass through.
+    pub passthrough: Vec<DeviceSelector>,
 }
 
 /// An error in the command line.
@@ -428,6 +434,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         clipboard: Some(ClipboardDirections::Both),
         audio: Audio::On,
         microphone: Microphone::Off,
+        passthrough: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -447,6 +454,10 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             }
             "--audio" => connect.audio = parse_audio(&value("--audio", &mut arguments)?)?,
             "--microphone" => connect.microphone = Microphone::On,
+            "--passthrough" => {
+                let selector = value("--passthrough", &mut arguments)?;
+                connect.passthrough.push(selector.parse().map_err(error)?);
+            }
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
@@ -553,6 +564,21 @@ mod tests {
         };
         assert_eq!(connect.clipboard, None);
         assert_eq!(connect.microphone, Microphone::Off);
+        assert!(connect.passthrough.is_empty());
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --passthrough 054c:09cc --passthrough 057e:2009"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.passthrough.len(), 2);
+        assert!(connect.passthrough[1].matches(0x057e, 0x2009));
+        assert!(
+            parse_line(&format!(
+                "connect 192.0.2.7 --pin {pin} --token t --passthrough gamepad"
+            ))
+            .is_err()
+        );
         let Command::Connect(connect) = parse_line(&format!(
             "connect 192.0.2.7 --pin {pin} --token t --microphone --audio off"
         ))

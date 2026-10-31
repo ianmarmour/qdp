@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use qdp::message::{CursorImage, PointerKind, PointerMode};
 use qdp_codec::Yuv420Frame;
+use qdp_desktop::{DeviceSelector, PassthroughCapture};
 use qdp_runtime::{
     CursorWarp, FrameInfo, FrameSink, InputHandle, PenInput, PointerButton, SinkControl,
     TouchPhase, UserInput, WarpKind,
@@ -232,6 +233,8 @@ pub struct WindowApp {
     /// The user's gamepads, if they can be watched.
     #[cfg(feature = "gamepad")]
     gamepads: Option<qdp_desktop::GamepadCapture>,
+    /// The devices the user chose to pass through, if any.
+    passthrough: Option<PassthroughCapture>,
 }
 
 impl WindowApp {
@@ -242,6 +245,7 @@ impl WindowApp {
         close: Arc<CloseSignal>,
         input: InputHandle,
         proxy: EventLoopProxy<WindowMessage>,
+        passthrough: &[DeviceSelector],
     ) -> Self {
         Self {
             title,
@@ -266,6 +270,8 @@ impl WindowApp {
             gamepads: qdp_desktop::GamepadCapture::start(input.clone())
                 .inspect_err(|error| warn!(error, "gamepads are not sent"))
                 .ok(),
+            passthrough: (!passthrough.is_empty())
+                .then(|| PassthroughCapture::start(&input, passthrough)),
             input,
         }
     }
@@ -737,6 +743,9 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 #[cfg(feature = "gamepad")]
                 if let Some(gamepads) = &self.gamepads {
                     gamepads.set_focused(focused);
+                }
+                if let Some(passthrough) = &self.passthrough {
+                    passthrough.set_focused(focused);
                 }
                 if !focused {
                     self.release_pointer();
