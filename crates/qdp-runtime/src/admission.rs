@@ -1,8 +1,9 @@
 //! Which clients a host lets in: at most a few connections that have not
 //! authenticated yet, from each address and in total (Section 11.7); no new
-//! connections from an address after repeated failed authentications
-//! (Section 4.4.1); and one session at a time on the desktop, a newer one
-//! replacing the older (Section 2.1).
+//! connections from an address, and no successful attempts as a user, after
+//! repeated failed authentications (Sections 4.4.1 and 11.2); and one
+//! session at a time on the desktop, a newer one replacing the older
+//! (Section 2.1).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -25,7 +26,10 @@ pub struct AdmissionLimits {
     /// The failed authentications from one address within
     /// `failure_window` after which it is refused.
     pub failures_per_address: usize,
-    /// How long failed authentications count against an address.
+    /// The failed authentications as one user, from any address, within
+    /// `failure_window` after which every attempt as that user fails.
+    pub failures_per_user: usize,
+    /// How long failed authentications count against an address or a user.
     pub failure_window: Duration,
 }
 
@@ -35,6 +39,7 @@ impl Default for AdmissionLimits {
             per_address: 4,
             total: 32,
             failures_per_address: 10,
+            failures_per_user: 10,
             failure_window: Duration::from_secs(300),
         }
     }
@@ -68,6 +73,8 @@ struct State {
     pending: HashMap<IpAddr, usize>,
     /// When each address recently failed to authenticate.
     failures: HashMap<IpAddr, Vec<Instant>>,
+    /// When attempts as each of the host's users recently failed.
+    user_failures: HashMap<String, Vec<Instant>>,
     /// The session the desktop serves, with the ticket that holds it.
     active: Option<(u64, quinn::Connection)>,
     /// The number of the last ticket.
@@ -78,10 +85,12 @@ impl State {
     /// Forgets failures older than the window.
     fn expire_failures(&mut self, now: Instant) {
         let window = self.limits.failure_window;
-        self.failures.retain(|_, times| {
+        let recent = |times: &mut Vec<Instant>| {
             times.retain(|time| now.saturating_duration_since(*time) < window);
             !times.is_empty()
-        });
+        };
+        self.failures.retain(|_, times| recent(times));
+        self.user_failures.retain(|_, times| recent(times));
     }
 }
 
@@ -159,14 +168,27 @@ pub struct AdmissionTicket {
 }
 
 impl AdmissionTicket {
-    /// Records a failed authentication attempt.
-    pub(crate) fn failed(&self) {
+    /// Records a failed authentication attempt, as `user` if it was an
+    /// attempt as one of the host's users.
+    pub(crate) fn failed(&self, user: Option<&str>) {
+        let now = Instant::now();
         let mut state = self.admission.lock();
-        state
-            .failures
-            .entry(self.address)
-            .or_default()
-            .push(Instant::now());
+        state.failures.entry(self.address).or_default().push(now);
+        if let Some(user) = user {
+            state
+                .user_failures
+                .entry(user.to_owned())
+                .or_default()
+                .push(now);
+        }
+    }
+
+    /// Returns whether attempts as `user` failed so often recently that
+    /// every attempt as that user now fails (Section 11.2).
+    pub(crate) fn user_locked(&self, user: &str) -> bool {
+        let mut state = self.admission.lock();
+        state.expire_failures(Instant::now());
+        state.user_failures.get(user).map_or(0, Vec::len) >= state.limits.failures_per_user
     }
 
     /// Records that the connection authenticated: it no longer counts as
@@ -227,6 +249,7 @@ mod tests {
         per_address: 2,
         total: 3,
         failures_per_address: 2,
+        failures_per_user: 3,
         failure_window: Duration::from_secs(60),
     };
 
@@ -261,8 +284,8 @@ mod tests {
     fn refuses_repeated_failures() {
         let admission = Admission::new(LIMITS);
         let ticket = admission.admit(address(1)).unwrap();
-        ticket.failed();
-        ticket.failed();
+        ticket.failed(None);
+        ticket.failed(None);
         drop(ticket);
         assert_eq!(
             admission.admit(address(1)).unwrap_err(),
@@ -272,5 +295,23 @@ mod tests {
         let mut state = admission.lock();
         state.expire_failures(Instant::now() + LIMITS.failure_window);
         assert!(state.failures.is_empty());
+    }
+
+    /// A user whose attempts fail too often, from any address, is locked
+    /// until the failures age.
+    #[test]
+    fn locks_users_after_repeated_failures() {
+        let admission = Admission::new(LIMITS);
+        let first = admission.admit(address(1)).unwrap();
+        let second = admission.admit(address(2)).unwrap();
+        first.failed(Some("ian"));
+        second.failed(Some("ian"));
+        assert!(!second.user_locked("ian"));
+        second.failed(Some("ian"));
+        assert!(first.user_locked("ian"));
+        assert!(!first.user_locked("ada"));
+        let mut state = admission.lock();
+        state.expire_failures(Instant::now() + LIMITS.failure_window);
+        assert!(state.user_failures.is_empty());
     }
 }

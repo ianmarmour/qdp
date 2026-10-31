@@ -327,12 +327,12 @@ async fn serve_session(
                 info!(client = %hello.client_name, "client hello");
                 continue;
             }
-            HostEvent::AuthStart { method, auth_data } => auth.start(method, &auth_data),
+            HostEvent::AuthStart { method, auth_data } => auth.start(method, &auth_data, &ticket),
             HostEvent::AuthContinue { auth_data } => auth.continue_exchange(&auth_data),
             HostEvent::Message(_) => return Err(NOT_AUTHENTICATED),
         };
         let accepted = matches!(response, AuthResponse::Accept(_));
-        record_attempt(&mut ticket, &response, driver.connection());
+        record_attempt(&mut ticket, &response, auth.user(), driver.connection());
         driver.session().respond_auth(response, Instant::now())?;
         if accepted {
             break;
@@ -494,15 +494,16 @@ async fn next_setup_event(driver: &mut HostDriver) -> Result<Option<HostEvent>, 
 }
 
 /// Records an authentication attempt's outcome in the connection's
-/// admission.
+/// admission, as `user` if it was an attempt as one of the host's users.
 fn record_attempt(
     ticket: &mut AdmissionTicket,
     response: &AuthResponse,
+    user: Option<&str>,
     connection: &QdpConnection,
 ) {
     match response {
         AuthResponse::Accept(_) => ticket.authenticated(connection),
-        AuthResponse::Reject => ticket.failed(),
+        AuthResponse::Reject => ticket.failed(user),
         AuthResponse::Continue(_) => {}
     }
 }
