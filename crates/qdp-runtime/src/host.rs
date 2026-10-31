@@ -663,10 +663,16 @@ impl ActiveHost {
     async fn run(&mut self) -> Result<HostSummary, RuntimeError> {
         let mut next_frame_at = Instant::now();
         loop {
-            let frame_interval = self.display.plan().frame_interval();
+            let frame_interval = self
+                .rate
+                .frame_interval(self.display.plan().frame_interval());
             let smoothed_rtt = self.driver.connection().smoothed_rtt();
             let deadline = [
-                self.pending_since.is_none().then_some(next_frame_at),
+                // While a recovery frame is held back, no frame is sent
+                // before it.
+                self.pending_since
+                    .is_none()
+                    .then(|| self.sender.recovery_wait().unwrap_or(next_frame_at)),
                 self.sender.poll_timeout(smoothed_rtt),
                 self.input.poll_timeout(smoothed_rtt),
                 Some(self.stats.next_log_at()),
@@ -731,8 +737,11 @@ impl ActiveHost {
             }
             // A recovery frame goes out as soon as possible: between frame
             // times, and even when the network is behind (Section 6.8.4).
-            let recovery = self.sender.recovery_needed().is_some();
-            if self.pending_since.is_none() && (now >= next_frame_at || recovery) {
+            // While one is held back after earlier ones failed, no other
+            // frame goes out, since the client could not decode it.
+            let recovery = self.sender.recovery_needed(now).is_some();
+            let held = self.sender.recovery_wait().is_some_and(|due| now < due);
+            if self.pending_since.is_none() && ((now >= next_frame_at && !held) || recovery) {
                 self.follow_pointer_mode()?;
                 self.update_outputs(now)?;
                 if recovery || !self.network_behind(frame_interval) {
@@ -985,7 +994,7 @@ impl ActiveHost {
     /// Asks the encoder thread for the next frame: a key frame for the first one
     /// and whenever the client needs to recover.
     fn request_frame(&mut self, now: Instant) -> Result<(), RuntimeError> {
-        let recovery = self.sender.recovery_needed().is_some();
+        let recovery = self.sender.recovery_needed(now).is_some();
         let request = if self.frames_requested == 0 || recovery {
             KeyFrameRequest::Force
         } else {
@@ -1087,7 +1096,8 @@ impl ActiveHost {
             output.frame.temporal_unit.len(),
             output.frame.is_key_frame,
             &self.driver.connection().path_stats(),
-            self.display.plan().frame_interval(),
+            self.rate
+                .frame_interval(self.display.plan().frame_interval()),
             now,
         );
         let first_sent_at = self.clock.timestamp(Instant::now());

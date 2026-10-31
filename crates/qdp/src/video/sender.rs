@@ -20,6 +20,10 @@ const FLAGS_LENGTH: usize = 1;
 /// frame for the same loss (Section 6.8.4).
 const RECOVERY_REPEAT_MARGIN: Duration = Duration::from_millis(20);
 
+/// The longest the host waits, after a recovery frame that failed, before
+/// sending the next (Section 6.8.4).
+const MAX_RECOVERY_WAIT: Duration = Duration::from_secs(1);
+
 /// The extra time, beyond two smoothed RTTs, before the host repairs a possibly
 /// lost final frame (Section 6.8.4).
 const TAIL_LOSS_MARGIN: Duration = Duration::from_millis(10);
@@ -143,8 +147,12 @@ pub struct VideoSender {
     /// The Last Decoded Frame the next frame must recover from, if the client
     /// reported a loss or asked for a key frame.
     recovery_needed: Option<FrameNumber>,
+    /// When the needed recovery frame may be sent, if earlier ones failed.
+    recovery_not_before: Option<Instant>,
     /// The last recovery frame sent.
     last_recovery: Option<SentRecovery>,
+    /// How many recovery frames in a row did not reach the client.
+    recovery_failures: u32,
 }
 
 impl VideoSender {
@@ -156,7 +164,9 @@ impl VideoSender {
             sent: VecDeque::new(),
             last_decoded: FrameNumber::NONE,
             recovery_needed: None,
+            recovery_not_before: None,
             last_recovery: None,
+            recovery_failures: 0,
         }
     }
 
@@ -170,11 +180,23 @@ impl VideoSender {
         self.last_decoded
     }
 
-    /// Returns the Last Decoded Frame the next frame must recover from, if any:
-    /// [`FrameNumber::NONE`] means a key frame flagged `RECOVERY` is required;
-    /// any other value allows a [`FrameKind::Recovery`] frame from that base.
-    pub fn recovery_needed(&self) -> Option<FrameNumber> {
-        self.recovery_needed
+    /// Returns the Last Decoded Frame the next frame must recover from, if a
+    /// recovery frame is due at `now`: [`FrameNumber::NONE`] means a key
+    /// frame flagged `RECOVERY` is required; any other value allows a
+    /// [`FrameKind::Recovery`] frame from that base.
+    pub fn recovery_needed(&self, now: Instant) -> Option<FrameNumber> {
+        self.recovery_needed.filter(|_| {
+            self.recovery_not_before
+                .is_none_or(|not_before| now >= not_before)
+        })
+    }
+
+    /// Returns when the recovery frame the client waits for may be sent, if
+    /// earlier ones failed and it must wait (Section 6.8.4). Until then the
+    /// host sends no other frames, which the client cannot decode: they
+    /// would only add to the traffic that lost the recovery frames.
+    pub fn recovery_wait(&self) -> Option<Instant> {
+        self.recovery_needed.and(self.recovery_not_before)
     }
 
     /// Splits a frame into fragments that each fit `max_datagram_size` bytes and
@@ -242,6 +264,7 @@ impl VideoSender {
         // Only a frame flagged RECOVERY answers a loss or a key frame request.
         if matches!(kind, FrameKind::KeyRecovery | FrameKind::Recovery { .. }) {
             if let Some(base) = self.recovery_needed.take() {
+                self.recovery_not_before = None;
                 self.last_recovery = Some(SentRecovery {
                     base,
                     frame_number,
@@ -266,6 +289,15 @@ impl VideoSender {
     /// the one decoded.
     pub fn handle_decoded(&mut self, last_decoded: FrameNumber) {
         self.last_decoded = self.last_decoded.max(last_decoded);
+        if self
+            .last_recovery
+            .is_some_and(|recovery| self.last_decoded >= recovery.frame_number)
+        {
+            // The last recovery frame arrived, so a recovery frame still
+            // needed is no longer held back.
+            self.recovery_failures = 0;
+            self.recovery_not_before = None;
+        }
         while self.sent.len() > 1 && self.sent[0].frame_number <= self.last_decoded {
             self.sent.pop_front();
         }
@@ -307,13 +339,31 @@ impl VideoSender {
     }
 
     /// Processes a `LOSS` record, deciding whether a new recovery frame is needed
-    /// (Section 6.8.4).
+    /// (Section 6.8.4). A loss reported after a recovery frame the client has
+    /// not decoded means that frame failed: each failure in a row doubles
+    /// how long after it the next may be sent, up to a second.
     pub fn handle_loss(&mut self, loss: &LossRecord, smoothed_rtt: Duration, now: Instant) {
+        if self.recovery_needed.is_some() {
+            self.recovery_needed = Some(loss.last_decoded_frame);
+            return;
+        }
+        let repeat_delay = 2 * smoothed_rtt + RECOVERY_REPEAT_MARGIN;
         if let Some(recovery) = self.last_recovery {
             let still_arriving = loss.highest_frame_seen < recovery.frame_number
-                && now < recovery.sent_at + 2 * smoothed_rtt + RECOVERY_REPEAT_MARGIN;
+                && now < recovery.sent_at + repeat_delay;
             if recovery.base == loss.last_decoded_frame && still_arriving {
                 return;
+            }
+            let decoded = self.last_decoded.max(loss.last_decoded_frame);
+            if decoded < recovery.frame_number {
+                self.recovery_failures += 1;
+                let doublings = (self.recovery_failures - 1).min(u32::BITS - 1);
+                let wait = repeat_delay
+                    .saturating_mul(1 << doublings)
+                    .min(MAX_RECOVERY_WAIT);
+                self.recovery_not_before = Some(recovery.sent_at + wait);
+            } else {
+                self.recovery_failures = 0;
             }
         }
         self.recovery_needed = Some(loss.last_decoded_frame);
@@ -323,6 +373,7 @@ impl VideoSender {
     /// `RECOVERY` (Section 6.10).
     pub fn handle_keyframe_request(&mut self) {
         self.recovery_needed = Some(FrameNumber::NONE);
+        self.recovery_not_before = None;
     }
 
     /// Returns when [`VideoSender::handle_timeout`] must next be called to repair
@@ -555,7 +606,8 @@ mod tests {
             highest_frame_seen: frame(2),
         };
         sender.handle_loss(&loss, RTT, now);
-        assert_eq!(sender.recovery_needed(), Some(frame(1)));
+        assert_eq!(sender.recovery_needed(now), Some(frame(1)));
+        assert_eq!(sender.recovery_wait(), None);
 
         let recovery = sender
             .send_frame(
@@ -572,19 +624,94 @@ mod tests {
                 .flags
                 .contains(FragmentFlags::RECOVERY)
         );
-        assert_eq!(sender.recovery_needed(), None);
+        assert_eq!(sender.recovery_needed(now), None);
 
         // The same loss reported again before frame 3 can have arrived is ignored.
         sender.handle_loss(&loss, RTT, now + RTT);
-        assert_eq!(sender.recovery_needed(), None);
+        assert_eq!(sender.recovery_needed(now + RTT), None);
         // Once the client has seen frame 3 and still reports the loss, it is
-        // repeated.
+        // repeated, as soon as the first recovery frame could have arrived.
         let seen_recovery = LossRecord {
             highest_frame_seen: frame(3),
             ..loss
         };
         sender.handle_loss(&seen_recovery, RTT, now + RTT);
-        assert_eq!(sender.recovery_needed(), Some(frame(1)));
+        let repeat_delay = 2 * RTT + RECOVERY_REPEAT_MARGIN;
+        assert_eq!(sender.recovery_wait(), Some(now + repeat_delay));
+        assert_eq!(sender.recovery_needed(now + RTT), None);
+        assert_eq!(sender.recovery_needed(now + repeat_delay), Some(frame(1)));
+    }
+
+    /// Each recovery frame in a row that fails doubles the wait before the
+    /// next, up to a limit, until the client decodes one.
+    #[test]
+    fn recovery_backs_off() {
+        let mut sender = VideoSender::new(StreamId(VarInt::from_u32(1)));
+        let start = Instant::now();
+        sender
+            .send_frame(header(1), &[1], FrameKind::Key, DATAGRAM_SIZE, start)
+            .unwrap();
+        let repeat_delay = 2 * RTT + RECOVERY_REPEAT_MARGIN;
+        let mut now = start;
+        let mut waits = Vec::new();
+        // The client keeps reporting the loss after each recovery frame.
+        let report = |sender: &mut VideoSender, now: Instant| {
+            sender.handle_loss(
+                &LossRecord {
+                    stream_id: sender.stream_id(),
+                    last_decoded_frame: frame(1),
+                    highest_frame_seen: frame(sender.next_frame_number as u32),
+                },
+                RTT,
+                now,
+            );
+        };
+        report(&mut sender, now);
+        for _ in 0..8 {
+            let due = sender.recovery_wait().unwrap_or(now);
+            waits.push(due.saturating_duration_since(now));
+            now = due;
+            assert!(sender.recovery_needed(now).is_some());
+            sender
+                .send_frame(header(1), &[2], FrameKind::KeyRecovery, DATAGRAM_SIZE, now)
+                .unwrap();
+            report(&mut sender, now);
+        }
+        assert_eq!(
+            waits,
+            [
+                Duration::ZERO,
+                repeat_delay,
+                repeat_delay * 2,
+                repeat_delay * 4,
+                repeat_delay * 8,
+                repeat_delay * 16,
+                MAX_RECOVERY_WAIT,
+                MAX_RECOVERY_WAIT,
+            ]
+        );
+
+        // Once a recovery frame is decoded, nothing is held back, and the
+        // next loss is answered at once.
+        assert!(sender.recovery_wait().is_some());
+        sender.handle_decoded(frame(sender.next_frame_number as u32 - 1));
+        assert_eq!(sender.recovery_wait(), None);
+        assert!(sender.recovery_needed(now).is_some());
+        sender
+            .send_frame(header(1), &[3], FrameKind::KeyRecovery, DATAGRAM_SIZE, now)
+            .unwrap();
+        sender.handle_decoded(frame(sender.next_frame_number as u32 - 1));
+        sender.handle_loss(
+            &LossRecord {
+                stream_id: sender.stream_id(),
+                last_decoded_frame: frame(sender.next_frame_number as u32 - 1),
+                highest_frame_seen: frame(sender.next_frame_number as u32),
+            },
+            RTT,
+            now,
+        );
+        assert_eq!(sender.recovery_wait(), None);
+        assert!(sender.recovery_needed(now).is_some());
     }
 
     /// A key frame request requires a key frame.
@@ -592,7 +719,10 @@ mod tests {
     fn keyframe_request() {
         let mut sender = VideoSender::new(StreamId(VarInt::from_u32(1)));
         sender.handle_keyframe_request();
-        assert_eq!(sender.recovery_needed(), Some(FrameNumber::NONE));
+        assert_eq!(
+            sender.recovery_needed(Instant::now()),
+            Some(FrameNumber::NONE)
+        );
     }
 
     /// The newest frame is resent if the client does not report it decoded.

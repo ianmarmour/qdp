@@ -1071,7 +1071,7 @@ mod tests {
             record,
             FeedbackRecord::Loss(LossRecord { last_decoded_frame, .. }) if *last_decoded_frame == frame(1)
         )));
-        assert_eq!(harness.sender.recovery_needed(), Some(frame(1)));
+        assert_eq!(harness.sender.recovery_needed(harness.now), Some(frame(1)));
 
         // Every feedback datagram carries the LOSS record while in LOSS.
         assert!(matches!(

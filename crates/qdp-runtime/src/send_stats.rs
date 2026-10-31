@@ -20,6 +20,9 @@ const BYTES_PER_KILOBYTE: f64 = 1000.0;
 /// The bits in a megabit, for logs.
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
+/// A whole, in percent.
+const PERCENT: f64 = 100.0;
+
 /// Returns how long the queued datagrams will take to leave at the rate the
 /// congestion window allows: one window per round trip.
 pub(crate) fn queue_delay(queued_bytes: usize, path: &PathStats) -> Duration {
@@ -130,6 +133,17 @@ impl SendStats {
             return;
         }
         let seconds = elapsed.as_secs_f64();
+        let lost_packets = path
+            .lost_packets
+            .saturating_sub(self.path_at_start.lost_packets);
+        let sent_packets = path
+            .sent_packets
+            .saturating_sub(self.path_at_start.sent_packets);
+        let lost_percent = if sent_packets == 0 {
+            0.0
+        } else {
+            lost_packets as f64 * PERCENT / sent_packets as f64
+        };
         let frames = u32::try_from(self.frames).unwrap_or(u32::MAX);
         let encode_average = self.encode_total.checked_div(frames).unwrap_or_default();
         let scale_average = self.scale_total.checked_div(frames).unwrap_or_default();
@@ -149,9 +163,8 @@ impl SendStats {
             rtt_ms = milliseconds(path.rtt),
             cwnd_kb = format!("{:.0}", path.congestion_window as f64 / BYTES_PER_KILOBYTE),
             queued_kb = format!("{:.1}", queued_bytes as f64 / BYTES_PER_KILOBYTE),
-            lost_packets = path
-                .lost_packets
-                .saturating_sub(self.path_at_start.lost_packets),
+            lost_packets,
+            lost_percent = format!("{:.1}", lost_percent),
             congestion_events = path
                 .congestion_events
                 .saturating_sub(self.path_at_start.congestion_events),
