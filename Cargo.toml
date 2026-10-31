@@ -69,3 +69,9 @@ overflow-checks = false
 # published from. Remove this entry once rav1e accepts an equivalent change.
 [patch.crates-io]
 rav1e = { git = "https://github.com/ianmarmour/rav1e", rev = "9cedec14a47010f0e078640707a6a0403abfa4de" }
+# rav1d comes from its repository at the v1.1.0 tag, the commit the crates.io
+# release was published from, because the release leaves out every header file,
+# including src/arm/asm-offsets.h, which its 64-bit Arm assembly needs; builds on
+# Apple Silicon and other Arm machines fail without it. Remove this entry once a
+# release includes the header.
+rav1d = { git = "https://github.com/memorysafety/rav1d", rev = "782dab2135ea64a057c097088a13eb8ed3cc3320" }
