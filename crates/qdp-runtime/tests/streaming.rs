@@ -76,6 +76,8 @@ struct Collector {
     cursors: Vec<Option<CursorImage>>,
     /// The warps the client received.
     warps: Vec<CursorWarp>,
+    /// The size the host scales the pattern to, if it does.
+    scaled: Option<(usize, usize)>,
 }
 
 /// Where the cursor source's pointer is, in pixels.
@@ -286,7 +288,8 @@ impl FrameSink for Collector {
         // The host sends every frame it captures, so frame number n shows pattern
         // frame n - 1.
         let number = info.frame_number.0.into_inner();
-        let expected = TestPattern::frame(WIDTH, HEIGHT, number - 1);
+        let (width, height) = self.scaled.unwrap_or((WIDTH, HEIGHT));
+        let expected = TestPattern::frame(WIDTH, HEIGHT, number - 1).scaled(width, height);
         let psnr = frame.luma_psnr(&expected).unwrap_or(0.0);
         self.frames.push((number, psnr, info));
         if self.frames.len() == INPUT_FRAME {
@@ -369,6 +372,7 @@ fn client_options(credentials: ClientCredentials) -> ClientOptions {
             width: WIDTH as u32,
             height: HEIGHT as u32,
             refresh_millihertz: 60_000,
+            scale_percent: DisplaySize::UNSCALED,
         },
         decoder_threads: 2,
         decoder: CodecPreference::Software,
@@ -388,6 +392,20 @@ async fn stream(
     credentials: ClientCredentials,
     input: Option<(InputHandle, InputQueue)>,
 ) -> Result<Collector, RuntimeError> {
+    let display = client_options(credentials.clone()).display;
+    stream_on(address, pin, credentials, input, display).await
+}
+
+/// Connects a client with `credentials` whose display is `display`, and
+/// streams until the collector stops, sending the test input if `input` is
+/// given.
+async fn stream_on(
+    address: SocketAddr,
+    pin: KeyPin,
+    credentials: ClientCredentials,
+    input: Option<(InputHandle, InputQueue)>,
+    display: DisplaySize,
+) -> Result<Collector, RuntimeError> {
     let endpoint = ClientEndpoint::bind(loopback()).unwrap();
     let connection = endpoint
         .connect(
@@ -396,10 +414,15 @@ async fn stream(
             HostVerification::PinnedKeys(vec![pin]),
         )
         .await?;
-    let options = client_options(credentials);
+    let options = ClientOptions {
+        display,
+        ..client_options(credentials)
+    };
     let (handle, queue) = input.unzip();
+    let full_size = (display.width as usize, display.height as usize) >= (WIDTH, HEIGHT);
     let mut collector = Collector {
         input: handle,
+        scaled: (!full_size).then_some((display.width as usize, display.height as usize)),
         ..Collector::default()
     };
     let summary = run(
@@ -556,6 +579,49 @@ async fn input_reaches_the_host() {
         (keyboard.language.as_str(), keyboard.layout.as_str()),
         ("en-GB", "gb")
     );
+}
+
+/// A client whose display is half the size of the host's monitor receives
+/// video scaled to fit it, and its input lands where it points on the
+/// monitor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn video_scales_to_the_display() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let recorder = Recorder::default();
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(recorder.clone()),
+        None,
+        HostAudio::default(),
+    );
+    let display = DisplaySize {
+        width: WIDTH as u32 / 2,
+        height: HEIGHT as u32 / 2,
+        refresh_millihertz: 60_000,
+        scale_percent: DisplaySize::UNSCALED,
+    };
+    let credentials = ClientCredentials::Token(TOKEN.to_vec());
+    let collector = tokio::time::timeout(
+        TEST_TIMEOUT,
+        stream_on(address, pin, credentials, Some(input_channel()), display),
+    )
+    .await
+    .expect("streaming finishes in time")
+    .unwrap();
+    check_frames(&collector);
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    let actions = recorder.0.lock().unwrap().clone();
+    // The client pointed at (10, 20) on the half-size video.
+    assert!(actions.contains(&InputAction::PointerMoveTo {
+        x: 20 * 256,
+        y: 40 * 256
+    }));
 }
 
 /// A pointer the host captures apart from its frames reaches the client as

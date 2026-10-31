@@ -1,5 +1,7 @@
 //! Uncompressed video frames.
 
+use std::ops::Range;
+
 /// An 8-bit YUV 4:2:0 frame with tightly packed planes.
 ///
 /// The luma plane has `width × height` samples; each chroma plane has
@@ -48,6 +50,51 @@ pub enum Rgb32Order {
     Bgr,
     /// Red, green, blue, then padding: `RGBx` or `RGBA`.
     Rgb,
+}
+
+/// Returns, for each of `target` positions along one side of a scaled plane,
+/// the range of the `source` positions it covers, never empty.
+fn spans(source: usize, target: usize) -> Vec<Range<usize>> {
+    (0..target)
+        .map(|index| {
+            let start = index * source / target;
+            let end = ((index + 1) * source / target).max(start + 1);
+            start..end
+        })
+        .collect()
+}
+
+/// Scales a plane of `source` width and height to `target`, averaging the
+/// samples each target sample covers.
+fn scale_plane(
+    plane: &[u8],
+    (source_width, source_height): (usize, usize),
+    (target_width, target_height): (usize, usize),
+) -> Vec<u8> {
+    let columns = spans(source_width, target_width);
+    let rows = spans(source_height, target_height);
+    let mut scaled = Vec::with_capacity(target_width * target_height);
+    let mut sums = vec![0_u32; target_width];
+    for row in &rows {
+        sums.fill(0);
+        for line in plane
+            .chunks_exact(source_width)
+            .skip(row.start)
+            .take(row.len())
+        {
+            for (sum, column) in sums.iter_mut().zip(&columns) {
+                *sum += line[column.clone()]
+                    .iter()
+                    .map(|&sample| u32::from(sample))
+                    .sum::<u32>();
+            }
+        }
+        for (sum, column) in sums.iter().zip(&columns) {
+            let count = (column.len() * row.len()) as u32;
+            scaled.push(((sum + count / 2) / count) as u8);
+        }
+    }
+    scaled
 }
 
 /// Applies 16-bit fixed-point weights to red, green and blue, with rounding.
@@ -225,6 +272,24 @@ impl Yuv420Frame {
         }
     }
 
+    /// Returns the frame scaled to `width × height` pixels, each sample the
+    /// average of the samples it covers, as suits making a frame smaller, or
+    /// the frame itself if it has that size.
+    pub fn scaled(self, width: usize, height: usize) -> Self {
+        if (width, height) == (self.width, self.height) {
+            return self;
+        }
+        let (chroma_width, chroma_height) = chroma_size(width, height);
+        let source_chroma = (self.chroma_width(), self.chroma_height());
+        Self {
+            width,
+            height,
+            y: scale_plane(&self.y, (self.width, self.height), (width, height)),
+            u: scale_plane(&self.u, source_chroma, (chroma_width, chroma_height)),
+            v: scale_plane(&self.v, source_chroma, (chroma_width, chroma_height)),
+        }
+    }
+
     /// Returns the peak signal-to-noise ratio of the luma plane against
     /// `reference`, in decibels, or `None` if the sizes differ. Identical planes
     /// give infinity.
@@ -284,6 +349,24 @@ mod tests {
         let frame = Yuv420Frame::from_rgb32(3, 3, 12, Rgb32Order::Rgb, &padded).unwrap();
         assert_eq!((frame.chroma_width(), frame.chroma_height()), (2, 2));
         assert!(Yuv420Frame::from_rgb32(3, 3, 12, Rgb32Order::Rgb, &padded[..20]).is_none());
+    }
+
+    /// Scaling down averages the samples each output sample covers, in
+    /// every plane, and odd sizes keep their rounded-up chroma.
+    #[test]
+    fn scales_by_averaging() {
+        let luma = vec![0, 100, 200, 50, 10, 110, 210, 70];
+        let frame = Yuv420Frame::from_planes(4, 2, luma, vec![20, 40], vec![60, 80]).unwrap();
+        let half = frame.clone().scaled(2, 1);
+        assert_eq!(half.y(), [55, 133]);
+        assert_eq!((half.u(), half.v()), (&[30][..], &[70][..]));
+        assert_eq!(frame.clone().scaled(4, 2), frame);
+        let odd = Yuv420Frame::black(33, 17).scaled(15, 9);
+        assert_eq!(
+            (odd.width(), odd.chroma_width(), odd.chroma_height()),
+            (15, 8, 5)
+        );
+        assert!(odd.y().iter().all(|&sample| sample == LIMITED_BLACK));
     }
 
     /// Cropping keeps the top-left pixels of every plane.

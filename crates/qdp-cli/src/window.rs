@@ -17,11 +17,11 @@ use qdp::message::{CursorImage, PointerKind, PointerMode};
 use qdp_codec::Yuv420Frame;
 use qdp_desktop::{DeviceSelector, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
-    CursorWarp, FrameInfo, FrameSink, InputHandle, PenInput, PointerButton, SinkControl,
-    TouchPhase, UserInput, WarpKind,
+    CursorWarp, DisplaySize, FrameInfo, FrameSink, InputHandle, PenInput, PointerButton,
+    SinkControl, TouchPhase, UserInput, WarpKind,
 };
 use softbuffer::{Context, Surface};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tracing::{debug, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -31,6 +31,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
 use crate::args::TouchpadMode;
@@ -244,20 +245,39 @@ pub struct WindowApp {
     passthrough: Option<PassthroughCapture>,
     /// The touchpad, if its raw contacts are sent.
     touchpad: Option<TouchpadCapture>,
+    /// Tells the session the display it is shown on, once the window has
+    /// opened and measured it.
+    display_sender: Option<oneshot::Sender<DisplaySize>>,
+}
+
+/// What the user chose for the window's session.
+#[derive(Debug, Clone)]
+pub struct WindowChoices<'a> {
+    /// The window's title.
+    pub title: String,
+    /// The devices to pass through.
+    pub passthrough: &'a [DeviceSelector],
+    /// How the touchpad is sent.
+    pub touchpad: TouchpadMode,
 }
 
 impl WindowApp {
     /// Creates the application.
     pub fn new(
-        title: String,
+        choices: WindowChoices<'_>,
         slot: FrameSlot,
         close: Arc<CloseSignal>,
         input: InputHandle,
         proxy: EventLoopProxy<WindowMessage>,
-        passthrough: &[DeviceSelector],
-        touchpad: TouchpadMode,
+        display_sender: oneshot::Sender<DisplaySize>,
     ) -> Self {
+        let WindowChoices {
+            title,
+            passthrough,
+            touchpad,
+        } = choices;
         Self {
+            display_sender: Some(display_sender),
             title,
             display: None,
             slot,
@@ -707,7 +727,12 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             return;
         }
         match self.open(event_loop) {
-            Ok(display) => self.display = Some(display),
+            Ok(display) => {
+                if let Some(sender) = self.display_sender.take() {
+                    let _ = sender.send(display_size(&display.window));
+                }
+                self.display = Some(display);
+            }
             Err(message) => self.fail(event_loop, message),
         }
     }
@@ -831,6 +856,31 @@ fn attach_pen(
     .inspect(|_| debug!("reading the pen over the window"))
     .inspect_err(|error| warn!(error, "the pen is not sent"))
     .ok()
+}
+
+/// Returns the display the session is shown on: the monitor the window is
+/// on, whose size the window can grow to, or the window itself if no
+/// monitor is known.
+fn display_size(window: &Window) -> DisplaySize {
+    let monitor = window
+        .current_monitor()
+        .or_else(|| window.primary_monitor())
+        .or_else(|| {
+            window.available_monitors().max_by_key(|monitor| {
+                u64::from(monitor.size().width) * u64::from(monitor.size().height)
+            })
+        });
+    let size = monitor
+        .as_ref()
+        .map_or_else(|| window.inner_size(), MonitorHandle::size);
+    DisplaySize {
+        width: size.width,
+        height: size.height,
+        refresh_millihertz: monitor
+            .and_then(|monitor| monitor.refresh_rate_millihertz())
+            .unwrap_or(0),
+        scale_percent: (window.scale_factor() * f64::from(DisplaySize::UNSCALED)).round() as u32,
+    }
 }
 
 /// Creates the event loop the window runs on. It must be created on the main
