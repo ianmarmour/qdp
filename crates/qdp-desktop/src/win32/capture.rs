@@ -1,16 +1,17 @@
 //! Screen capture on Windows with DXGI Desktop Duplication, which copies each
 //! new desktop image on the graphics card and reports the pointer apart from
-//! it.
+//! it, for the client to draw.
 //!
 //! Desktop Duplication stops while the secure desktop (the sign-in screen,
 //! Ctrl+Alt+Delete and elevation prompts) is shown; the capture keeps
 //! delivering the last image until it can duplicate the desktop again.
 
 use std::slice;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{FrameSource, RuntimeError};
+use qdp_runtime::{CursorShape, CursorState, FrameSource, RuntimeError};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
@@ -68,9 +69,25 @@ struct Pointer {
     /// Whether the pointer is on the captured monitor and shown.
     visible: bool,
     /// The top-left corner of its image, in desktop pixels.
-    position: (i64, i64),
-    /// Its image, once reported.
-    shape: Option<PointerShape>,
+    position: (i32, i32),
+    /// Its image as RGBA, once reported.
+    shape: Option<Arc<CursorShape>>,
+}
+
+impl Pointer {
+    /// Returns the pointer as the client draws it: its hotspot's position
+    /// and its image, while it is shown.
+    fn state(&self) -> CursorState {
+        let shape = self.shape.clone().filter(|_| self.visible);
+        let position = shape.as_ref().map(|shape| {
+            let offset = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+            (
+                self.position.0.saturating_add(offset(shape.hotspot.0)),
+                self.position.1.saturating_add(offset(shape.hotspot.1)),
+            )
+        });
+        CursorState { position, shape }
+    }
 }
 
 /// Returns the adapter and output of the primary monitor: the output whose
@@ -123,11 +140,9 @@ pub struct DesktopDuplication {
     size: (usize, usize),
     /// The newest desktop image, upright.
     desktop: Bgra,
-    /// The desktop with the pointer drawn over it.
-    composed: Bgra,
-    /// The pointer.
+    /// The pointer, which the client draws (Section 9.1).
     pointer: Pointer,
-    /// The newest frame, or `None` if the desktop or pointer changed since.
+    /// The newest frame, or `None` if the desktop changed since.
     frame: Option<Yuv420Frame>,
 }
 
@@ -188,7 +203,6 @@ impl DesktopDuplication {
             rotation,
             size: (0, 0),
             desktop: Bgra::default(),
-            composed: Bgra::default(),
             pointer: Pointer::default(),
             frame: None,
         };
@@ -272,11 +286,7 @@ impl DesktopDuplication {
         if info.LastMouseUpdateTime != 0 {
             let position = info.PointerPosition;
             self.pointer.visible = position.Visible.as_bool();
-            self.pointer.position = (
-                i64::from(position.Position.x),
-                i64::from(position.Position.y),
-            );
-            self.frame = None;
+            self.pointer.position = (position.Position.x, position.Position.y);
         }
         if info.PointerShapeBufferSize > 0 {
             let mut buffer = vec![0_u8; info.PointerShapeBufferSize as usize];
@@ -293,18 +303,20 @@ impl DesktopDuplication {
                 )
             }
             .map_err(|error| format!("cannot read the pointer's image: {error}"))?;
-            self.pointer.shape = ShapeKind::from_dxgi(shape.Type).and_then(|kind| {
-                PointerShape::new(
-                    kind,
-                    (shape.Width as usize, shape.Height as usize),
-                    shape.Pitch as usize,
-                    buffer,
-                )
-            });
+            let hotspot = (shape.HotSpot.x, shape.HotSpot.y);
+            self.pointer.shape = ShapeKind::from_dxgi(shape.Type)
+                .and_then(|kind| {
+                    PointerShape::new(
+                        kind,
+                        (shape.Width as usize, shape.Height as usize),
+                        shape.Pitch as usize,
+                        buffer,
+                    )
+                })
+                .map(|pointer| Arc::new(cursor_shape(&pointer, hotspot)));
             if self.pointer.shape.is_none() {
                 warn!(kind = shape.Type, "unreadable pointer image skipped");
             }
-            self.frame = None;
         }
         Ok(())
     }
@@ -375,24 +387,17 @@ impl DesktopDuplication {
         .map_err(|error| format!("cannot create a texture: {error}"))?;
         staging.ok_or_else(|| "the graphics adapter returned no texture".to_owned())
     }
+}
 
-    /// Returns the desktop with the pointer drawn over it.
-    fn compose(&mut self) -> Option<Yuv420Frame> {
-        let image = match (&self.pointer.shape, self.pointer.visible) {
-            (Some(shape), true) => {
-                self.composed.clone_from(&self.desktop);
-                shape.draw(&mut self.composed, self.pointer.position);
-                &self.composed
-            }
-            _ => &self.desktop,
-        };
-        Yuv420Frame::from_rgb32(
-            image.width,
-            image.height,
-            image.stride(),
-            Rgb32Order::Bgr,
-            &image.data,
-        )
+/// Returns a pointer image as the client draws it, with its hotspot.
+fn cursor_shape(pointer: &PointerShape, (hotspot_x, hotspot_y): (i32, i32)) -> CursorShape {
+    let (width, height) = (pointer.width() as u32, pointer.height() as u32);
+    let clamp = |value: i32, size: u32| u32::try_from(value).unwrap_or(0).min(size - 1);
+    CursorShape {
+        width,
+        height,
+        hotspot: (clamp(hotspot_x, width), clamp(hotspot_y, height)),
+        pixels: pointer.to_rgba(),
     }
 }
 
@@ -425,10 +430,21 @@ impl FrameSource for DesktopDuplication {
             ));
         }
         if self.frame.is_none() {
-            self.frame = self.compose();
+            let desktop = &self.desktop;
+            self.frame = Yuv420Frame::from_rgb32(
+                desktop.width,
+                desktop.height,
+                desktop.stride(),
+                Rgb32Order::Bgr,
+                &desktop.data,
+            );
         }
         self.frame
             .clone()
             .ok_or_else(|| RuntimeError::Capture("the screen image is unreadable".to_owned()))
+    }
+
+    fn cursor(&mut self) -> Option<CursorState> {
+        Some(self.pointer.state())
     }
 }

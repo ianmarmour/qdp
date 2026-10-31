@@ -1,6 +1,6 @@
 //! The desktop image Desktop Duplication delivers, turned upright, and the
-//! pointer drawn over it: Desktop Duplication delivers the pointer apart from
-//! the desktop.
+//! pointer's image, which Desktop Duplication delivers apart from the desktop,
+//! as RGBA for the client to draw.
 
 /// Bytes per pixel of a 32-bit BGRA image.
 const PIXEL: usize = 4;
@@ -8,7 +8,7 @@ const PIXEL: usize = 4;
 /// A fully opaque alpha value.
 const OPAQUE: u8 = 0xff;
 
-/// Every bit of a colour channel.
+/// Every bit of a colour channel: white, in each channel.
 const ALL_BITS: u8 = 0xff;
 
 /// How far the display is rotated from its native orientation, which is the
@@ -104,12 +104,6 @@ impl Bgra {
         }
         Some(())
     }
-
-    /// Returns the pixel at `(x, y)`, which must be inside the image.
-    fn pixel_mut(&mut self, x: usize, y: usize) -> &mut [u8] {
-        let start = y * self.stride() + x * PIXEL;
-        &mut self.data[start..start + PIXEL]
-    }
 }
 
 /// How a pointer shape's pixels combine with the desktop under them
@@ -144,6 +138,24 @@ impl ShapeKind {
     }
 }
 
+/// What one pointer pixel does to the desktop under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    /// Covers the desktop with this RGBA colour, blended by its alpha.
+    Paint([u8; 4]),
+    /// Inverts the desktop, which an RGBA image cannot show.
+    Invert,
+    /// Leaves the desktop alone.
+    Transparent,
+}
+
+/// The colour inverting pixels are shown in.
+const INVERT_COLOUR: [u8; 4] = [0, 0, 0, OPAQUE];
+
+/// The colour of the outline around inverting pixels, which keeps them
+/// visible on dark backgrounds.
+const OUTLINE_COLOUR: [u8; 4] = [ALL_BITS, ALL_BITS, ALL_BITS, OPAQUE];
+
 /// A pointer's image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PointerShape {
@@ -161,7 +173,7 @@ pub(super) struct PointerShape {
 
 impl PointerShape {
     /// Returns a shape from Desktop Duplication's description of it, or
-    /// `None` if `data` is too short.
+    /// `None` if it is empty or `data` is too short.
     pub(super) fn new(
         kind: ShapeKind,
         (width, height): (usize, usize),
@@ -180,7 +192,11 @@ impl PointerShape {
             ShapeKind::Monochrome => width.div_ceil(8),
             ShapeKind::Color | ShapeKind::MaskedColor => width * PIXEL,
         };
-        if pitch < row_bytes || (rows > 0 && data.len() < pitch * (rows - 1) + row_bytes) {
+        if width == 0
+            || height == 0
+            || pitch < row_bytes
+            || data.len() < pitch * (rows - 1) + row_bytes
+        {
             return None;
         }
         Some(Self {
@@ -190,6 +206,16 @@ impl PointerShape {
             pitch,
             data,
         })
+    }
+
+    /// Returns the width in pixels.
+    pub(super) const fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Returns the height in pixels.
+    pub(super) const fn height(&self) -> usize {
+        self.height
     }
 
     /// Returns bit `x` of a monochrome mask row.
@@ -205,68 +231,55 @@ impl PointerShape {
         pixel
     }
 
-    /// Draws the shape over `image` with its top-left corner at `(left,
-    /// top)`, clipped to the image.
-    pub(super) fn draw(&self, image: &mut Bgra, (left, top): (i64, i64)) {
-        for y in 0..self.height {
-            let Some(image_y) = offset(top, y, image.height) else {
-                continue;
-            };
-            for x in 0..self.width {
-                let Some(image_x) = offset(left, x, image.width) else {
-                    continue;
-                };
-                let pixel = image.pixel_mut(image_x, image_y);
-                match self.kind {
-                    ShapeKind::Monochrome => {
-                        let keep = if self.mask_bit(y, x) { ALL_BITS } else { 0 };
-                        let flip = if self.mask_bit(self.height + y, x) {
-                            ALL_BITS
-                        } else {
-                            0
-                        };
-                        for channel in &mut pixel[..3] {
-                            *channel = (*channel & keep) ^ flip;
-                        }
-                    }
-                    ShapeKind::Color => {
-                        let [blue, green, red, alpha] = self.colour(x, y);
-                        for (channel, source) in pixel[..3].iter_mut().zip([blue, green, red]) {
-                            *channel = blend(source, *channel, alpha);
-                        }
-                    }
-                    ShapeKind::MaskedColor => {
-                        let [blue, green, red, mask] = self.colour(x, y);
-                        let invert = if mask == OPAQUE {
-                            [pixel[0], pixel[1], pixel[2]]
-                        } else {
-                            [0; 3]
-                        };
-                        for ((channel, source), under) in
-                            pixel[..3].iter_mut().zip([blue, green, red]).zip(invert)
-                        {
-                            *channel = source ^ under;
-                        }
-                    }
-                }
-                pixel[3] = OPAQUE;
+    /// Returns what the pixel at `(x, y)` does to the desktop.
+    fn effect(&self, x: usize, y: usize) -> Effect {
+        match self.kind {
+            ShapeKind::Monochrome => match (self.mask_bit(y, x), self.mask_bit(self.height + y, x))
+            {
+                (false, false) => Effect::Paint([0, 0, 0, OPAQUE]),
+                (false, true) => Effect::Paint([ALL_BITS, ALL_BITS, ALL_BITS, OPAQUE]),
+                (true, false) => Effect::Transparent,
+                (true, true) => Effect::Invert,
+            },
+            ShapeKind::Color => {
+                let [blue, green, red, alpha] = self.colour(x, y);
+                Effect::Paint([red, green, blue, alpha])
             }
+            ShapeKind::MaskedColor => match self.colour(x, y) {
+                [blue, green, red, 0] => Effect::Paint([red, green, blue, OPAQUE]),
+                [0, 0, 0, _] => Effect::Transparent,
+                _ => Effect::Invert,
+            },
         }
     }
-}
 
-/// Returns `start + index` if it is inside `0..limit`.
-fn offset(start: i64, index: usize, limit: usize) -> Option<usize> {
-    usize::try_from(start + i64::try_from(index).ok()?)
-        .ok()
-        .filter(|&position| position < limit)
-}
-
-/// Blends a channel of `source` with `alpha` over `destination`.
-fn blend(source: u8, destination: u8, alpha: u8) -> u8 {
-    let alpha = u32::from(alpha);
-    let mixed = u32::from(source) * alpha + u32::from(destination) * (u32::from(OPAQUE) - alpha);
-    ((mixed + u32::from(OPAQUE) / 2) / u32::from(OPAQUE)) as u8
+    /// Returns the shape as RGBA pixels with straight alpha, row by row, as
+    /// QDP sends pointer images (Section 9.2). Pixels that invert the
+    /// desktop become black with a white outline.
+    pub(super) fn to_rgba(&self) -> Vec<u8> {
+        let effects: Vec<Effect> = (0..self.height)
+            .flat_map(|y| (0..self.width).map(move |x| (x, y)))
+            .map(|(x, y)| self.effect(x, y))
+            .collect();
+        let inverts_near = |x: usize, y: usize| {
+            (y.saturating_sub(1)..=(y + 1).min(self.height - 1)).any(|near_y| {
+                (x.saturating_sub(1)..=(x + 1).min(self.width - 1))
+                    .any(|near_x| effects[near_y * self.width + near_x] == Effect::Invert)
+            })
+        };
+        let mut rgba = Vec::with_capacity(effects.len() * PIXEL);
+        for (index, effect) in effects.iter().enumerate() {
+            let (x, y) = (index % self.width, index / self.width);
+            let colour = match effect {
+                Effect::Paint(colour) => *colour,
+                Effect::Invert => INVERT_COLOUR,
+                Effect::Transparent if inverts_near(x, y) => OUTLINE_COLOUR,
+                Effect::Transparent => [0; 4],
+            };
+            rgba.extend_from_slice(&colour);
+        }
+        rgba
+    }
 }
 
 #[cfg(test)]
@@ -337,57 +350,54 @@ mod tests {
         );
     }
 
-    /// Returns a `width × height` grey image.
-    fn grey(width: usize, height: usize) -> Bgra {
-        Bgra {
-            width,
-            height,
-            data: [0x80, 0x80, 0x80, OPAQUE].repeat(width * height),
-        }
+    /// Returns the RGBA pixels of a shape.
+    fn pixels(shape: &PointerShape) -> Vec<[u8; 4]> {
+        shape
+            .to_rgba()
+            .chunks_exact(PIXEL)
+            .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+            .collect()
     }
 
-    /// Monochrome masks make black, white, the desktop, or its inverse.
+    /// Monochrome masks make black, white, transparency, and black for
+    /// inversion, outlined in white.
     #[test]
-    fn draws_monochrome_pointers() {
+    fn converts_monochrome_pointers() {
         // A 4 × 1 shape: AND mask 0011, XOR mask 0101.
         let shape = PointerShape::new(ShapeKind::Monochrome, (4, 2), 1, vec![0x30, 0x50]).unwrap();
-        let mut image = grey(4, 1);
-        shape.draw(&mut image, (0, 0));
-        let colours: Vec<u8> = image.data.chunks_exact(PIXEL).map(|p| p[0]).collect();
-        assert_eq!(colours, [0x00, 0xff, 0x80, 0x7f]);
+        assert_eq!((shape.width(), shape.height()), (4, 1));
+        assert_eq!(
+            pixels(&shape),
+            [OPAQUE_BLACK, OPAQUE_WHITE, OPAQUE_WHITE, OPAQUE_BLACK]
+        );
+        let lone = PointerShape::new(ShapeKind::Monochrome, (3, 2), 1, vec![0xe0, 0x00]).unwrap();
+        assert_eq!(pixels(&lone), [[0; 4]; 3]);
     }
 
-    /// Colour pointers blend by alpha; masked colour pointers replace or XOR.
+    /// Colour pointers keep their alpha; masked colour pointers replace or
+    /// invert.
     #[test]
-    fn draws_colour_pointers() {
-        let pixels = [
-            [0xff, 0xff, 0xff, 0xff],
-            [0xff, 0xff, 0xff, 0x00],
-            [0x00, 0x00, 0x00, 0x80],
-        ];
-        let shape = PointerShape::new(ShapeKind::Color, (3, 1), 12, pixels.concat()).unwrap();
-        let mut image = grey(3, 1);
-        shape.draw(&mut image, (0, 0));
-        let colours: Vec<u8> = image.data.chunks_exact(PIXEL).map(|p| p[0]).collect();
-        assert_eq!(colours, [0xff, 0x80, 0x40]);
-
-        let pixels = [[0x0f, 0x0f, 0x0f, 0x00], [0x0f, 0x0f, 0x0f, 0xff]];
-        let shape = PointerShape::new(ShapeKind::MaskedColor, (2, 1), 8, pixels.concat()).unwrap();
-        let mut image = grey(2, 1);
-        shape.draw(&mut image, (0, 0));
-        let colours: Vec<u8> = image.data.chunks_exact(PIXEL).map(|p| p[0]).collect();
-        assert_eq!(colours, [0x0f, 0x8f]);
+    fn converts_colour_pointers() {
+        let shape = PointerShape::new(ShapeKind::Color, (1, 1), 4, vec![1, 2, 3, 4]).unwrap();
+        assert_eq!(pixels(&shape), [[3, 2, 1, 4]]);
+        let masked = [[1, 2, 3, 0], [0, 0, 0, OPAQUE], [9, 9, 9, OPAQUE]].concat();
+        let shape = PointerShape::new(ShapeKind::MaskedColor, (3, 1), 12, masked).unwrap();
+        assert_eq!(
+            pixels(&shape),
+            [[3, 2, 1, OPAQUE], OPAQUE_WHITE, OPAQUE_BLACK]
+        );
     }
 
-    /// Pointers partly off the desktop are clipped.
+    /// Empty and short shapes are refused.
     #[test]
-    fn clips_pointers() {
-        let shape = PointerShape::new(ShapeKind::Color, (2, 2), 8, vec![0xff; 16]).unwrap();
-        let mut image = grey(2, 2);
-        shape.draw(&mut image, (-1, 1));
-        let colours: Vec<u8> = image.data.chunks_exact(PIXEL).map(|p| p[0]).collect();
-        assert_eq!(colours, [0x80, 0x80, 0xff, 0x80]);
-        shape.draw(&mut image, (5, 5));
+    fn refuses_bad_shapes() {
         assert!(PointerShape::new(ShapeKind::Color, (2, 2), 8, vec![0; 15]).is_none());
+        assert!(PointerShape::new(ShapeKind::Color, (0, 0), 0, Vec::new()).is_none());
     }
+
+    /// Opaque black.
+    const OPAQUE_BLACK: [u8; 4] = [0, 0, 0, OPAQUE];
+
+    /// Opaque white.
+    const OPAQUE_WHITE: [u8; 4] = [ALL_BITS, ALL_BITS, ALL_BITS, OPAQUE];
 }

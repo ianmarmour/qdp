@@ -26,9 +26,10 @@ use objc2_screen_capture_kit::{
     SCStreamOutput, SCStreamOutputType,
 };
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{FrameSource, RuntimeError};
+use qdp_runtime::{CursorState, FrameSource, RuntimeError};
 use tracing::{debug, info};
 
+use super::cursor::SystemCursor;
 use crate::latest_frame::LatestFrame;
 
 /// How long to wait for ScreenCaptureKit's answers and the first frame.
@@ -136,6 +137,9 @@ pub struct MacScreenCapture {
     stream: Retained<SCStream>,
     /// The output receiving frames and errors, kept alive with the stream.
     _output: Retained<ScreenOutput>,
+    /// Reads the pointer, which the frames then leave out, if macOS reports
+    /// it.
+    cursor: Option<SystemCursor>,
 }
 
 // SAFETY: ScreenCaptureKit's stream may be controlled from any thread, and
@@ -179,6 +183,9 @@ impl MacScreenCapture {
                 &NSArray::new(),
             )
         };
+        // The client draws the pointer where macOS reports it (Section 9.1);
+        // otherwise the frames show it.
+        let cursor = SystemCursor::new(width, height);
         // SAFETY: the configuration's setters take plain values.
         let configuration = unsafe {
             let configuration = SCStreamConfiguration::new();
@@ -186,7 +193,7 @@ impl MacScreenCapture {
             configuration.setHeight(height);
             configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
             configuration.setMinimumFrameInterval(CMTime::new(1, FRAME_RATE));
-            configuration.setShowsCursor(true);
+            configuration.setShowsCursor(cursor.is_none());
             configuration.setQueueDepth(QUEUE_DEPTH);
             configuration
         };
@@ -225,6 +232,7 @@ impl MacScreenCapture {
             latest,
             stream,
             _output: output,
+            cursor,
         };
         capture.latest.wait(TIMEOUT)?;
         info!(width, height, "capturing the screen");
@@ -270,6 +278,10 @@ impl FrameSource for MacScreenCapture {
             ));
         }
         Ok(frame)
+    }
+
+    fn cursor(&mut self) -> Option<CursorState> {
+        self.cursor.as_mut().map(SystemCursor::state)
     }
 }
 

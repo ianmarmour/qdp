@@ -1,13 +1,15 @@
 //! The `qdp` command: serve this machine's desktop, or connect to a host, with the
 //! Quick Desktop Protocol.
 //!
-//! `qdp serve` streams a test pattern until a screen capture backend exists for
-//! the platform; `qdp connect` shows the stream in a window, or with
+//! `qdp serve` streams the screen, or a test pattern; `qdp connect` shows the
+//! stream in a window, with the host's cursor as its pointer, or with
 //! `--headless` only logs statistics and can write it to a YUV4MPEG2 file.
 
 mod args;
 #[cfg(feature = "window")]
 mod color;
+#[cfg(feature = "window")]
+mod cursor;
 mod identity;
 #[cfg(feature = "window")]
 mod keymap;

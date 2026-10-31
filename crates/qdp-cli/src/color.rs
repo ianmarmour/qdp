@@ -135,6 +135,26 @@ impl Placement {
             scale(y, self.top, self.height, frame_height),
         )
     }
+
+    /// Converts a position in the picture's pixels to a window position.
+    pub fn to_window(self, x: f64, y: f64, frame_width: usize, frame_height: usize) -> (f64, f64) {
+        (
+            self.left as f64 + x * self.width as f64 / frame_width.max(1) as f64,
+            self.top as f64 + y * self.height as f64 / frame_height.max(1) as f64,
+        )
+    }
+
+    /// Returns whether a window position is over the picture.
+    pub fn contains(self, x: f64, y: f64) -> bool {
+        let (left, top) = (self.left as f64, self.top as f64);
+        (left..left + self.width as f64).contains(&x)
+            && (top..top + self.height as f64).contains(&y)
+    }
+
+    /// Returns the window pixels per picture pixel.
+    pub fn scale(self, frame_width: usize) -> f64 {
+        self.width as f64 / frame_width.max(1) as f64
+    }
 }
 
 /// Draws `frame` into a `target_width × target_height` buffer, scaled to fit
@@ -246,6 +266,16 @@ mod tests {
     }
 
     /// Empty sizes leave a black buffer and do not panic.
+    #[test]
+    fn maps_picture_positions() {
+        let placement = Placement::fit(100, 50, 400, 400).unwrap();
+        assert_eq!(placement.scale(100), 4.0);
+        assert_eq!(placement.to_window(50.0, 25.0, 100, 50), (200.0, 200.0));
+        assert!(placement.contains(200.0, 200.0));
+        assert!(!placement.contains(200.0, 50.0));
+    }
+
+    /// Empty pictures and windows have no placement.
     #[test]
     fn handles_empty_sizes() {
         let frame = RgbFrame {

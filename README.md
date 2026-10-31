@@ -78,6 +78,12 @@ Clients decode on the GPU where they can: on Macs with hardware AV1 decoding
 elsewhere or if the hardware cannot handle a stream. `--decoder software` or
 `--decoder hardware` forces one.
 
+The client draws the host's pointer as its own, so moving it has no network
+latency, and follows the host's pointer when an application moves it. Hosts
+report the pointer apart from the video on Windows, on macOS, and on Linux
+desktops whose ScreenCast portal offers cursor metadata, such as GNOME and KDE;
+on other Linux desktops it is part of the video.
+
 The client sends its keyboard, mouse and scrolling to the host while its
 window has focus. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write

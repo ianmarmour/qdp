@@ -5,9 +5,13 @@
 //! The portal asks the user which monitor to share the first time. The
 //! answer is remembered with a restore token, which the caller keeps and
 //! passes back, so later sessions start without asking.
+//!
+//! Where the desktop supports it, the pointer comes as PipeWire metadata
+//! beside the frames rather than drawn into them, so that the client can draw
+//! it without latency (Section 9.1).
 
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -18,8 +22,9 @@ use ashpd::desktop::screencast::{
 };
 use pipewire as pw;
 use pw::spa;
+use pw::spa::buffer::meta::MetaCursor;
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{FrameSource, RuntimeError};
+use qdp_runtime::{CursorShape, CursorState, FrameSource, RuntimeError};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -46,6 +51,16 @@ const MAX_FRAME_RATE: u32 = 360;
 /// The bytes of one 32-bit pixel.
 const PIXEL_BYTES: u32 = 4;
 
+/// The pointer image size offered for cursor metadata, in pixels: the
+/// preferred, smallest and largest side.
+const CURSOR_SIDES: (i32, i32, i32) = (64, 1, 1024);
+
+/// The largest value of an 8-bit channel.
+const CHANNEL_MAX: u32 = 255;
+
+/// The pointer as the PipeWire thread last saw it, once metadata arrived.
+type SharedCursor = Arc<Mutex<Option<CursorState>>>;
+
 /// What the portal returned for the chosen monitor.
 struct PortalStream {
     /// The PipeWire remote to read from.
@@ -54,6 +69,8 @@ struct PortalStream {
     node_id: u32,
     /// The token that restores this choice next time, if any.
     restore_token: Option<String>,
+    /// Whether the pointer comes as metadata or drawn into the frames.
+    cursor_mode: CursorMode,
 }
 
 /// Captures one monitor of the desktop.
@@ -62,6 +79,8 @@ pub struct ScreenCapture {
     size: (usize, usize),
     /// The newest frame.
     shared: Arc<LatestFrame>,
+    /// The pointer, once metadata about it arrived.
+    cursor: SharedCursor,
     /// Stops the PipeWire thread.
     stop_pipewire: Option<pw::channel::Sender<()>>,
     /// The PipeWire thread.
@@ -94,6 +113,7 @@ impl ScreenCapture {
         capture.portal = Some(portal);
         capture.restore_token = stream.restore_token;
         capture.wait_for_first_frame()?;
+        info!(cursor = ?stream.cursor_mode, "screen cast started");
         Ok(capture)
     }
 
@@ -110,12 +130,21 @@ impl ScreenCapture {
     /// `remote` if given, or the user's PipeWire daemon otherwise.
     fn start(remote: Option<OwnedFd>, node_id: u32) -> Result<Self, String> {
         let shared = Arc::new(LatestFrame::default());
+        let cursor = SharedCursor::default();
         let (stop_pipewire, stop_receiver) = pw::channel::channel();
         let thread_shared = Arc::clone(&shared);
+        let thread_cursor = Arc::clone(&cursor);
         let pipewire = std::thread::Builder::new()
             .name(PIPEWIRE_THREAD.to_owned())
             .spawn(move || {
-                if let Err(error) = run_pipewire(remote, node_id, &thread_shared, stop_receiver) {
+                let result = run_pipewire(
+                    remote,
+                    node_id,
+                    &thread_shared,
+                    thread_cursor,
+                    stop_receiver,
+                );
+                if let Err(error) = result {
                     thread_shared.fail(error);
                 }
             })
@@ -123,6 +152,7 @@ impl ScreenCapture {
         Ok(Self {
             size: (0, 0),
             shared,
+            cursor,
             stop_pipewire: Some(stop_pipewire),
             pipewire: Some(pipewire),
             stop_portal: None,
@@ -172,6 +202,10 @@ impl FrameSource for ScreenCapture {
             ));
         }
         Ok(frame)
+    }
+
+    fn cursor(&mut self) -> Option<CursorState> {
+        self.cursor.lock().ok()?.clone()
     }
 }
 
@@ -252,8 +286,12 @@ async fn negotiate(
     session: &ashpd::desktop::Session<Screencast>,
     restore_token: Option<&str>,
 ) -> Result<PortalStream, String> {
+    let cursor_mode = match proxy.available_cursor_modes().await {
+        Ok(modes) if modes.contains(CursorMode::Metadata) => CursorMode::Metadata,
+        _ => CursorMode::Embedded,
+    };
     let options = SelectSourcesOptions::default()
-        .set_cursor_mode(CursorMode::Embedded)
+        .set_cursor_mode(cursor_mode)
         .set_sources(Some(SourceType::Monitor.into()))
         .set_multiple(false)
         .set_persist_mode(PersistMode::ExplicitlyRevoked)
@@ -280,6 +318,7 @@ async fn negotiate(
         remote,
         node_id: stream.pipe_wire_node_id(),
         restore_token: streams.restore_token().map(str::to_owned),
+        cursor_mode,
     })
 }
 
@@ -294,12 +333,153 @@ struct StreamFormat {
     order: Option<Rgb32Order>,
 }
 
+/// The byte order of a cursor bitmap's pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitmapOrder {
+    /// Red, green, blue, alpha.
+    Rgba,
+    /// Blue, green, red, alpha.
+    Bgra,
+    /// Alpha, red, green, blue.
+    Argb,
+    /// Alpha, blue, green, red.
+    Abgr,
+}
+
+impl BitmapOrder {
+    /// Returns the order of a bitmap format, if it has alpha.
+    fn of(format: spa::param::video::VideoFormat) -> Option<Self> {
+        use spa::param::video::VideoFormat;
+        match format {
+            VideoFormat::RGBA => Some(Self::Rgba),
+            VideoFormat::BGRA => Some(Self::Bgra),
+            VideoFormat::ARGB => Some(Self::Argb),
+            VideoFormat::ABGR => Some(Self::Abgr),
+            _ => None,
+        }
+    }
+
+    /// Returns the red, green, blue and alpha of one pixel.
+    fn rgba(self, [first, second, third, fourth]: [u8; 4]) -> [u8; 4] {
+        match self {
+            Self::Rgba => [first, second, third, fourth],
+            Self::Bgra => [third, second, first, fourth],
+            Self::Argb => [second, third, fourth, first],
+            Self::Abgr => [fourth, third, second, first],
+        }
+    }
+}
+
+/// Converts a cursor bitmap, with premultiplied alpha as GNOME and KDE send
+/// it, to straight-alpha RGBA. Returns `None` for empty or short bitmaps,
+/// which mean the pointer is not shown.
+fn cursor_shape(
+    order: BitmapOrder,
+    (width, height): (u32, u32),
+    stride: usize,
+    data: &[u8],
+    hotspot: (i32, i32),
+) -> Option<CursorShape> {
+    let row_bytes = width as usize * PIXEL_BYTES as usize;
+    if width == 0 || height == 0 || stride < row_bytes {
+        return None;
+    }
+    if data.len() < stride * (height as usize - 1) + row_bytes {
+        return None;
+    }
+    let mut pixels = Vec::with_capacity(row_bytes * height as usize);
+    for row in data.chunks(stride).take(height as usize) {
+        for pixel in row[..row_bytes].chunks_exact(PIXEL_BYTES as usize) {
+            let [red, green, blue, alpha] = order.rgba([pixel[0], pixel[1], pixel[2], pixel[3]]);
+            let straight = |channel: u8| {
+                if alpha == 0 {
+                    0
+                } else {
+                    (u32::from(channel) * CHANNEL_MAX / u32::from(alpha)).min(CHANNEL_MAX) as u8
+                }
+            };
+            pixels.extend_from_slice(&[straight(red), straight(green), straight(blue), alpha]);
+        }
+    }
+    let clamp = |value: i32, size: u32| u32::try_from(value).unwrap_or(0).min(size - 1);
+    Some(CursorShape {
+        width,
+        height,
+        hotspot: (clamp(hotspot.0, width), clamp(hotspot.1, height)),
+        pixels,
+    })
+}
+
+/// Records the pointer a buffer's cursor metadata describes.
+fn update_cursor(shared: &SharedCursor, meta: &MetaCursor) {
+    if !meta.is_valid() {
+        // The buffer carries no new pointer information.
+        return;
+    }
+    let Ok(mut cursor) = shared.lock() else {
+        return;
+    };
+    let state = cursor.get_or_insert_with(CursorState::default);
+    if let Some(bitmap) = meta.bitmap() {
+        let hotspot = (meta.hotspot().x, meta.hotspot().y);
+        let size = bitmap.size();
+        let shape = BitmapOrder::of(bitmap.format()).and_then(|order| {
+            let data = bitmap.bitmap_data()?;
+            let stride = bitmap.stride().unsigned_abs() as usize;
+            cursor_shape(order, (size.width, size.height), stride, data, hotspot)
+        });
+        state.shape = shape.map(Arc::new);
+    }
+    let position = meta.position();
+    state.position = Some((position.x, position.y));
+}
+
+/// Returns the parameter asking for cursor metadata on each buffer.
+fn cursor_meta_param() -> Option<Vec<u8>> {
+    let meta_size = |side: i32| {
+        let header =
+            size_of::<spa::sys::spa_meta_cursor>() + size_of::<spa::sys::spa_meta_bitmap>();
+        header as i32 + side * side * PIXEL_BYTES as i32
+    };
+    let (preferred, smallest, largest) = CURSOR_SIDES;
+    let object = spa::pod::Object {
+        type_: spa::utils::SpaTypes::ObjectParamMeta.as_raw(),
+        id: spa::param::ParamType::Meta.as_raw(),
+        properties: vec![
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_type,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: spa::pod::Value::Id(spa::utils::Id(spa::sys::SPA_META_Cursor)),
+            },
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_size,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+                    spa::utils::ChoiceFlags::empty(),
+                    spa::utils::ChoiceEnum::Range {
+                        default: meta_size(preferred),
+                        min: meta_size(smallest),
+                        max: meta_size(largest),
+                    },
+                ))),
+            },
+        ],
+    };
+    spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(object),
+    )
+    .ok()
+    .map(|(bytes, _)| bytes.into_inner())
+}
+
 /// Runs a PipeWire stream reading `node_id` until `stop` receives, through
 /// `remote` if given, or the user's PipeWire daemon otherwise.
 fn run_pipewire(
     remote: Option<OwnedFd>,
     node_id: u32,
     shared: &Arc<LatestFrame>,
+    cursor: SharedCursor,
     stop: pw::channel::Receiver<()>,
 ) -> Result<(), String> {
     pw::init();
@@ -325,7 +505,7 @@ fn run_pipewire(
     let frame_shared = Arc::clone(shared);
     let _listener = stream
         .add_local_listener_with_user_data(StreamFormat::default())
-        .param_changed(|_, format, id, param| {
+        .param_changed(|stream, format, id, param| {
             let Some(param) = param else {
                 return;
             };
@@ -354,11 +534,25 @@ fn run_pipewire(
                 order,
             };
             debug!(?format, "screen stream format");
+            // Ask for the pointer as metadata, which sources that draw it into
+            // their frames ignore.
+            let meta = cursor_meta_param();
+            match meta.as_deref().and_then(spa::pod::Pod::from_bytes) {
+                Some(pod) => {
+                    if let Err(error) = stream.update_params(&mut [pod]) {
+                        debug!(%error, "cannot ask for cursor metadata");
+                    }
+                }
+                None => debug!("cannot describe the cursor metadata"),
+            }
         })
         .process(move |stream, format| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            if let Some(meta) = buffer.find_meta::<MetaCursor>() {
+                update_cursor(&cursor, meta);
+            }
             let Some(order) = format.order else {
                 return;
             };
@@ -473,4 +667,43 @@ fn run_pipewire(
     let _stop = stop.attach(main_loop.loop_(), move |()| quit_loop.quit());
     main_loop.run();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Premultiplied bitmaps in each byte order become straight RGBA.
+    #[test]
+    fn converts_cursor_bitmaps() {
+        // One opaque red pixel and one half-transparent white one, padded to
+        // a 12-byte stride.
+        let rgba = [255, 0, 0, 255, 128, 128, 128, 128, 9, 9, 9, 9];
+        let shape = cursor_shape(BitmapOrder::Rgba, (2, 1), 12, &rgba, (1, 5)).unwrap();
+        assert_eq!(shape.pixels, [255, 0, 0, 255, 255, 255, 255, 128]);
+        assert_eq!(shape.hotspot, (1, 0));
+        let bgra = [0, 0, 255, 255];
+        let shape = cursor_shape(BitmapOrder::Bgra, (1, 1), 4, &bgra, (0, 0)).unwrap();
+        assert_eq!(shape.pixels, [255, 0, 0, 255]);
+        let argb = [255, 255, 0, 0];
+        let shape = cursor_shape(BitmapOrder::Argb, (1, 1), 4, &argb, (0, 0)).unwrap();
+        assert_eq!(shape.pixels, [255, 0, 0, 255]);
+        let abgr = [255, 0, 0, 255];
+        let shape = cursor_shape(BitmapOrder::Abgr, (1, 1), 4, &abgr, (0, 0)).unwrap();
+        assert_eq!(shape.pixels, [255, 0, 0, 255]);
+    }
+
+    /// Empty and short bitmaps mean no visible pointer.
+    #[test]
+    fn refuses_empty_bitmaps() {
+        assert!(cursor_shape(BitmapOrder::Rgba, (0, 0), 0, &[], (0, 0)).is_none());
+        assert!(cursor_shape(BitmapOrder::Rgba, (2, 2), 8, &[0; 12], (0, 0)).is_none());
+    }
+
+    /// The metadata parameter serializes.
+    #[test]
+    fn describes_cursor_metadata() {
+        let bytes = cursor_meta_param().unwrap();
+        assert!(spa::pod::Pod::from_bytes(&bytes).is_some());
+    }
 }

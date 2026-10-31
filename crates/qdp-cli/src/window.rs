@@ -1,4 +1,5 @@
-//! The client's window: shows the newest decoded frame, scaled to fit.
+//! The client's window: shows the newest decoded frame, scaled to fit, with
+//! the host's cursor as its pointer (Section 9).
 //!
 //! The window's event loop must run on the main thread, which macOS requires,
 //! so the session runs on another thread. It hands frames over through a
@@ -9,20 +10,25 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use qdp::message::CursorImage;
 use qdp_codec::Yuv420Frame;
-use qdp_runtime::{FrameInfo, FrameSink, InputHandle, PointerButton, SinkControl, UserInput};
+use qdp_runtime::{
+    CursorWarp, FrameInfo, FrameSink, InputHandle, PointerButton, SinkControl, UserInput, WarpKind,
+};
 use softbuffer::{Context, Surface};
 use tokio::sync::Notify;
-use tracing::warn;
+use tracing::{debug, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::window::{CustomCursor, Window, WindowId};
 
 use crate::color::{Placement, RgbFrame, scale_into, yuv420_to_rgb};
+use crate::cursor::ScaledCursor;
 use crate::keymap::{HidKey, hid_key};
 use crate::sink::CliSink;
 
@@ -36,11 +42,20 @@ const UNITS_PER_LINE: f64 = 120.0;
 /// (Section 8.4.2).
 const UNITS_PER_PIXEL: f64 = 3.0;
 
+/// The shortest time between two warps of the user's pointer: at most 60 a
+/// second (Section 9.4).
+const MIN_WARP_INTERVAL: Duration = Duration::from_micros(16_667);
+
 /// What the session thread tells the window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum WindowMessage {
     /// A new frame is in the slot.
     Frame,
+    /// The host's cursor changed: an image to draw at the pointer, or `None`
+    /// to hide it.
+    Cursor(Option<Arc<CursorImage>>),
+    /// The host's pointer moved without the user's input.
+    Warp(CursorWarp),
     /// The session ended, so the window closes.
     SessionEnded,
 }
@@ -129,6 +144,15 @@ impl FrameSink for WindowSink {
         }
         control
     }
+
+    fn set_cursor(&mut self, cursor: Option<&CursorImage>) {
+        let cursor = cursor.map(|image| Arc::new(image.clone()));
+        let _ = self.proxy.send_event(WindowMessage::Cursor(cursor));
+    }
+
+    fn warp_cursor(&mut self, warp: CursorWarp) {
+        let _ = self.proxy.send_event(WindowMessage::Warp(warp));
+    }
 }
 
 /// The window and its drawing surface.
@@ -157,6 +181,20 @@ pub struct WindowApp {
     input: InputHandle,
     /// Scrolling not yet sent, below one unit.
     scroll_remainder: (f64, f64),
+    /// The host's cursor image, or `None` while the host hides it.
+    cursor: Option<Arc<CursorImage>>,
+    /// The cursor at the size it is drawn, with the scale it was made for.
+    scaled_cursor: Option<(f64, ScaledCursor)>,
+    /// Whether the window's pointer must be set again: the image or the
+    /// picture's scale changed.
+    cursor_stale: bool,
+    /// Where on the host's monitor to draw the cursor while it follows a
+    /// device the client does not know, in pixels.
+    follow: Option<(f64, f64)>,
+    /// Whether the window has keyboard focus.
+    focused: bool,
+    /// When the user's pointer was last warped.
+    last_warp: Option<Instant>,
 }
 
 impl WindowApp {
@@ -176,6 +214,115 @@ impl WindowApp {
             error: None,
             input,
             scroll_remainder: (0.0, 0.0),
+            cursor: None,
+            scaled_cursor: None,
+            cursor_stale: false,
+            follow: None,
+            focused: false,
+            last_warp: None,
+        }
+    }
+
+    /// Returns where the picture sits in the window and the picture's size,
+    /// once a frame has arrived.
+    fn placement(&self) -> Option<(Placement, usize, usize)> {
+        let (display, frame) = (self.display.as_ref()?, self.current.as_ref()?);
+        let size = display.window.inner_size();
+        let placement = Placement::fit(
+            frame.width,
+            frame.height,
+            size.width as usize,
+            size.height as usize,
+        )?;
+        Some((placement, frame.width, frame.height))
+    }
+
+    /// Sets the window's pointer to the host's cursor, scaled with the
+    /// picture, if it changed.
+    fn update_cursor(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.cursor_stale || self.display.is_none() {
+            return;
+        }
+        self.cursor_stale = false;
+        let factor = self
+            .placement()
+            .map_or(1.0, |(placement, width, _)| placement.scale(width));
+        self.scaled_cursor = self
+            .cursor
+            .as_ref()
+            .map(|image| (factor, ScaledCursor::new(image, factor)));
+        let Some(display) = &self.display else {
+            return;
+        };
+        let Some((_, scaled)) = &self.scaled_cursor else {
+            display.window.set_cursor_visible(false);
+            return;
+        };
+        let narrow = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
+        match CustomCursor::from_rgba(
+            scaled.rgba.clone(),
+            narrow(scaled.width),
+            narrow(scaled.height),
+            narrow(scaled.hotspot.0),
+            narrow(scaled.hotspot.1),
+        ) {
+            Ok(source) => {
+                display
+                    .window
+                    .set_cursor(event_loop.create_custom_cursor(source));
+                display.window.set_cursor_visible(self.follow.is_none());
+            }
+            Err(error) => warn!(%error, "the host's cursor cannot be shown"),
+        }
+    }
+
+    /// Follows a move of the host's pointer that the user did not make.
+    fn warp(&mut self, warp: CursorWarp) {
+        match warp.kind {
+            WarpKind::Follow => {
+                self.follow = Some(warp.position);
+                if let Some(display) = &self.display {
+                    display.window.set_cursor_visible(false);
+                }
+                self.request_redraw();
+            }
+            WarpKind::Move => {
+                self.stop_following();
+                let now = Instant::now();
+                let too_soon = self
+                    .last_warp
+                    .is_some_and(|last| now.saturating_duration_since(last) < MIN_WARP_INTERVAL);
+                if !self.focused || too_soon {
+                    return;
+                }
+                let (Some(display), Some((placement, width, height))) =
+                    (&self.display, self.placement())
+                else {
+                    return;
+                };
+                let (x, y) = placement.to_window(warp.position.0, warp.position.1, width, height);
+                if !placement.contains(x, y) {
+                    return;
+                }
+                if let Err(error) = display
+                    .window
+                    .set_cursor_position(PhysicalPosition::new(x, y))
+                {
+                    debug!(%error, "the pointer cannot be moved");
+                }
+                self.last_warp = Some(now);
+            }
+        }
+    }
+
+    /// Stops drawing the cursor where a device the client does not know put
+    /// it, because the user's pointer moved.
+    fn stop_following(&mut self) {
+        if self.follow.take().is_some() {
+            if let Some(display) = &self.display {
+                display.window.set_cursor_visible(self.cursor.is_some());
+            }
+            self.request_redraw();
         }
     }
 
@@ -297,12 +444,25 @@ impl WindowApp {
         }
     }
 
-    /// Draws the newest frame into the window.
+    /// Draws the newest frame into the window, and the cursor where it
+    /// follows a device the client does not know.
     fn draw(&mut self) {
         let newest = self.slot.lock().ok().and_then(|mut slot| slot.take());
         if let Some(frame) = newest {
+            let resized = self.current.as_ref().is_none_or(|current| {
+                (current.width, current.height) != (frame.width(), frame.height())
+            });
             self.current = Some(yuv420_to_rgb(&frame));
+            if resized {
+                self.cursor_stale = true;
+            }
         }
+        let follow = match (self.follow, &self.scaled_cursor, self.placement()) {
+            (Some((x, y)), Some((_, cursor)), Some((placement, width, height))) => {
+                Some((placement.to_window(x, y, width, height), cursor.clone()))
+            }
+            _ => None,
+        };
         let Some(display) = &mut self.display else {
             return;
         };
@@ -333,6 +493,9 @@ impl WindowApp {
             ),
             None => buffer.fill(0),
         }
+        if let Some((position, cursor)) = follow {
+            cursor.draw_into(&mut buffer, size.width as usize, position);
+        }
         if let Err(error) = buffer.present() {
             warn!(%error, "cannot show the window's picture");
         }
@@ -353,8 +516,18 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, message: WindowMessage) {
         match message {
             WindowMessage::Frame => self.request_redraw(),
+            WindowMessage::Cursor(cursor) => {
+                self.cursor = cursor;
+                self.cursor_stale = true;
+                self.request_redraw();
+            }
+            WindowMessage::Warp(warp) => self.warp(warp),
             WindowMessage::SessionEnded => event_loop.exit(),
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.update_cursor(event_loop);
     }
 
     fn window_event(
@@ -369,13 +542,22 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::Resized(_) => self.request_redraw(),
+            WindowEvent::Resized(_) => {
+                self.cursor_stale = true;
+                self.request_redraw();
+            }
             WindowEvent::KeyboardInput { event, .. } => self.key(&event),
-            WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.stop_following();
+                self.pointer_moved(position);
+            }
             WindowEvent::MouseInput { state, button, .. } => self.button(button, state),
             WindowEvent::MouseWheel { delta, .. } => self.scroll(delta),
-            WindowEvent::Focused(false) => {
-                self.input.send(UserInput::ReleaseAll);
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.input.send(UserInput::ReleaseAll);
+                }
             }
             _ => {}
         }
