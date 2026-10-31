@@ -94,7 +94,7 @@ impl MessagePayload for ClientHello {
 
     fn encode(&self, writer: &mut Writer) {
         writer.write_varint(self.minor_version.0);
-        writer.write_string(&self.client_name);
+        writer.write_string_at_most(&self.client_name, MAX_NAME_LENGTH);
         Capability::encode_list(&self.capabilities, writer);
     }
 
@@ -127,7 +127,7 @@ impl MessagePayload for HostHello {
 
     fn encode(&self, writer: &mut Writer) {
         writer.write_varint(self.minor_version.0);
-        writer.write_string(&self.host_name);
+        writer.write_string_at_most(&self.host_name, MAX_NAME_LENGTH);
         writer.write_count(self.auth_methods.len());
         for method in &self.auth_methods {
             writer.write_varint(method.0);
@@ -221,7 +221,7 @@ impl MessagePayload for AuthResult {
     fn encode(&self, writer: &mut Writer) {
         writer.write_varint(self.status.into());
         writer.write_octets(&self.auth_data);
-        writer.write_string(&self.reason);
+        writer.write_string_at_most(&self.reason, MAX_NAME_LENGTH);
     }
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, WireError> {
@@ -413,19 +413,27 @@ mod tests {
         );
     }
 
-    /// A Client Name longer than 255 bytes is an error.
+    /// A Client Name longer than 255 bytes is an error, and a sender cuts
+    /// one that long to fit.
     #[test]
     fn client_name_too_long() {
-        let client = ClientHello {
-            minor_version: MinorVersion::CURRENT,
-            client_name: "x".repeat(MAX_NAME_LENGTH + 1),
-            capabilities: Vec::new(),
-        };
-        let frame = client.to_frame();
+        let name = "x".repeat(MAX_NAME_LENGTH + 1);
+        let mut writer = Writer::new();
+        writer.write_varint(MinorVersion::CURRENT.0);
+        writer.write_string(&name);
+        writer.write_varint(VarInt::ZERO);
         assert!(matches!(
-            ClientHello::decode(&mut Reader::new(&frame.payload)),
+            ClientHello::decode(&mut Reader::new(writer.as_bytes())),
             Err(WireError::LimitExceeded { .. })
         ));
+
+        let client = ClientHello {
+            minor_version: MinorVersion::CURRENT,
+            client_name: name,
+            capabilities: Vec::new(),
+        };
+        let sent = round_trip(&client);
+        assert_eq!(sent.client_name, "x".repeat(MAX_NAME_LENGTH));
     }
 
     /// Authentication messages round-trip.

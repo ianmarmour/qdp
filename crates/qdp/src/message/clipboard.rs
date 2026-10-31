@@ -32,7 +32,7 @@ impl MessagePayload for ClipboardOffer {
         writer.write_varint(self.peer_offer_id.0);
         writer.write_count(self.formats.len());
         for format in &self.formats {
-            writer.write_string(format);
+            writer.write_string_at_most(format, MAX_NAME_LENGTH);
         }
     }
 
@@ -72,7 +72,7 @@ impl MessagePayload for ClipboardRequest {
     fn encode(&self, writer: &mut Writer) {
         writer.write_varint(self.request_id.0);
         writer.write_varint(self.offer_id.0);
-        writer.write_string(&self.format);
+        writer.write_string_at_most(&self.format, MAX_NAME_LENGTH);
     }
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, WireError> {

@@ -213,7 +213,7 @@ impl MessagePayload for DeviceAttach {
         writer.write_varint(self.device_id.0);
         writer.write_varint(self.kind.0);
         writer.write_varint(self.features.0);
-        writer.write_string(&self.name);
+        writer.write_string_at_most(&self.name, MAX_NAME_LENGTH);
         if let Some(touchpad) = self.touchpad {
             writer.write_varint(touchpad.width);
             writer.write_varint(touchpad.height);
@@ -378,7 +378,7 @@ impl MessagePayload for DeviceStatus {
     fn encode(&self, writer: &mut Writer) {
         writer.write_varint(self.device_id.0);
         writer.write_u8(self.status as u8);
-        writer.write_string(&self.reason);
+        writer.write_string_at_most(&self.reason, MAX_NAME_LENGTH);
     }
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, WireError> {
