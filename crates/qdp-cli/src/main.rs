@@ -24,8 +24,9 @@ use std::sync::Arc;
 
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
-    ClientCredentials, ClientOptions, ClientSummary, DisplaySize, EncoderTuning, FrameSink,
-    FrameSource, HostAuthenticator, HostOptions, InputQueue, TestPattern,
+    ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections, DisplaySize,
+    EncoderTuning, FrameSink, FrameSource, HostAuthenticator, HostOptions, InputQueue,
+    SharedClipboard, TestPattern,
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -180,6 +181,7 @@ async fn serve(args: ServeArgs) -> CliResult {
     info!(%address, pin = format_pin(pin), "serving; clients connect with --pin {}", format_pin(pin));
     let (width, height) = args.size;
     let source_kind = args.source;
+    let clipboard_directions = args.clipboard;
     let state_directory = Arc::new(args.identity.clone());
 
     loop {
@@ -210,7 +212,8 @@ async fn serve(args: ServeArgs) -> CliResult {
                     let (source_width, source_height) = source.size();
                     let injector =
                         qdp_desktop::input_injector(source_width as u32, source_height as u32);
-                    match qdp_runtime::serve(connection, &options, source, injector).await {
+                    let clipboard = shared_clipboard(clipboard_directions);
+                    match qdp_runtime::serve(connection, &options, source, injector, clipboard).await {
                         Ok(summary) => info!(
                             %peer,
                             frames = summary.frames_sent,
@@ -230,6 +233,17 @@ async fn serve(args: ServeArgs) -> CliResult {
             }
         }
     }
+}
+
+/// Opens the system clipboard to share `directions`, if it is shared at all
+/// and can be opened.
+fn shared_clipboard(directions: Option<ClipboardDirections>) -> Option<SharedClipboard> {
+    let directions = directions?;
+    let clipboard = qdp_desktop::system_clipboard()?;
+    Some(SharedClipboard {
+        clipboard,
+        directions,
+    })
 }
 
 /// Opens what a session streams: the screen, or a `size` test pattern.
@@ -398,7 +412,9 @@ async fn receive(
         decoder: args.decoder,
     };
     let result = tokio::select! {
-        result = qdp_runtime::run(connection, &options, sink, input) => result.map(Some),
+        result = qdp_runtime::run(connection, &options, sink, input, shared_clipboard(args.clipboard)) => {
+            result.map(Some)
+        }
         () = stop => Ok(None),
     };
     let summary = result.map_err(|error| format!("session failed: {error}"))?;

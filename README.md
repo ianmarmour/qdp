@@ -84,6 +84,14 @@ report the pointer apart from the video on Windows, on macOS, and on Linux
 desktops whose ScreenCast portal offers cursor metadata, such as GNOME and KDE;
 on other Linux desktops it is part of the video.
 
+Text copied on either side can be pasted on the other: the host and the client
+share their clipboards' text. Text a password manager marks as secret is never
+shared. `--clipboard send` or `--clipboard receive` limits sharing to one
+direction, and `--clipboard off` turns it off, on either side. On Linux this
+uses the Wayland compositor's data control protocol where it has one (KDE and
+wlroots compositors), and the X11 clipboard otherwise, which GNOME keeps in step
+with its Wayland clipboard.
+
 The client sends its keyboard, mouse and scrolling to the host while its
 window has focus. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write

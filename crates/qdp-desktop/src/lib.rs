@@ -10,7 +10,10 @@
 //! - Windows: `DesktopDuplication` captures the primary monitor with DXGI
 //!   Desktop Duplication, and `SendInputInjector` sends input with
 //!   `SendInput`.
+//!
+//! [`SystemClipboard`] shares the system clipboard's text on each of them.
 
+mod clipboard;
 #[cfg(any(
     all(target_os = "linux", feature = "screen-capture"),
     target_os = "macos"
@@ -25,8 +28,10 @@ mod win32;
 
 use std::path::Path;
 
-use qdp_runtime::{FrameSource, InputInjector, NoInput};
+use qdp_runtime::{Clipboard, FrameSource, InputInjector, NoInput};
 use tracing::warn;
+
+pub use clipboard::SystemClipboard;
 
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 pub use linux::ScreenCapture;
@@ -85,6 +90,18 @@ pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, Stri
 )))]
 pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
     Err("screen capture is not supported on this platform yet".to_owned())
+}
+
+/// Opens the system clipboard for sharing, or returns `None`, with a warning,
+/// if it cannot be used.
+pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
+    match SystemClipboard::open() {
+        Ok(clipboard) => Some(Box::new(clipboard)),
+        Err(error) => {
+            warn!(%error, "the clipboard will not be shared");
+            None
+        }
+    }
 }
 
 /// Returns the platform's input injector for a `width × height` pixel

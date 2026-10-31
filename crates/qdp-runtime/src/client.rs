@@ -28,6 +28,10 @@ use tracing::{debug, info, warn};
 use crate::auth::ClientAuthExchange;
 use crate::client_cursor::{ClientCursor, CursorChange};
 use crate::client_input::{ClientDevices, InputQueue, KEYBOARD_ID, MOUSE_ID, POINTER_ID, TEXT_ID};
+use crate::clipboard::{
+    self, ClipboardDirections, ClipboardLink, ClipboardOutput, ClipboardWorker, SharedClipboard,
+    Side,
+};
 use crate::media::{CursorWarp, FrameInfo, FrameSink, SinkControl, WarpKind};
 use crate::{ClientCredentials, RuntimeError};
 
@@ -114,9 +118,10 @@ fn device_class(device_id: DeviceId) -> Option<DeviceClass> {
     })
 }
 
-/// Returns the client's hello.
-fn client_hello(options: &ClientOptions) -> ClientHello {
-    ClientHello {
+/// Returns the client's hello, with clipboard sharing in `clipboard`'s
+/// directions if it shares one.
+fn client_hello(options: &ClientOptions, clipboard: Option<ClipboardDirections>) -> ClientHello {
+    let mut hello = ClientHello {
         minor_version: MinorVersion::CURRENT,
         client_name: options.client_name.clone(),
         capabilities: vec![
@@ -136,7 +141,11 @@ fn client_hello(options: &ClientOptions) -> ClientHello {
                     .union(InputClasses::MOUSE),
             ),
         ],
+    };
+    if let Some(directions) = clipboard {
+        hello.capabilities.push(clipboard::capability(directions));
     }
+    hello
 }
 
 /// Returns the client's display request.
@@ -234,19 +243,31 @@ struct ActiveClient<'a> {
     cursor: ClientCursor,
     /// The desktop position of the monitor's top-left corner, in pixels.
     monitor_origin: (f64, f64),
+    /// Clipboard sharing, if the session negotiated it.
+    clipboard: Option<ClipboardLink>,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
-/// frames to `sink` until it asks to stop or the host disconnects, and sending
-/// the user's input from `input`, if given.
+/// frames to `sink` until it asks to stop or the host disconnects, sending
+/// the user's input from `input`, if given, and sharing `clipboard`, if
+/// given, with the host.
 pub async fn run(
     connection: QdpConnection,
     options: &ClientOptions,
     sink: &mut dyn FrameSink,
     input: Option<InputQueue>,
+    clipboard: Option<SharedClipboard>,
 ) -> Result<ClientSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
-    let mut driver = ClientDriver::client(connection, client_hello(options))?;
+    // The clipboard is read from the start, so that its content is known
+    // when the session becomes active.
+    let directions = clipboard.as_ref().map(|shared| shared.directions);
+    let worker = clipboard
+        .map(|shared| ClipboardWorker::spawn(shared.clipboard))
+        .transpose()
+        .map_err(RuntimeError::Clipboard)?;
+    let hello = client_hello(options, directions);
+    let mut driver = ClientDriver::client(connection, hello)?;
     let mut auth = ClientAuthExchange::new(options.credentials.clone(), binding);
     let mut display_config = None;
     let mut early_messages = Vec::new();
@@ -290,7 +311,12 @@ pub async fn run(
         }
     }
     info!("session active");
-    driver.accept_streams(host_stream_policy);
+    let clipboard = match (worker, driver.session().negotiated()) {
+        (Some(worker), Some(negotiated)) => ClipboardLink::new(Side::Client, negotiated, worker),
+        _ => None,
+    };
+    let receive_limit = clipboard.as_ref().and_then(ClipboardLink::receive_limit);
+    driver.accept_streams(move |header| host_stream_policy(header, receive_limit));
 
     let now = Instant::now();
     let clock = SessionClock::new(now);
@@ -309,9 +335,14 @@ pub async fn run(
         input_queue: input,
         cursor: ClientCursor::default(),
         monitor_origin: (0.0, 0.0),
+        clipboard,
     };
     if let Some(config) = display_config {
         active.configure(&config)?;
+    }
+    if let Some(link) = &mut active.clipboard {
+        let outputs = link.start();
+        active.apply_clipboard(outputs)?;
     }
     for message in early_messages {
         active.handle_message(message)?;
@@ -320,17 +351,16 @@ pub async fn run(
 }
 
 /// Returns what the client does with a stream the host opened (Section
-/// 3.5.2). The client requests no clipboard data and attaches no passthrough
-/// devices yet, so it expects neither.
-fn host_stream_policy(header: &StreamHeader) -> StreamPolicy {
+/// 3.5.2), given the clipboard data the client accepts. The client attaches
+/// no passthrough devices yet, so it expects no HID output.
+fn host_stream_policy(header: &StreamHeader, clipboard_limit: Option<usize>) -> StreamPolicy {
     match header {
         StreamHeader::CursorImage => StreamPolicy::Read(StreamLimit {
             max_bytes: MAX_CURSOR_STREAM,
             overflow: ErrorCode::PROTOCOL_VIOLATION,
         }),
-        StreamHeader::ClipboardData { .. } | StreamHeader::HidOutput { .. } => {
-            StreamPolicy::Refuse(ErrorCode::REQUEST_CANCELLED)
-        }
+        StreamHeader::ClipboardData { .. } => clipboard::data_stream_policy(clipboard_limit),
+        StreamHeader::HidOutput { .. } => StreamPolicy::Refuse(ErrorCode::REQUEST_CANCELLED),
         StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
     }
 }
@@ -344,17 +374,44 @@ fn show_cursor(sink: &mut dyn FrameSink, change: CursorChange<'_>) {
 }
 
 impl ActiveClient<'_> {
+    /// Carries out what clipboard sharing asks for.
+    fn apply_clipboard(&mut self, outputs: Vec<ClipboardOutput>) -> Result<(), RuntimeError> {
+        for output in outputs {
+            match output {
+                ClipboardOutput::Message(message) => self.driver.session().send(&message)?,
+                ClipboardOutput::Data { request_id, data } => {
+                    let header = StreamHeader::ClipboardData { request_id }.to_bytes();
+                    self.driver
+                        .connection()
+                        .send_stream([header, data].concat());
+                }
+                ClipboardOutput::Publish(text) => {
+                    if let Some(link) = &self.clipboard {
+                        link.publish(text);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Acts on a unidirectional stream from the host.
-    fn handle_stream(&mut self, stream: qdp_quic::ReceivedStream) {
+    fn handle_stream(&mut self, stream: qdp_quic::ReceivedStream) -> Result<(), RuntimeError> {
+        if let (StreamHeader::ClipboardData { request_id }, Some(link)) =
+            (stream.header, &mut self.clipboard)
+        {
+            let outputs = link.handle_data(request_id, stream.data);
+            return self.apply_clipboard(outputs);
+        }
         let data = match (stream.header, stream.data) {
             (StreamHeader::CursorImage, Ok(data)) => data,
             (header, Err(failure)) => {
                 debug!(?header, ?failure, "stream not received");
-                return;
+                return Ok(());
             }
             (header, Ok(_)) => {
                 debug!(?header, "unexpected stream ignored");
-                return;
+                return Ok(());
             }
         };
         match CursorImage::decode(&data) {
@@ -365,6 +422,7 @@ impl ActiveClient<'_> {
             }
             Err(error) => warn!(%error, "malformed cursor image ignored"),
         }
+        Ok(())
     }
 
     /// Acts on a control message from the host.
@@ -407,7 +465,12 @@ impl ActiveClient<'_> {
                 });
                 self.input.set_warp(warp.warp_id);
             }
-            _ => {}
+            message => {
+                if let Some(link) = &mut self.clipboard {
+                    let outputs = link.handle_message(&message, Instant::now());
+                    self.apply_clipboard(outputs)?;
+                }
+            }
         }
         Ok(())
     }
@@ -483,6 +546,7 @@ impl ActiveClient<'_> {
                 .filter_map(|stream| stream.receiver.poll_timeout(smoothed_rtt))
                 .chain(Some(self.sync.next_ping_at()))
                 .chain(self.input.poll_timeout(smoothed_rtt))
+                .chain(self.clipboard.as_ref().map(ClipboardLink::poll_timeout))
                 .min();
             let wake = self.input_queue.as_ref().map(InputQueue::wake);
             match self.driver.next_input(deadline, wake).await {
@@ -491,7 +555,7 @@ impl ActiveClient<'_> {
                 }
                 Ok(DriverInput::Event(_) | DriverInput::Deadline | DriverInput::Wake) => {}
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(datagram)?,
-                Ok(DriverInput::Stream(stream)) => self.handle_stream(stream),
+                Ok(DriverInput::Stream(stream)) => self.handle_stream(stream)?,
                 Err(error) if crate::is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
             }
@@ -506,6 +570,10 @@ impl ActiveClient<'_> {
                 return Ok(self.summary);
             }
             self.send_feedback(now)?;
+            if let Some(link) = &mut self.clipboard {
+                let outputs = link.service(now);
+                self.apply_clipboard(outputs)?;
+            }
             if let Some(ping) = self.sync.poll_ping(now) {
                 self.send(ping.to_bytes())?;
             }

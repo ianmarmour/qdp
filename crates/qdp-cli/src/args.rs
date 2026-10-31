@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use qdp_codec::CodecPreference;
 use qdp_quic::KeyPin;
+use qdp_runtime::ClipboardDirections;
 
 /// The usage text printed by `qdp help` and on errors.
 pub const USAGE: &str = "\
@@ -28,6 +29,9 @@ Serve options:
                        encoder when it has one, otherwise software)
   --speed N            Software encoder speed preset, 0 to 10 (default 10)
   --quantizer N        Encoder quantizer, 1 to 255 (default 100)
+  --clipboard WAY      both, send, receive or off: share the clipboard's text
+                       both ways, only this machine's, only the client's, or
+                       not at all (default both)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -39,6 +43,9 @@ Connect options:
   --headless           Open no window; only log statistics
   --decoder KIND       auto, hardware or software (default auto: the GPU's
                        decoder when it has one, otherwise software)
+  --clipboard WAY      both, send, receive or off: share the clipboard's text
+                       both ways, only this machine's, only the host's, or
+                       not at all (default both)
 
 Set QDP_LOG to error, warn, info, debug or trace to change the log level.";
 
@@ -119,6 +126,8 @@ pub struct ServeArgs {
     pub speed: u8,
     /// The encoder quantizer.
     pub quantizer: u8,
+    /// Which way to share the clipboard, if at all.
+    pub clipboard: Option<ClipboardDirections>,
 }
 
 /// Where `qdp connect` shows the stream.
@@ -152,6 +161,8 @@ pub struct ConnectArgs {
     pub presentation: Presentation,
     /// Whether to decode in hardware or software.
     pub decoder: CodecPreference,
+    /// Which way to share the clipboard, if at all.
+    pub clipboard: Option<ClipboardDirections>,
 }
 
 /// An error in the command line.
@@ -274,6 +285,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         encoder: CodecPreference::Auto,
         speed: DEFAULT_SPEED,
         quantizer: DEFAULT_QUANTIZER,
+        clipboard: Some(ClipboardDirections::Both),
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -300,6 +312,9 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             }
             "--speed" => serve.speed = parse("--speed", &mut arguments)?,
             "--quantizer" => serve.quantizer = parse("--quantizer", &mut arguments)?,
+            "--clipboard" => {
+                serve.clipboard = parse_clipboard(&value("--clipboard", &mut arguments)?)?
+            }
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
@@ -312,6 +327,19 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         return Err(error("--fps must be above 0"));
     }
     Ok(serve)
+}
+
+/// Parses the value of `--clipboard`: `None` for `off`.
+fn parse_clipboard(text: &str) -> Result<Option<ClipboardDirections>, ArgsError> {
+    match text {
+        "both" => Ok(Some(ClipboardDirections::Both)),
+        "send" => Ok(Some(ClipboardDirections::SendOnly)),
+        "receive" => Ok(Some(ClipboardDirections::ReceiveOnly)),
+        "off" => Ok(None),
+        other => Err(error(format!(
+            "--clipboard must be both, send, receive or off, not {other}"
+        ))),
+    }
 }
 
 /// Parses the value of `--encoder` or `--decoder`.
@@ -343,6 +371,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         output: None,
         presentation: Presentation::Window,
         decoder: CodecPreference::Auto,
+        clipboard: Some(ClipboardDirections::Both),
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -356,6 +385,9 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--decoder" => {
                 connect.decoder =
                     parse_preference("--decoder", &value("--decoder", &mut arguments)?)?
+            }
+            "--clipboard" => {
+                connect.clipboard = parse_clipboard(&value("--clipboard", &mut arguments)?)?
             }
             other => return Err(error(format!("unknown option: {other}"))),
         }
@@ -402,6 +434,13 @@ mod tests {
         };
         assert_eq!(serve.encoder, CodecPreference::Software);
         assert!(parse_line("serve --token abc --encoder gpu").is_err());
+        assert_eq!(serve.clipboard, Some(ClipboardDirections::Both));
+        let Command::Serve(serve) = parse_line("serve --token abc --clipboard receive").unwrap()
+        else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.clipboard, Some(ClipboardDirections::ReceiveOnly));
+        assert!(parse_line("serve --token abc --clipboard sideways").is_err());
         assert!(parse_line("serve").is_err());
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }
@@ -435,6 +474,13 @@ mod tests {
             panic!("expected connect");
         };
         assert_eq!(connect.decoder, CodecPreference::Software);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --clipboard off"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.clipboard, None);
         assert!(parse_line(&format!("connect 192.0.2.7:4433 --pin {pin}")).is_err());
         assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
         assert!(parse_line("connect nowhere --pin x --token t").is_err());
