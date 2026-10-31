@@ -188,7 +188,7 @@ impl ScreenCapture {
     }
 
     /// Waits up to `timeout` for a frame and returns the newest.
-    fn wait_for_frame(&self, timeout: Duration) -> Result<Yuv420Frame, String> {
+    fn wait_for_frame(&self, timeout: Duration) -> Result<Arc<Yuv420Frame>, String> {
         self.shared.wait(timeout)
     }
 }
@@ -198,7 +198,7 @@ impl FrameSource for ScreenCapture {
         self.size
     }
 
-    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
         // The compositor sends frames only when the screen changes, so the
         // newest frame is the current screen.
         let frame = self

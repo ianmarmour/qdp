@@ -1,7 +1,7 @@
 //! The newest captured frame, shared between the thread a capture API
 //! delivers frames on and the encoder thread that takes them.
 
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use qdp_codec::Yuv420Frame;
@@ -9,8 +9,8 @@ use qdp_codec::Yuv420Frame;
 /// The newest frame, or why capture stopped.
 #[derive(Debug, Default)]
 struct State {
-    /// The newest frame.
-    frame: Option<Yuv420Frame>,
+    /// The newest frame, shared with the captures that returned it.
+    frame: Option<Arc<Yuv420Frame>>,
     /// Why capture stopped, if it did.
     error: Option<String>,
 }
@@ -29,7 +29,7 @@ impl LatestFrame {
     /// Stores a new frame.
     pub(crate) fn store(&self, frame: Yuv420Frame) {
         if let Ok(mut state) = self.state.lock() {
-            state.frame = Some(frame);
+            state.frame = Some(Arc::new(frame));
         }
         self.arrived.notify_all();
     }
@@ -42,8 +42,8 @@ impl LatestFrame {
         self.arrived.notify_all();
     }
 
-    /// Waits up to `timeout` for a frame and returns the newest.
-    pub(crate) fn wait(&self, timeout: Duration) -> Result<Yuv420Frame, String> {
+    /// Waits up to `timeout` for a frame and returns the newest, shared.
+    pub(crate) fn wait(&self, timeout: Duration) -> Result<Arc<Yuv420Frame>, String> {
         let state = self
             .state
             .lock()

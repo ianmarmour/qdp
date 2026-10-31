@@ -101,7 +101,9 @@ pub trait FrameSource: Send {
 
     /// Returns the current frame. When the monitor changes size, the frames
     /// take the new size, and [`FrameSource::size`] returns it from then on.
-    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError>;
+    /// A source that holds the newest frame returns it again, shared rather
+    /// than copied, while the screen does not change.
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError>;
 
     /// Returns the pointer as of the last capture, for sources that capture
     /// it apart from the frames, which then do not show it; the client draws
@@ -178,10 +180,10 @@ impl FrameSource for TestPattern {
         (self.width, self.height)
     }
 
-    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
         let frame = Self::frame(self.width, self.height, self.next_index);
         self.next_index += 1;
-        Ok(frame)
+        Ok(Arc::new(frame))
     }
 }
 
@@ -387,7 +389,7 @@ mod tests {
     fn source_advances() {
         let mut source = TestPattern::new(128, 64);
         assert_eq!(source.size(), (128, 64));
-        assert_eq!(source.capture().unwrap(), TestPattern::frame(128, 64, 0));
-        assert_eq!(source.capture().unwrap(), TestPattern::frame(128, 64, 1));
+        assert_eq!(*source.capture().unwrap(), TestPattern::frame(128, 64, 0));
+        assert_eq!(*source.capture().unwrap(), TestPattern::frame(128, 64, 1));
     }
 }

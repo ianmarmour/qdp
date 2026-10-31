@@ -118,7 +118,7 @@ impl FrameSource for CursorPattern {
         self.pattern.size()
     }
 
-    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
         self.captures += 1;
         self.pattern.capture()
     }
@@ -796,10 +796,14 @@ impl FrameSource for ShrinkingPattern {
         }
     }
 
-    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
         let (width, height) = self.size();
         self.captures += 1;
-        Ok(TestPattern::frame(width, height, self.captures as u64))
+        Ok(Arc::new(TestPattern::frame(
+            width,
+            height,
+            self.captures as u64,
+        )))
     }
 }
 
