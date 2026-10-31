@@ -10,7 +10,9 @@
 //! - [`wire`] holds the encoding primitives shared by every message: variable-length
 //!   integers, strings and octet sequences, and the framing of control messages and
 //!   datagrams (Sections 1.5, 3.6 and 3.7).
+//! - [`message`] holds the typed control messages and datagrams, built on [`wire`].
 
+pub mod message;
 pub mod registry;
 pub mod wire;
 

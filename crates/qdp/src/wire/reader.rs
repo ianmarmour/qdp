@@ -148,6 +148,63 @@ impl<'a> Reader<'a> {
         result
     }
 
+    /// Reads an Octets field whose value may be at most `limit` bytes long.
+    pub fn read_octets_at_most(
+        &mut self,
+        field: &'static str,
+        limit: usize,
+    ) -> Result<&'a [u8], WireError> {
+        let original = *self;
+        let bytes = self.read_octets()?;
+        if bytes.len() > limit {
+            *self = original;
+            return Err(WireError::LimitExceeded {
+                field,
+                limit: limit as u64,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Reads a String field whose value may be at most `limit` bytes long.
+    pub fn read_string_at_most(
+        &mut self,
+        field: &'static str,
+        limit: usize,
+    ) -> Result<&'a str, WireError> {
+        let original = *self;
+        let value = self.read_string()?;
+        if value.len() > limit {
+            *self = original;
+            return Err(WireError::LimitExceeded {
+                field,
+                limit: limit as u64,
+            });
+        }
+        Ok(value)
+    }
+
+    /// Reads the count of a list of entries, which may be at most `limit`.
+    ///
+    /// Every entry takes at least one byte, so a count larger than the remaining data
+    /// fails with [`WireError::UnexpectedEnd`]. The returned count is therefore safe
+    /// to preallocate for.
+    pub fn read_count(&mut self, field: &'static str, limit: u64) -> Result<usize, WireError> {
+        let original = *self;
+        let count = self.read_varint()?.into_inner();
+        if count > limit {
+            *self = original;
+            return Err(WireError::LimitExceeded { field, limit });
+        }
+        match usize::try_from(count) {
+            Ok(count) if count <= self.remaining() => Ok(count),
+            _ => {
+                *self = original;
+                Err(WireError::UnexpectedEnd)
+            }
+        }
+    }
+
     /// Reads a length-prefixed structure, such as an entry with an Entry Length, and
     /// returns a reader over its contents.
     ///
@@ -255,6 +312,47 @@ mod tests {
         assert_eq!(entry.read_u8().unwrap(), 0x07);
         assert_eq!(entry.remaining(), 2);
         assert_eq!(reader.read_u8().unwrap(), 0x09);
+    }
+
+    /// Bounded fields reject values above their limit without consuming anything.
+    #[test]
+    fn bounded_fields() {
+        let mut reader = Reader::new(&[0x03, b'q', b'd', b'p']);
+        assert_eq!(
+            reader.read_string_at_most("Name", 2),
+            Err(WireError::LimitExceeded {
+                field: "Name",
+                limit: 2
+            })
+        );
+        assert_eq!(
+            reader.read_octets_at_most("Data", 2),
+            Err(WireError::LimitExceeded {
+                field: "Data",
+                limit: 2
+            })
+        );
+        assert_eq!(reader.remaining(), 4);
+        assert_eq!(reader.read_string_at_most("Name", 3).unwrap(), "qdp");
+    }
+
+    /// Counts above their limit, or above the remaining data, are rejected.
+    #[test]
+    fn counts() {
+        assert_eq!(
+            Reader::new(&[0x05, 0, 0, 0, 0, 0]).read_count("Count", 4),
+            Err(WireError::LimitExceeded {
+                field: "Count",
+                limit: 4
+            })
+        );
+        assert_eq!(
+            Reader::new(&[0x03, 0, 0]).read_count("Count", 4),
+            Err(WireError::UnexpectedEnd)
+        );
+        let mut reader = Reader::new(&[0x02, 0, 0]);
+        assert_eq!(reader.read_count("Count", 4), Ok(2));
+        assert_eq!(reader.remaining(), 2);
     }
 
     /// Fields that run to the end of a structure take every remaining byte.
