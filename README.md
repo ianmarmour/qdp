@@ -136,7 +136,10 @@ motion; Ctrl+Alt+Shift+Z releases it, and a click captures it again. The client
 also tells the host its keyboard layout, and Windows hosts switch to the same
 one. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write
-access to `/dev/uinput`, and `/dev/uhid` for passed-through devices. To allow
+access to `/dev/uinput`, and `/dev/uhid` for passed-through devices. Its
+pointer reports the motion of each move along with the position, as a mouse
+does, so that games which follow the mouse's motion, as many do to drag their
+interface's elements, see the pointer move. To allow
 both for members of the `input` group:
 
 ```bash

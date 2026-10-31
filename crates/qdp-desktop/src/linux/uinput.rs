@@ -6,7 +6,11 @@
 //! Three devices are created: a keyboard, a relative mouse, and an absolute
 //! pointer covering the desktop, as virtual machines' tablets do, and, when
 //! the client uses them, a touchscreen and a pen tablet covering the desktop
-//! and a gamepad for each one it attaches. Passthrough devices are created
+//! and a gamepad for each one it attaches. Each move of the absolute pointer
+//! also reports the motion it makes, as a mouse does: compositors give
+//! applications no motion for absolute moves, and games that follow the
+//! mouse's motion rather than the pointer's position, as many do to drag
+//! what is under the pointer, would not see the pointer move. Passthrough devices are created
 //! through uhid, which needs write access to `/dev/uhid`. Creating them needs write access
 //! to `/dev/uinput`.
 
@@ -160,6 +164,11 @@ fn button_code(button: PointerButton) -> u16 {
     }
 }
 
+/// The largest move of the absolute pointer, in pixels on either axis, that
+/// reports its motion. A longer move is a jump, as when the pointer comes
+/// back into the client's window elsewhere, which a mouse cannot make.
+const MAX_MOTION_PIXELS: i32 = 512;
+
 /// Every button code.
 const BUTTONS: [PointerButton; 5] = [
     PointerButton::Left,
@@ -225,6 +234,11 @@ pub(super) enum Device {
 pub(super) struct Translator {
     /// Relative motion not yet sent, in 1/256 count.
     motion_remainder: (i32, i32),
+    /// Where the absolute pointer was last moved, in 1/256 pixel, from which
+    /// the motion of its next move is measured.
+    last_position: Option<(i32, i32)>,
+    /// The motion of absolute moves not yet sent, in 1/256 count.
+    position_remainder: (i32, i32),
     /// Scrolling not yet sent as whole detents, in 1/120 detent.
     detent_remainder: (i32, i32),
 }
@@ -250,25 +264,34 @@ impl Translator {
                 Device::Keyboard,
                 vec![Event::new(EV_KEY, consumer_key(usage)?, 0)],
             ),
-            InputAction::PointerMoveTo { x, y } => (
-                Device::Pointer,
-                vec![
-                    Event::new(EV_ABS, ABS_X, x.max(0)),
-                    Event::new(EV_ABS, ABS_Y, y.max(0)),
-                ],
-            ),
-            InputAction::MouseMoveBy { dx, dy } => {
-                let x = self.motion_remainder.0 + dx;
-                let y = self.motion_remainder.1 + dy;
-                self.motion_remainder = (x % SUBUNITS, y % SUBUNITS);
-                let (x, y) = (x / SUBUNITS, y / SUBUNITS);
+            InputAction::PointerMoveTo { x, y } => {
+                let (x, y) = (x.max(0), y.max(0));
                 let mut events = Vec::new();
-                if x != 0 {
-                    events.push(Event::new(EV_REL, REL_X, x));
+                // The motion comes before the position in the same frame,
+                // and libinput reports it first, so the pointer ends where
+                // the position says.
+                match self.last_position.replace((x, y)) {
+                    Some((last_x, last_y))
+                        if (x - last_x).abs() <= MAX_MOTION_PIXELS * SUBUNITS
+                            && (y - last_y).abs() <= MAX_MOTION_PIXELS * SUBUNITS =>
+                    {
+                        let (dx, dy) =
+                            whole_counts(&mut self.position_remainder, x - last_x, y - last_y);
+                        push_motion(&mut events, dx, dy);
+                    }
+                    _ => self.position_remainder = (0, 0),
                 }
-                if y != 0 {
-                    events.push(Event::new(EV_REL, REL_Y, y));
-                }
+                events.push(Event::new(EV_ABS, ABS_X, x));
+                events.push(Event::new(EV_ABS, ABS_Y, y));
+                (Device::Pointer, events)
+            }
+            InputAction::MouseMoveBy { dx, dy } => {
+                // The mouse moves the pointer from where the absolute
+                // pointer left it.
+                self.last_position = None;
+                let (x, y) = whole_counts(&mut self.motion_remainder, dx, dy);
+                let mut events = Vec::new();
+                push_motion(&mut events, x, y);
                 (Device::Mouse, events)
             }
             InputAction::ButtonDown(button) => (
@@ -396,6 +419,25 @@ impl AxisRange {
             .saturating_mul(SUBUNITS)
             - 1;
         Self::new(0, maximum)
+    }
+}
+
+/// Adds `dx` and `dy`, in 1/256 count, to `remainder` and returns the whole
+/// counts, keeping the fractions in `remainder`.
+fn whole_counts(remainder: &mut (i32, i32), dx: i32, dy: i32) -> (i32, i32) {
+    let x = remainder.0 + dx;
+    let y = remainder.1 + dy;
+    *remainder = (x % SUBUNITS, y % SUBUNITS);
+    (x / SUBUNITS, y / SUBUNITS)
+}
+
+/// Appends the relative motion events of `dx` and `dy` counts, if any.
+fn push_motion(events: &mut Vec<Event>, dx: i32, dy: i32) {
+    if dx != 0 {
+        events.push(Event::new(EV_REL, REL_X, dx));
+    }
+    if dy != 0 {
+        events.push(Event::new(EV_REL, REL_Y, dy));
     }
 }
 
@@ -586,7 +628,14 @@ impl UinputInjector {
                 VirtualDevice::set_bit(&file, UI_SET_KEYBIT, button_code(button))?;
             }
             VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_REL)?;
-            for axis in [REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES] {
+            for axis in [
+                REL_X,
+                REL_Y,
+                REL_WHEEL,
+                REL_HWHEEL,
+                REL_WHEEL_HI_RES,
+                REL_HWHEEL_HI_RES,
+            ] {
                 VirtualDevice::set_bit(&file, UI_SET_RELBIT, axis)?;
             }
             VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_ABS)?;
@@ -826,7 +875,8 @@ mod tests {
     }
 
     /// Keys, positions and buttons map to the codes of
-    /// `linux/input-event-codes.h`.
+    /// `linux/input-event-codes.h`; the first position has no motion to
+    /// report.
     #[test]
     fn translates_keys_and_buttons() {
         let mut translator = Translator::default();
@@ -854,6 +904,65 @@ mod tests {
         );
         assert_eq!(translator.events(&InputAction::KeyDown(0xa5)), None);
         assert_eq!(translator.events(&InputAction::Text("a".to_owned())), None);
+    }
+
+    /// Each move of the absolute pointer reports its motion, in whole
+    /// pixels, before its position, unless it jumps.
+    #[test]
+    fn reports_the_motion_of_positions() {
+        let mut translator = Translator::default();
+        let mut move_to = |x: i32, y: i32| {
+            translator
+                .events(&InputAction::PointerMoveTo { x, y })
+                .unwrap()
+        };
+        let pixel = SUBUNITS;
+        move_to(100 * pixel, 100 * pixel);
+        assert_eq!(
+            move_to(103 * pixel, 100 * pixel - pixel / 2),
+            (
+                Device::Pointer,
+                vec![
+                    Event::new(EV_REL, REL_X, 3),
+                    Event::new(EV_ABS, ABS_X, 103 * pixel),
+                    Event::new(EV_ABS, ABS_Y, 100 * pixel - pixel / 2),
+                ]
+            )
+        );
+        // The half pixel up adds to the next half.
+        assert_eq!(
+            move_to(103 * pixel, 99 * pixel).1,
+            [
+                Event::new(EV_REL, REL_Y, -1),
+                Event::new(EV_ABS, ABS_X, 103 * pixel),
+                Event::new(EV_ABS, ABS_Y, 99 * pixel),
+            ]
+        );
+        // A jump moves the pointer without motion.
+        let far = 103 + MAX_MOTION_PIXELS + 1;
+        assert_eq!(
+            move_to(far * pixel, 99 * pixel).1,
+            [
+                Event::new(EV_ABS, ABS_X, far * pixel),
+                Event::new(EV_ABS, ABS_Y, 99 * pixel),
+            ]
+        );
+        // After the mouse moved the pointer, the next position has no
+        // motion to report either.
+        translator
+            .events(&InputAction::MouseMoveBy { dx: pixel, dy: 0 })
+            .unwrap();
+        assert_eq!(
+            translator
+                .events(&InputAction::PointerMoveTo {
+                    x: 10 * pixel,
+                    y: 10 * pixel
+                })
+                .unwrap()
+                .1
+                .len(),
+            2
+        );
     }
 
     /// Relative motion and scrolling keep their fractions until they add up to
