@@ -3,8 +3,9 @@
 //! network is behind; on top of that, the encoder's quantizer rises when
 //! frames take too long to cross the path, are skipped, show a queue
 //! building on the path, or many packets are lost, and falls back toward the
-//! configured quality while frames cross it easily. Past the highest
-//! quantizer, the frame rate is lowered instead.
+//! configured quality while frames cross it easily. When so many packets are
+//! lost that the stream would recover more than it shows, the frame rate is
+//! lowered too, until the loss has long stopped.
 //!
 //! Packet loss counts because the congestion controller, BBR, does not
 //! treat loss as congestion, and a wireless link can lose much of what is
@@ -77,13 +78,18 @@ const MIN_LOSS_PACKETS: u64 = 50;
 /// The share of packets lost above which the quality is lowered.
 const LOSS_LIMIT: f64 = 0.05;
 
+/// The share of packets lost above which the frame rate is halved as well.
+/// Only loss lowers the frame rate: a queue or a large frame lowers the
+/// quantizer alone, which a game's busy picture often holds at its highest.
+const HEAVY_LOSS_LIMIT: f64 = 0.2;
+
 /// The most frame intervals between frames sent, when rate control has
 /// lowered the frame rate as far as it goes: a quarter of the stream's.
 const MAX_INTERVAL_MULTIPLE: u32 = 4;
 
-/// How long after a reason to lower the quality last appeared the frame
-/// rate may be raised again. Longer than for the quantizer, since a frame
-/// rate that is raised too soon doubles the rate sent at once.
+/// How long after the last heavy loss, and after the frame rate last
+/// changed, it may be raised again, one halving at a time: a frame rate
+/// that is raised too soon doubles the rate sent at once.
 const FRAME_RATE_RAISE_DELAY: Duration = Duration::from_secs(2);
 
 /// The encoder's quantizer, chosen from how frames cross the path.
@@ -105,6 +111,10 @@ pub(crate) struct RateControl {
     /// How many frame intervals pass between frames sent: 1 at the
     /// stream's frame rate, more when the frame rate is lowered.
     interval_multiple: u32,
+    /// When a loss window last ended with heavy loss.
+    heavy_loss_at: Option<Instant>,
+    /// When the frame rate last changed.
+    frame_rate_changed_at: Option<Instant>,
     /// The packets sent and lost when the current loss window started, and
     /// when it started.
     loss_window: Option<LossWindow>,
@@ -132,6 +142,8 @@ impl RateControl {
             raised_at: None,
             queued_frames: 0,
             interval_multiple: 1,
+            heavy_loss_at: None,
+            frame_rate_changed_at: None,
             loss_window: None,
         }
     }
@@ -148,7 +160,8 @@ impl RateControl {
     }
 
     /// Notes the packets `path` has sent and lost by `now`: a loss window
-    /// that ends with too many of its packets lost lowers the quality.
+    /// that ends with too many of its packets lost lowers the quality, and
+    /// one that ends with far too many lowers the frame rate too.
     fn path_measured(&mut self, path: &PathStats, now: Instant) {
         let start = LossWindow {
             started: now,
@@ -165,10 +178,49 @@ impl RateControl {
         }
         self.loss_window = Some(start);
         let lost = path.lost_packets.saturating_sub(window.lost_packets);
-        if lost as f64 > sent as f64 * LOSS_LIMIT {
+        let share = lost as f64 / sent as f64;
+        if share > LOSS_LIMIT {
             debug!(lost, sent, "packets lost");
             self.lower(now);
         }
+        if share > HEAVY_LOSS_LIMIT {
+            self.lower_frame_rate(now);
+        }
+    }
+
+    /// Halves the frame rate after heavy loss, at most once every
+    /// [`LOWER_INTERVAL`] and down to a [`MAX_INTERVAL_MULTIPLE`]th.
+    fn lower_frame_rate(&mut self, now: Instant) {
+        self.heavy_loss_at = Some(now);
+        if self.interval_multiple == MAX_INTERVAL_MULTIPLE
+            || !settled(self.frame_rate_changed_at, LOWER_INTERVAL, now)
+        {
+            return;
+        }
+        self.interval_multiple *= 2;
+        self.frame_rate_changed_at = Some(now);
+        info!(
+            share = format!("1/{}", self.interval_multiple),
+            "video frame rate lowered"
+        );
+    }
+
+    /// Doubles the frame rate, if it was lowered, once there has been no
+    /// heavy loss for [`FRAME_RATE_RAISE_DELAY`] and it has not changed for
+    /// as long.
+    fn restore_frame_rate(&mut self, now: Instant) {
+        if self.interval_multiple == 1
+            || !settled(self.heavy_loss_at, FRAME_RATE_RAISE_DELAY, now)
+            || !settled(self.frame_rate_changed_at, FRAME_RATE_RAISE_DELAY, now)
+        {
+            return;
+        }
+        self.interval_multiple /= 2;
+        self.frame_rate_changed_at = Some(now);
+        info!(
+            share = format!("1/{}", self.interval_multiple),
+            "video frame rate raised"
+        );
     }
 
     /// Notes that a frame was skipped because the network was behind.
@@ -203,6 +255,7 @@ impl RateControl {
         now: Instant,
     ) {
         self.path_measured(path, now);
+        self.restore_frame_rate(now);
         if key_frame {
             return;
         }
@@ -216,50 +269,30 @@ impl RateControl {
         }
     }
 
-    /// Lowers the quality, at most once every [`LOWER_INTERVAL`]: the
-    /// quantizer up to [`MAX_RISE`] above the best, then the frame rate by
-    /// half, down to a [`MAX_INTERVAL_MULTIPLE`]th.
+    /// Lowers the quality, at most once every [`LOWER_INTERVAL`] and down
+    /// to [`MAX_RISE`] above the best.
     fn lower(&mut self, now: Instant) {
         self.pressed_at = Some(now);
         if !settled(self.lowered_at, LOWER_INTERVAL, now) {
             return;
         }
         let worst = self.best.saturating_add(MAX_RISE);
-        if self.quantizer < worst {
+        let quantizer = self.quantizer.saturating_add(STEP_UP).min(worst);
+        if quantizer != self.quantizer {
             self.lowered_at = Some(now);
-            self.quantizer = self.quantizer.saturating_add(STEP_UP).min(worst);
-            debug!(quantizer = self.quantizer, "video quality lowered");
-        } else if self.interval_multiple < MAX_INTERVAL_MULTIPLE {
-            self.lowered_at = Some(now);
-            self.interval_multiple *= 2;
-            info!(
-                share = format!("1/{}", self.interval_multiple),
-                "video frame rate lowered"
-            );
+            debug!(quantizer, "video quality lowered");
+            self.quantizer = quantizer;
         }
     }
 
     /// Raises the quality toward the best, if there was no reason to lower
-    /// it recently: the frame rate first, then the quantizer.
+    /// it recently.
     fn raise(&mut self, now: Instant) {
-        if !settled(self.lowered_at, RAISE_DELAY, now)
+        if self.quantizer == self.best
+            || !settled(self.lowered_at, RAISE_DELAY, now)
             || !settled(self.pressed_at, RAISE_DELAY, now)
             || !settled(self.raised_at, RAISE_INTERVAL, now)
         {
-            return;
-        }
-        if self.interval_multiple > 1 {
-            if settled(self.pressed_at, FRAME_RATE_RAISE_DELAY, now) {
-                self.raised_at = Some(now);
-                self.interval_multiple /= 2;
-                info!(
-                    share = format!("1/{}", self.interval_multiple),
-                    "video frame rate raised"
-                );
-            }
-            return;
-        }
-        if self.quantizer == self.best {
             return;
         }
         self.raised_at = Some(now);
@@ -410,51 +443,68 @@ mod tests {
         assert_eq!(rate.quantizer(), 100);
     }
 
-    /// The quantizer rises no further than a fixed distance from the best,
-    /// and past it the frame rate is halved, down to a quarter; the frame
-    /// rate comes back first, and only once the reasons to lower the
-    /// quality have long stopped.
+    /// The quality is lowered no further than a fixed distance from the
+    /// best, and reasons other than loss never lower the frame rate, however
+    /// long they last.
     #[test]
-    fn lowers_the_frame_rate_past_the_worst_quantizer() {
+    fn lowers_within_bounds() {
         let start = Instant::now();
         let mut rate = RateControl::new(100);
-        let steps = u32::from(MAX_RISE / STEP_UP);
-        for step in 0..steps {
+        for step in 0..20 {
             rate.frame_skipped(start + LOWER_INTERVAL * step);
         }
         assert_eq!(rate.quantizer(), 100 + MAX_RISE);
         assert_eq!(rate.frame_interval(INTERVAL), INTERVAL);
-        rate.frame_skipped(start + LOWER_INTERVAL * steps);
-        assert_eq!(rate.frame_interval(INTERVAL), INTERVAL * 2);
-        let mut now = start + LOWER_INTERVAL * steps;
-        for _ in 0..10 {
-            now += LOWER_INTERVAL;
-            rate.frame_skipped(now);
-        }
-        assert_eq!(rate.quantizer(), 100 + MAX_RISE);
-        assert_eq!(
-            rate.frame_interval(INTERVAL),
-            INTERVAL * MAX_INTERVAL_MULTIPLE
-        );
+    }
 
-        // Small frames soon after the last reason leave the frame rate.
-        let path = path(100_000);
-        rate.frame_sent(1_000, false, &path, INTERVAL, now + RAISE_DELAY);
-        assert_eq!(
-            rate.frame_interval(INTERVAL),
-            INTERVAL * MAX_INTERVAL_MULTIPLE
-        );
-        // Long after it, they raise the frame rate before the quantizer.
-        now += FRAME_RATE_RAISE_DELAY;
-        rate.frame_sent(1_000, false, &path, INTERVAL, now);
-        assert_eq!(rate.frame_interval(INTERVAL), INTERVAL * 2);
-        assert_eq!(rate.quantizer(), 100 + MAX_RISE);
-        now += RAISE_INTERVAL;
-        rate.frame_sent(1_000, false, &path, INTERVAL, now);
+    /// Heavy loss halves the frame rate, down to a quarter, and the frame
+    /// rate comes back one halving at a time, once the loss has long
+    /// stopped.
+    #[test]
+    fn lowers_the_frame_rate_on_heavy_loss() {
+        let start = Instant::now();
+        let mut rate = RateControl::new(100);
+        let mut now = start;
+        let (mut sent, mut lost) = (0, 0);
+        // Sends a frame after a loss window in which `share` of 1000
+        // packets were lost.
+        let mut window = |rate: &mut RateControl, now: Instant, share: f64| {
+            sent += 1000;
+            lost += (1000.0 * share) as u64;
+            let path = PathStats {
+                sent_packets: sent,
+                lost_packets: lost,
+                ..path(100_000)
+            };
+            rate.frame_sent(1_000, false, &path, INTERVAL, now);
+        };
+        window(&mut rate, now, 0.0);
+        // 10% lost lowers the quantizer only.
+        now += LOSS_WINDOW;
+        window(&mut rate, now, 0.1);
+        assert_eq!(rate.quantizer(), 100 + STEP_UP);
         assert_eq!(rate.frame_interval(INTERVAL), INTERVAL);
-        now += RAISE_INTERVAL;
-        rate.frame_sent(1_000, false, &path, INTERVAL, now);
-        assert_eq!(rate.quantizer(), 100 + MAX_RISE - STEP_DOWN);
+        // 40% lost halves the frame rate as well, each window.
+        for multiple in [2, 4, 4] {
+            now += LOSS_WINDOW;
+            window(&mut rate, now, 0.4);
+            assert_eq!(rate.frame_interval(INTERVAL), INTERVAL * multiple);
+        }
+
+        // Soon after the loss stops, the frame rate stays low.
+        now += LOSS_WINDOW;
+        window(&mut rate, now, 0.0);
+        assert_eq!(rate.frame_interval(INTERVAL), INTERVAL * 4);
+        // Long after, it doubles, and only doubles again as long later.
+        now += FRAME_RATE_RAISE_DELAY;
+        window(&mut rate, now, 0.0);
+        assert_eq!(rate.frame_interval(INTERVAL), INTERVAL * 2);
+        now += LOSS_WINDOW;
+        window(&mut rate, now, 0.0);
+        assert_eq!(rate.frame_interval(INTERVAL), INTERVAL * 2);
+        now += FRAME_RATE_RAISE_DELAY;
+        window(&mut rate, now, 0.0);
+        assert_eq!(rate.frame_interval(INTERVAL), INTERVAL);
     }
 
     /// A loss window that ends with more than its share of packets lost
