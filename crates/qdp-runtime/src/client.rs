@@ -54,9 +54,6 @@ const MAX_BIT_DEPTH: u8 = 8;
 /// The highest AV1 level the client decodes: its decoders take every level.
 const MAX_LEVEL: u8 = NO_LEVEL_LIMIT;
 
-/// The interface scale the client reports, in percent.
-const SCALE_PERCENT: u32 = 100;
-
 /// The most datagram bytes buffered for streams not yet defined (Section 3.7.3).
 const EARLY_BUFFER_LIMIT: usize = 2 << 20;
 
@@ -86,6 +83,13 @@ pub struct DisplaySize {
     pub height: u32,
     /// The refresh rate in millihertz, or 0 if unknown.
     pub refresh_millihertz: u32,
+    /// The interface scale in percent: 100 means no scaling.
+    pub scale_percent: u32,
+}
+
+impl DisplaySize {
+    /// The interface scale of a display that does not scale.
+    pub const UNSCALED: u32 = 100;
 }
 
 /// The configuration of a client.
@@ -222,7 +226,7 @@ fn display_request(display: DisplaySize) -> DisplayRequest {
             width: VarInt::from_u32(display.width),
             height: VarInt::from_u32(display.height),
             refresh_rate: VarInt::from_u32(display.refresh_millihertz),
-            scale: VarInt::from_u32(SCALE_PERCENT),
+            scale: VarInt::from_u32(display.scale_percent),
             physical_width: VarInt::ZERO,
             physical_height: VarInt::ZERO,
             peak_luminance: VarInt::ZERO,

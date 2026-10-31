@@ -56,17 +56,23 @@ const USAGE_EXIT_CODE: u8 = 2;
 /// The client name sent in `CLIENT_HELLO`.
 const CLIENT_NAME: &str = concat!("qdp/", env!("CARGO_PKG_VERSION"));
 
-/// The display size the client requests until it has a window to measure.
+/// The display a client without a window requests, and a window's until it
+/// has measured its own.
 const DEFAULT_DISPLAY: DisplaySize = DisplaySize {
     width: 1920,
     height: 1080,
     refresh_millihertz: 60_000,
+    scale_percent: DisplaySize::UNSCALED,
 };
 
 /// The name of the thread that runs the session while the window runs on the
 /// main thread.
 #[cfg(feature = "window")]
 const SESSION_THREAD_NAME: &str = "qdp-session";
+
+/// How long the session waits for the window to measure its display.
+#[cfg(feature = "window")]
+const DISPLAY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long the session may take to end on its own after the window closes,
 /// before it is cut off. It normally ends at the next frame, saying goodbye to
@@ -358,7 +364,13 @@ fn connect(args: ConnectArgs) -> CliResult {
 /// Receives the stream without a window, until the frame limit, an interrupt,
 /// or the host closing.
 fn connect_headless(args: &ConnectArgs, mut sink: CliSink) -> CliResult {
-    let result = run_async(receive(args, &mut sink, interrupted(), None));
+    let result = run_async(receive(
+        args,
+        DEFAULT_DISPLAY,
+        &mut sink,
+        interrupted(),
+        None,
+    ));
     finish(&mut sink, result)
 }
 
@@ -366,7 +378,9 @@ fn connect_headless(args: &ConnectArgs, mut sink: CliSink) -> CliResult {
 /// the main thread, and the session on another.
 #[cfg(feature = "window")]
 fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
-    use crate::window::{CloseSignal, FrameSlot, WindowApp, WindowMessage, WindowSink};
+    use crate::window::{
+        CloseSignal, FrameSlot, WindowApp, WindowChoices, WindowMessage, WindowSink,
+    };
 
     let event_loop = window::event_loop()?;
     let (input, input_queue) = qdp_runtime::input_channel();
@@ -381,6 +395,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
     };
     let proxy = event_loop.create_proxy();
     let mut sink = WindowSink::new(sink, Arc::clone(&slot), proxy.clone(), Arc::clone(&close));
+    let (display_sender, display) = tokio::sync::oneshot::channel();
     let session_close = Arc::clone(&close);
     let session = std::thread::Builder::new()
         .name(SESSION_THREAD_NAME.to_owned())
@@ -391,7 +406,15 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
                     () = window_closed(&session_close) => {}
                 }
             };
-            let result = run_async(receive(&args, &mut sink, stop, Some(input_queue)));
+            let result = run_async(async {
+                // The window measures the display once it opens.
+                let display = tokio::time::timeout(DISPLAY_WAIT, display)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(DEFAULT_DISPLAY);
+                receive(&args, display, &mut sink, stop, Some(input_queue)).await
+            });
             let result = finish(sink.inner_mut(), result);
             // The window may have closed already, so nobody may listen.
             let _ = proxy.send_event(WindowMessage::SessionEnded);
@@ -399,14 +422,18 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
         })
         .map_err(|error| format!("cannot start the session: {error}"))?;
 
-    let mut app = WindowApp::new(
+    let choices = WindowChoices {
         title,
+        passthrough: &passthrough,
+        touchpad,
+    };
+    let mut app = WindowApp::new(
+        choices,
         slot,
         Arc::clone(&close),
         input,
         event_loop.create_proxy(),
-        &passthrough,
-        touchpad,
+        display_sender,
     );
     let window_result = event_loop
         .run_app(&mut app)
@@ -440,12 +467,13 @@ async fn interrupted() {
     }
 }
 
-/// Connects to the host and presents its stream in `sink` until the sink stops,
-/// the host closes, or `stop` completes, sending the user's input from
-/// `input`, if given. Returns the session's summary, or `None` if `stop` cut
-/// it off.
+/// Connects to the host and presents its stream in `sink`, shown on
+/// `display`, until the sink stops, the host closes, or `stop` completes,
+/// sending the user's input from `input`, if given. Returns the session's
+/// summary, or `None` if `stop` cut it off.
 async fn receive(
     args: &ConnectArgs,
+    display: DisplaySize,
     sink: &mut dyn FrameSink,
     stop: impl Future<Output = ()>,
     input: Option<InputQueue>,
@@ -477,7 +505,7 @@ async fn receive(
     let options = ClientOptions {
         client_name: CLIENT_NAME.to_owned(),
         credentials,
-        display: DEFAULT_DISPLAY,
+        display,
         decoder_threads: 0,
         decoder: args.decoder,
         keyboard_info: qdp_desktop::keyboard_info(),

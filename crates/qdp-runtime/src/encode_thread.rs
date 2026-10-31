@@ -1,18 +1,20 @@
 //! Capture and encoding on a dedicated thread, so that the host's network loop
 //! keeps answering feedback, retransmission requests and clock pings while a
-//! frame is being encoded.
+//! frame is being encoded. Captured frames are scaled to the size of the
+//! stream they are encoded for.
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use qdp::message::{BlockGrid, BlockSet};
+use qdp::message::{BlockGrid, BlockSet, StreamId};
 use qdp_codec::{
     CodecPreference, EncodedFrame, EncoderSettings, KeyFrameRequest, VideoEncoder, Yuv420Frame,
     open_encoder,
 };
 use tokio::sync::{Notify, oneshot};
+use tracing::info;
 
 use crate::RuntimeError;
 use crate::media::{CursorState, FrameSource, changed_blocks};
@@ -27,6 +29,12 @@ pub(crate) struct EncodeJob {
     pub(crate) request: KeyFrameRequest,
     /// Whether the frame answers a loss, so that it is flagged `RECOVERY`.
     pub(crate) recovery: bool,
+    /// The stream the frame is for.
+    pub(crate) stream_id: StreamId,
+    /// The stream's encoder settings, whose size the captured frame is
+    /// scaled to. A job with other settings than the last reopens the
+    /// encoder with them.
+    pub(crate) settings: EncoderSettings,
 }
 
 /// One frame the encoder produced.
@@ -60,16 +68,15 @@ pub(crate) struct EncoderThread {
 
 impl EncoderThread {
     /// Starts the thread with a source, and an encoder opened as `preference`
-    /// asks, for frames divided into `grid`. Returns the thread and the
-    /// encoder's description.
+    /// asks with `settings`. Returns the thread and the encoder's
+    /// description.
     ///
-    /// The encoder is opened on the thread itself, because hardware encoders
+    /// Encoders are opened on the thread itself, because hardware encoders
     /// hold driver state that must stay on the thread that created it.
     pub(crate) async fn spawn(
         source: Box<dyn FrameSource>,
         settings: EncoderSettings,
         preference: CodecPreference,
-        grid: BlockGrid,
     ) -> Result<(Self, String), RuntimeError> {
         let (job_sender, jobs) = mpsc::channel();
         let (result_sender, results) = mpsc::channel();
@@ -87,7 +94,8 @@ impl EncoderThread {
                     }
                 };
                 let _ = opened_sender.send(Ok(encoder.description().to_owned()));
-                run(source, encoder, grid, &jobs, &result_sender, &notify);
+                let opened = OpenEncoder { encoder, settings };
+                run(source, opened, preference, &jobs, &result_sender, &notify);
             })
             .map_err(|error| RuntimeError::Capture(error.to_string()))?;
         let thread = Self {
@@ -137,22 +145,38 @@ impl Drop for EncoderThread {
     }
 }
 
+/// An encoder and the settings it was opened with.
+struct OpenEncoder {
+    /// The encoder.
+    encoder: Box<dyn VideoEncoder>,
+    /// Its settings.
+    settings: EncoderSettings,
+}
+
 /// The thread's loop: one result for each job, until the job channel closes or
 /// the result channel is dropped.
 fn run(
     mut source: Box<dyn FrameSource>,
-    mut encoder: Box<dyn VideoEncoder>,
-    grid: BlockGrid,
+    mut opened: OpenEncoder,
+    preference: CodecPreference,
     jobs: &Receiver<EncodeJob>,
     results: &Sender<Result<EncodedOutput, RuntimeError>>,
     ready: &Notify,
 ) {
+    let mut stream = None;
     let mut previous: Option<Yuv420Frame> = None;
     let mut next_input_index = 0;
     while let Ok(job) = jobs.recv() {
+        if stream != Some(job.stream_id) {
+            // A new stream starts with a key frame, which needs no earlier
+            // frame to compare against.
+            stream = Some(job.stream_id);
+            previous = None;
+        }
+        let grid = BlockGrid::for_monitor(job.settings.width as u32, job.settings.height as u32);
         let captured_at = Instant::now();
-        let outputs =
-            encode_one(&mut *source, &mut *encoder, job).map(|(frame, cursor, encoded)| {
+        let outputs = encode_one(&mut *source, &mut opened, preference, job).map(
+            |(frame, cursor, encoded)| {
                 let input_index = next_input_index;
                 next_input_index += 1;
                 let changed = previous
@@ -182,7 +206,8 @@ fn run(
                         }
                     })
                     .collect::<Vec<_>>()
-            });
+            },
+        );
         let delivered = match outputs {
             Ok(outputs) => outputs
                 .into_iter()
@@ -196,25 +221,51 @@ fn run(
     }
 }
 
-/// Captures one frame, with the pointer if the source reports it, and
-/// encodes it.
+/// The output of [`encode_one`]: the frame as encoded, the pointer if the
+/// source reports it, and the encoded frames.
+type Encoded = (Yuv420Frame, Option<CursorState>, Vec<EncodedFrame>);
+
+/// Captures one frame, with the pointer if the source reports it, scales it
+/// to the job's size and encodes it, first reopening the encoder if the job
+/// has other settings.
 fn encode_one(
     source: &mut dyn FrameSource,
-    encoder: &mut dyn VideoEncoder,
+    opened: &mut OpenEncoder,
+    preference: CodecPreference,
     job: EncodeJob,
-) -> Result<(Yuv420Frame, Option<CursorState>, Vec<EncodedFrame>), RuntimeError> {
-    let frame = source.capture()?;
+) -> Result<Encoded, RuntimeError> {
+    if opened.settings != job.settings {
+        let encoder = open_encoder(job.settings, preference)?;
+        info!(
+            encoder = encoder.description(),
+            width = job.settings.width,
+            height = job.settings.height,
+            "encoder reopened"
+        );
+        *opened = OpenEncoder {
+            encoder,
+            settings: job.settings,
+        };
+    }
+    let frame = source
+        .capture()?
+        .scaled(job.settings.width, job.settings.height);
     let cursor = source.cursor();
-    let encoded = encoder.encode(&frame, job.request)?;
+    let encoded = opened.encoder.encode(&frame, job.request)?;
     Ok((frame, cursor, encoded))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qdp::wire::VarInt;
+    use qdp_codec::SequenceHeader;
+
     use crate::TestPattern;
 
-    /// The thread encodes requested frames and reports changed blocks.
+    /// The thread encodes requested frames and reports changed blocks, and
+    /// a job for a stream of another size reopens the encoder and scales the
+    /// captured frames to it.
     #[tokio::test]
     async fn encodes_requested_frames() {
         let (width, height) = (256, 128);
@@ -226,25 +277,30 @@ mod tests {
             quantizer: 100,
             threads: 1,
         };
-        let grid = BlockGrid::for_monitor(width as u32, height as u32);
         let (thread, description) = EncoderThread::spawn(
             Box::new(TestPattern::new(width, height)),
             settings,
             CodecPreference::Software,
-            grid,
         )
         .await
         .unwrap();
         assert_eq!(description, "rav1e (software)");
+        let first = StreamId(VarInt::from_u32(1));
+        let half = EncoderSettings {
+            width: width / 2,
+            height: height / 2,
+            ..settings
+        };
+        let job = |request, stream_id, settings| EncodeJob {
+            request,
+            recovery: false,
+            stream_id,
+            settings,
+        };
         let jobs = [
-            EncodeJob {
-                request: KeyFrameRequest::Force,
-                recovery: false,
-            },
-            EncodeJob {
-                request: KeyFrameRequest::Auto,
-                recovery: false,
-            },
+            job(KeyFrameRequest::Force, first, settings),
+            job(KeyFrameRequest::Auto, first, settings),
+            job(KeyFrameRequest::Force, StreamId(VarInt::from_u32(2)), half),
         ];
         let mut outputs = Vec::new();
         for job in jobs {
@@ -257,6 +313,7 @@ mod tests {
             };
             outputs.push(output);
         }
+        let grid = BlockGrid::for_monitor(width as u32, height as u32);
         assert!(outputs[0].frame.is_key_frame);
         assert!(outputs[0].blocks.is_full());
         assert!(!outputs[1].frame.is_key_frame);
@@ -264,6 +321,15 @@ mod tests {
         assert!(
             changed > 0 && changed < grid.len(),
             "{changed} blocks changed"
+        );
+        let scaled = &outputs[2];
+        assert!(scaled.frame.is_key_frame);
+        let header = SequenceHeader::find(&scaled.frame.temporal_unit)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (header.max_width, header.max_height),
+            (half.width as u32, half.height as u32)
         );
     }
 }

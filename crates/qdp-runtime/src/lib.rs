@@ -36,6 +36,7 @@ mod host_cursor;
 mod host_input;
 mod host_output;
 mod host_passthrough;
+mod layout;
 mod media;
 mod send_stats;
 mod stream_format;
