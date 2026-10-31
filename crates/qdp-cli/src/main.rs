@@ -25,8 +25,8 @@ use std::sync::Arc;
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
-    DisplaySize, EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator, HostOptions,
-    InputQueue, SharedClipboard, TestPattern,
+    DisplaySize, EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator, HostDesktop,
+    HostOptions, InputQueue, OpenedDesktop, RuntimeError, SharedClipboard, TestPattern,
 };
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
@@ -197,6 +197,12 @@ async fn serve(args: ServeArgs) -> CliResult {
     let clipboard_directions = args.clipboard;
     let audio_setting = args.audio;
     let state_directory = Arc::new(args.identity.clone());
+    // What the host can inject is found once, before any client connects,
+    // so that no input device exists for a client that has not
+    // authenticated; each session opens its own injector once its client
+    // has (Section 11.2).
+    let input_classes =
+        qdp_runtime::input_classes(&*qdp_desktop::input_injector(1, 1), args.passthrough);
 
     let admission = Admission::default();
     let mut sessions = JoinSet::new();
@@ -232,25 +238,18 @@ async fn serve(args: ServeArgs) -> CliResult {
                         }
                     };
                     info!(%peer, "client connected");
-                    let source = match open_source(source_kind, (width, height), state_directory).await {
-                        Ok(source) => source,
-                        Err(error) => {
-                            warn!(%peer, %error, "cannot capture the screen");
-                            return;
-                        }
+                    let desktop = HostDesktop {
+                        input_classes,
+                        clipboard: shared_clipboard(clipboard_directions),
+                        audio: match audio_setting {
+                            Audio::On => qdp_desktop::host_audio(),
+                            Audio::Off => HostAudio::default(),
+                        },
+                        open: Box::new(move || {
+                            Box::pin(open_desktop(source_kind, (width, height), state_directory))
+                        }),
                     };
-                    let (source_width, source_height) = source.size();
-                    let injector =
-                        qdp_desktop::input_injector(source_width as u32, source_height as u32);
-                    let clipboard = shared_clipboard(clipboard_directions);
-                    let audio = match audio_setting {
-                        Audio::On => qdp_desktop::host_audio(),
-                        Audio::Off => HostAudio::default(),
-                    };
-                    let result = qdp_runtime::serve(
-                        connection, ticket, &options, source, injector, clipboard, audio,
-                    )
-                    .await;
+                    let result = qdp_runtime::serve(connection, ticket, &options, desktop).await;
                     match result {
                         Ok(summary) => info!(
                             %peer,
@@ -304,6 +303,21 @@ fn shared_clipboard(directions: Option<ClipboardDirections>) -> Option<SharedCli
         clipboard,
         directions,
     })
+}
+
+/// Opens a session's desktop once its client has authenticated: what it
+/// streams, as [`open_source`] opens it, and an input injector for it.
+async fn open_desktop(
+    kind: SourceKind,
+    size: (usize, usize),
+    state_directory: Arc<PathBuf>,
+) -> Result<OpenedDesktop, RuntimeError> {
+    let source = open_source(kind, size, state_directory)
+        .await
+        .map_err(RuntimeError::Capture)?;
+    let (width, height) = source.size();
+    let injector = qdp_desktop::input_injector(width as u32, height as u32);
+    Ok(OpenedDesktop { source, injector })
 }
 
 /// Opens what a session streams: the screen, or a `size` test pattern.

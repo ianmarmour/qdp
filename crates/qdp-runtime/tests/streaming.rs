@@ -23,11 +23,12 @@ use qdp_runtime::{
     ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
     DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource,
-    GamepadFeedback, HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle,
-    InputInjector, InputQueue, Microphone, NoInput, PassthroughDevice, PassthroughFeedback,
-    PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton, PointerPosition, Presentation,
-    PresentationTiming, RefreshMode, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
-    TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
+    GamepadFeedback, HostAudio, HostAuthenticator, HostDesktop, HostOptions, InputAction,
+    InputHandle, InputInjector, InputQueue, Microphone, NoInput, OpenedDesktop, PassthroughDevice,
+    PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton,
+    PointerPosition, Presentation, PresentationTiming, RefreshMode, RuntimeError, SAMPLE_RATE,
+    SharedClipboard, SinkControl, TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind,
+    input_channel, input_classes, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -344,6 +345,36 @@ fn start_host(
     KeyPin,
     tokio::task::JoinHandle<Result<qdp_runtime::HostSummary, RuntimeError>>,
 ) {
+    start_host_with(
+        authenticator,
+        host_desktop(source, injector, clipboard, audio),
+    )
+}
+
+/// Returns a host desktop that opens `source` and `injector`.
+fn host_desktop(
+    source: Box<dyn FrameSource>,
+    injector: Box<dyn InputInjector>,
+    clipboard: Option<SharedClipboard>,
+    audio: HostAudio,
+) -> HostDesktop {
+    HostDesktop {
+        input_classes: input_classes(&*injector, PassthroughPolicy::default()),
+        clipboard,
+        audio,
+        open: Box::new(move || Box::pin(async move { Ok(OpenedDesktop { source, injector }) })),
+    }
+}
+
+/// Starts a host serving `desktop` to one client, as [`start_host`] does.
+fn start_host_with(
+    authenticator: HostAuthenticator,
+    desktop: HostDesktop,
+) -> (
+    SocketAddr,
+    KeyPin,
+    tokio::task::JoinHandle<Result<qdp_runtime::HostSummary, RuntimeError>>,
+) {
     let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let pin = identity.key_pin().unwrap();
     let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
@@ -366,10 +397,7 @@ fn start_host(
             .admit(incoming.remote_address().ip())
             .expect("the client is admitted");
         let connection = incoming.establish().await?;
-        serve(
-            connection, ticket, &options, source, injector, clipboard, audio,
-        )
-        .await
+        serve(connection, ticket, &options, desktop).await
     });
     (address, pin, task)
 }
@@ -526,7 +554,8 @@ async fn stream_with_password() {
     check_frames(&collector);
 }
 
-/// A client with the wrong password is refused.
+/// A client with the wrong password is refused, and the host's desktop is
+/// never opened for it (Section 11.2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wrong_password_is_refused() {
     let mut authenticator = HostAuthenticator::new().unwrap();
@@ -534,13 +563,28 @@ async fn wrong_password_is_refused() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(
-        authenticator,
-        test_pattern(),
-        Box::new(NoInput),
-        None,
-        HostAudio::default(),
-    );
+    let opened = Arc::new(AtomicBool::new(false));
+    let desktop = HostDesktop {
+        open: Box::new({
+            let opened = Arc::clone(&opened);
+            move || {
+                opened.store(true, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(OpenedDesktop {
+                        source: test_pattern(),
+                        injector: Box::new(NoInput),
+                    })
+                })
+            }
+        }),
+        ..host_desktop(
+            test_pattern(),
+            Box::new(NoInput),
+            None,
+            HostAudio::default(),
+        )
+    };
+    let (address, pin, _host) = start_host_with(authenticator, desktop);
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "wrong".to_owned(),
@@ -549,6 +593,7 @@ async fn wrong_password_is_refused() {
         .await
         .expect("the attempt finishes in time");
     assert!(matches!(result, Err(RuntimeError::AuthenticationFailed(_))));
+    assert!(!opened.load(Ordering::SeqCst));
 }
 
 /// Keys, pointer, buttons, scrolling and text sent by the client are
@@ -2195,16 +2240,13 @@ async fn newer_session_replaces_older() {
             let options = Arc::clone(&options);
             tokio::spawn(async move {
                 let connection = incoming.establish().await.unwrap();
-                serve(
-                    connection,
-                    ticket,
-                    &options,
+                let desktop = host_desktop(
                     test_pattern(),
                     Box::new(NoInput),
                     None,
                     HostAudio::default(),
-                )
-                .await
+                );
+                serve(connection, ticket, &options, desktop).await
             });
         }
         // Keep the endpoint open for the sessions.
