@@ -70,6 +70,10 @@ const fn feature_request(number: u8, length: usize) -> libc::Ioctl {
         as libc::Ioctl
 }
 
+/// How many directories above a USB HID device sysfs puts the USB device:
+/// the interface, then the device.
+const USB_DEVICE_DEPTH: usize = 2;
+
 /// A hidraw device sysfs lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HidrawDevice {
@@ -83,6 +87,8 @@ struct HidrawDevice {
     vendor_id: u16,
     /// The product ID.
     product_id: u16,
+    /// The device's version: a USB device's `bcdDevice`, or 0 if unknown.
+    version: u16,
     /// The report descriptor.
     descriptor: Vec<u8>,
 }
@@ -104,7 +110,7 @@ impl HidrawDevice {
             bus_type,
             vendor_id: self.vendor_id,
             product_id: self.product_id,
-            version: 0,
+            version: self.version,
             report_descriptor: self.descriptor.clone(),
             rest_reports: parsed.rest_reports(),
         })
@@ -131,8 +137,25 @@ fn read_device(root: &Path, entry: &str) -> Option<HidrawDevice> {
         bus,
         vendor_id: vendor_id as u16,
         product_id: product_id as u16,
+        version: if bus == LINUX_BUS_USB {
+            usb_version(&device).unwrap_or(0)
+        } else {
+            0
+        },
         descriptor: fs::read(device.join("report_descriptor")).ok()?,
     })
+}
+
+/// Returns a USB HID device's `bcdDevice` (Section 8.2.1), from the USB
+/// device sysfs puts its interface, and so the HID device, under.
+fn usb_version(device: &Path) -> Option<u16> {
+    let device = fs::canonicalize(device).ok()?;
+    device
+        .ancestors()
+        .skip(1)
+        .take(USB_DEVICE_DEPTH)
+        .find_map(|ancestor| fs::read_to_string(ancestor.join("bcdDevice")).ok())
+        .and_then(|text| u16::from_str_radix(text.trim(), 16).ok())
 }
 
 /// Returns the hidraw devices under `root` that `selectors` name.
@@ -437,6 +460,26 @@ mod tests {
         assert_eq!(info.bus_type, BusType::BLUETOOTH_CLASSIC);
         assert_eq!((info.vendor_id, info.product_id), (0x054c, 0x09cc));
         assert_eq!(info.rest_reports, [vec![1, 0]]);
+    }
+
+    /// A USB device's version is its `bcdDevice`, found above the HID
+    /// device its hidraw entry links to.
+    #[test]
+    fn reads_usb_versions() {
+        let root = std::env::temp_dir().join(format!("qdp-hidraw-usb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let usb_device = root.join("usb").join("1-2");
+        let hid = usb_device.join("1-2:1.0").join("0003:054C:0CE6.0001");
+        fs::create_dir_all(&hid).unwrap();
+        fs::write(usb_device.join("bcdDevice"), "0110\n").unwrap();
+        fs::write(hid.join("uevent"), "HID_ID=0003:0000054C:00000CE6\n").unwrap();
+        fs::write(hid.join("report_descriptor"), GAMEPAD).unwrap();
+        let entry = root.join("class").join("hidraw2");
+        fs::create_dir_all(&entry).unwrap();
+        std::os::unix::fs::symlink(&hid, entry.join("device")).unwrap();
+        let device = read_device(&root.join("class"), "hidraw2");
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(device.unwrap().info().unwrap().version, 0x0110);
     }
 
     /// Reports gain the report ID byte that hidraw leaves out, and the

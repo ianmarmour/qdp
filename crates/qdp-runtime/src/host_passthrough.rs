@@ -82,11 +82,14 @@ pub struct FeatureRequest {
 }
 
 /// Checks a passthrough device against the descriptor's limits and the
-/// host's policy, returning the status and reason to refuse it with.
+/// host's policy, returning its rest reports, one per input report ID of
+/// the descriptor and of its length, or the status and reason to refuse it
+/// with. The client's rest report of an ID is kept where its length is
+/// right, and the host's own otherwise.
 pub(crate) fn check(
     policy: PassthroughPolicy,
     info: &PassthroughInfo,
-) -> Result<(), (DeviceStatusCode, String)> {
+) -> Result<Vec<Vec<u8>>, (DeviceStatusCode, String)> {
     let descriptor = ReportDescriptor::parse(&info.report_descriptor).map_err(|error| {
         (
             DeviceStatusCode::Failed,
@@ -99,7 +102,27 @@ pub(crate) fn check(
             "the host accepts only game controllers for passthrough".to_owned(),
         ));
     }
-    Ok(())
+    let own = descriptor.rest_reports();
+    let undeclared = info.rest_reports.iter().any(|report| {
+        !own.iter()
+            .any(|rest| rest.first() == report.first() && rest.len() == report.len())
+    });
+    if undeclared {
+        return Err((
+            DeviceStatusCode::Failed,
+            "a rest report does not match the report descriptor".to_owned(),
+        ));
+    }
+    Ok(own
+        .into_iter()
+        .map(|rest| {
+            info.rest_reports
+                .iter()
+                .find(|report| report.first() == rest.first())
+                .cloned()
+                .unwrap_or(rest)
+        })
+        .collect())
 }
 
 /// A feature request sent to the client and not yet answered.
@@ -262,7 +285,9 @@ mod tests {
         assert!(!PassthroughPolicy::Off.allows(&[GAMEPAD]));
     }
 
-    /// Invalid descriptors fail and keyboards are denied.
+    /// Invalid descriptors fail and keyboards are denied; rest reports must
+    /// match the descriptor's input reports, and the host's own stand in
+    /// for missing ones.
     #[test]
     fn checks_devices() {
         let info = |report_descriptor: Vec<u8>| PassthroughInfo {
@@ -284,8 +309,26 @@ mod tests {
             check(policy, &broken).unwrap_err().0,
             DeviceStatusCode::Failed
         );
-        let gamepad = info(vec![0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xc0]);
-        assert_eq!(check(policy, &gamepad), Ok(()));
+        // A gamepad with one 8-bit input field and no report IDs.
+        let gamepad = info(vec![
+            0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95,
+            0x01, 0x81, 0x02, 0xc0,
+        ]);
+        assert_eq!(check(policy, &gamepad), Ok(vec![vec![0, 0]]));
+        let with_rest = |rest_reports: Vec<Vec<u8>>| PassthroughInfo {
+            rest_reports,
+            ..gamepad.clone()
+        };
+        assert_eq!(
+            check(policy, &with_rest(vec![vec![0, 7]])),
+            Ok(vec![vec![0, 7]])
+        );
+        for wrong in [vec![5, 0], vec![0, 0, 0]] {
+            assert_eq!(
+                check(policy, &with_rest(vec![wrong])).unwrap_err().0,
+                DeviceStatusCode::Failed
+            );
+        }
     }
 
     /// Requests are numbered from 1, answered once, time out after a second,

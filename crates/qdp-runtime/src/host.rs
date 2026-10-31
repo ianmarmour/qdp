@@ -8,8 +8,8 @@ use qdp::message::{
     Av1Profiles, Capability, ControlMessage, CursorId, CursorSet, Datagram, DatagramPayload,
     DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus, DeviceStatusCode,
     FeatureStatus, FeedbackRecord, FrameHeader, HostHello, ImageSerial, InputClasses,
-    KeyboardOutput, MinorVersion, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamHeader,
-    VideoCodec, VideoCodecCapability, VideoCodecFlags,
+    KeyboardOutput, MinorVersion, NO_LEVEL_LIMIT, PassthroughInfo, PointerKind, PointerMode,
+    StreamHeader, VideoCodec, VideoCodecCapability, VideoCodecFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{AuthResponse, HostConfig, HostEvent};
@@ -48,6 +48,9 @@ pub(crate) const BIT_DEPTH: u8 = 8;
 /// The interface scale the host reports, in percent, for its monitor and the
 /// cursor images drawn for it.
 pub(crate) const SCALE_PERCENT: u32 = 100;
+
+/// The most devices the host accepts at once: at least 16 (Section 8.2.4).
+const MAX_DEVICES: usize = 64;
 
 /// The largest frame the host's AV1 capability advertises.
 const MAX_FRAME_DIMENSION: u32 = 8192;
@@ -492,17 +495,24 @@ fn answer_attach(
     });
     let outcome = match (&attach.passthrough, negotiated) {
         (_, false) => Err((DeviceStatusCode::Unsupported, String::new())),
+        _ if devices.len() >= MAX_DEVICES => Err((
+            DeviceStatusCode::LimitReached,
+            format!("the host takes at most {MAX_DEVICES} devices"),
+        )),
         (Some(info), true) if attach.kind == DeviceKind::PASSTHROUGH => {
-            host_passthrough::check(policy, info).and_then(|()| {
+            host_passthrough::check(policy, info).and_then(|rest_reports| {
                 let device = PassthroughDevice {
                     device_id: attach.device_id,
                     name: attach.name.clone(),
-                    info: info.clone(),
+                    info: PassthroughInfo {
+                        rest_reports,
+                        ..info.clone()
+                    },
                 };
                 injector
                     .attach_passthrough(&device)
                     .map_err(|error| (DeviceStatusCode::Failed, error))?;
-                devices.attach_passthrough(attach.device_id, &info.rest_reports);
+                devices.attach_passthrough(attach.device_id, &device.info.rest_reports);
                 Ok(())
             })
         }
