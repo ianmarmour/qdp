@@ -16,7 +16,8 @@ sudo dnf install nasm
 On Debian and Ubuntu that is `sudo apt install nasm`, on Arch
 `sudo pacman -S nasm`, and on macOS with Homebrew `brew install nasm` (only
 needed on Intel Macs). Apple Silicon Macs need only the Xcode command line
-tools.
+tools. On Windows, install NASM, for example with `winget install NASM.NASM`,
+alongside the Visual Studio C++ build tools that Rust uses there.
 
 On Linux, screen capture uses PipeWire, whose development files and libclang
 are needed to build it:
@@ -91,7 +92,10 @@ sudo usermod -aG input "$USER"
 ```
 
 Log out and in again for the group change to apply. Without access the host
-logs a warning and ignores input.
+logs a warning and ignores input. On Windows the host sends input with
+`SendInput`; Windows keeps it from reaching programs run as administrator unless
+the host runs as administrator too, and from the sign-in screen and elevation
+prompts entirely.
 
 The host streams its screen. On Linux it asks the desktop, through the
 ScreenCast portal that GNOME, KDE and wlroots compositors provide, which
@@ -100,7 +104,10 @@ remembered in the identity directory for later sessions. On macOS the host
 captures the main display with ScreenCaptureKit; the first time, macOS asks to
 allow Screen Recording for the terminal or app running `qdp`, and performing
 the client's input needs Accessibility to be allowed for it as well, both under
-System Settings, Privacy & Security. If the screen cannot be captured the host
+System Settings, Privacy & Security. On Windows 10 and later the host captures
+the primary monitor with DXGI Desktop Duplication, and holds the last image
+while the sign-in screen or an elevation prompt is shown. If the screen cannot
+be captured the host
 streams a test pattern instead, and `--source screen` or `--source
 test-pattern` forces one. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail.
@@ -113,4 +120,5 @@ for more detail.
 | `qdp-quic` | QUIC transport with quinn and rustls |
 | `qdp-codec` | Software AV1 encoding with rav1e and decoding with rav1d |
 | `qdp-runtime` | Host and client media pipelines |
+| `qdp-desktop` | Screen capture and input injection for Linux, macOS and Windows hosts |
 | `qdp-cli` | The `qdp` command |
