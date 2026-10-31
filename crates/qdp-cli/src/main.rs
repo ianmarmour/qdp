@@ -23,6 +23,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use qdp_codec::DecoderCommand;
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
@@ -37,8 +38,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::args::{
-    Audio, Command, ConnectArgs, LockPolicy, Presentation, ServeArgs, SourceKind, USAGE,
-    format_pin, parse_args,
+    Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, LockPolicy, Presentation,
+    ServeArgs, SourceKind, USAGE, format_pin, parse_args,
 };
 use crate::identity::Role;
 use crate::sink::CliSink;
@@ -115,6 +116,8 @@ fn main() -> ExitCode {
         Command::Pin { identity, role } => print_pin(&identity, role),
         Command::Serve(args) => run_async(serve(args)),
         Command::Connect(args) => connect(args),
+        Command::Decoder => qdp_codec::serve_decoder_on_stdio()
+            .map_err(|error| format!("the decoder process failed: {error}")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -581,6 +584,7 @@ async fn receive(
                 display,
                 decoder_threads: 0,
                 decoder: args.decoder,
+                decoder_process: decoder_process(args)?,
                 keyboard_info: qdp_desktop::keyboard_info(),
                 resumption: resumption.clone(),
             };
@@ -614,6 +618,22 @@ async fn receive(
     };
     endpoint.wait_idle().await;
     Ok(summary)
+}
+
+/// Returns the command that starts a decoder process, if `args` asks for
+/// one: this program, run as `qdp decoder`.
+fn decoder_process(args: &ConnectArgs) -> Result<Option<DecoderCommand>, String> {
+    match args.decoder_process {
+        DecoderPlacement::InProcess => Ok(None),
+        DecoderPlacement::SeparateProcess => {
+            let program = std::env::current_exe()
+                .map_err(|error| format!("cannot find this program to run its decoder: {error}"))?;
+            Ok(Some(DecoderCommand {
+                program,
+                args: vec![DECODER_COMMAND.into()],
+            }))
+        }
+    }
 }
 
 /// Why a connection ended without a session summary.
