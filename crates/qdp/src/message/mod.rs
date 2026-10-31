@@ -9,11 +9,14 @@
 mod audio;
 mod block_map;
 mod capability;
+mod clipboard;
+mod cursor;
 mod feedback;
 mod ids;
 mod input;
 mod report;
 mod session;
+mod stream;
 mod timing;
 mod video;
 
@@ -28,13 +31,21 @@ pub use capability::{
     HdrFormats, InputClasses, MAX_CAPABILITIES, MAX_CAPABILITY_LENGTH, NO_LEVEL_LIMIT, VideoCodec,
     VideoCodecCapability, VideoCodecFlags,
 };
+pub use clipboard::{
+    ClipboardOffer, ClipboardReject, ClipboardRequest, MAX_CLIPBOARD_FORMATS, PLAIN_TEXT_FORMAT,
+    RejectReason,
+};
+pub use cursor::{
+    CursorFormat, CursorImage, CursorSet, CursorWarp, MAX_CURSOR_IDS, MAX_CURSOR_SIZE, WarpFlags,
+};
 pub use feedback::{
     DecodedRecord, DisplayTimingFlags, DisplayTimingRecord, FeedbackRecord, FrameTimingRecord,
     LossRecord, MissingRange, NackRecord, VideoFeedback,
 };
 pub use ids::{
-    AudioConfigId, ClientMonitorId, DeviceId, DisplayConfigId, DisplayRequestId, FeatureRequestId,
-    FrameNumber, InputSequence, MonitorId, StreamId, WarpId,
+    AudioConfigId, ClientMonitorId, ClipboardRequestId, CursorId, DeviceId, DisplayConfigId,
+    DisplayRequestId, FeatureRequestId, FrameNumber, ImageSerial, InputSequence, MonitorId,
+    OfferId, StreamId, WarpId,
 };
 pub use input::{
     BusType, DesktopRect, DeviceAttach, DeviceDetach, DeviceFeatures, DeviceKind, DeviceOutput,
@@ -53,6 +64,9 @@ pub use session::{
     AuthContinue, AuthMethod, AuthResult, AuthStart, AuthStatus, ClientHello, ClientReady,
     HostHello, MAX_AUTH_DATA_LENGTH, MAX_NAME_LENGTH, MAX_RESUMPTION_TOKEN_LENGTH, MinorVersion,
     PasswordAuthData, ResumptionToken, SessionStart,
+};
+pub use stream::{
+    HidOutputDecoder, MAX_HID_OUTPUT_REPORT_LENGTH, StreamHeader, encode_hid_output_report,
 };
 pub use timing::{PingId, TimePing, TimePong, Timestamp};
 pub use video::{
@@ -153,8 +167,17 @@ pub enum ControlMessage {
     HidFeatureResponse(HidFeatureResponse),
     /// `DEVICE_STATUS` (Section 8.2.4).
     DeviceStatus(DeviceStatus),
-    /// A message of a type this implementation does not decode, which the receiver
-    /// ignores (Section 3.6.2).
+    /// `CURSOR_SET` (Section 9.3).
+    CursorSet(CursorSet),
+    /// `CURSOR_WARP` (Section 9.4).
+    CursorWarp(CursorWarp),
+    /// `CLIPBOARD_OFFER` (Section 10.2).
+    ClipboardOffer(ClipboardOffer),
+    /// `CLIPBOARD_REQUEST` (Section 10.3).
+    ClipboardRequest(ClipboardRequest),
+    /// `CLIPBOARD_REJECT` (Section 10.3).
+    ClipboardReject(ClipboardReject),
+    /// A message of an unknown type, which the receiver ignores (Section 3.6.2).
     Unknown(ControlMessageFrame),
 }
 
@@ -182,6 +205,11 @@ impl ControlMessage {
             MessageType::HID_FEATURE_REQUEST => Self::HidFeatureRequest(decode_message(frame)?),
             MessageType::HID_FEATURE_RESPONSE => Self::HidFeatureResponse(decode_message(frame)?),
             MessageType::DEVICE_STATUS => Self::DeviceStatus(decode_message(frame)?),
+            MessageType::CURSOR_SET => Self::CursorSet(decode_message(frame)?),
+            MessageType::CURSOR_WARP => Self::CursorWarp(decode_message(frame)?),
+            MessageType::CLIPBOARD_OFFER => Self::ClipboardOffer(decode_message(frame)?),
+            MessageType::CLIPBOARD_REQUEST => Self::ClipboardRequest(decode_message(frame)?),
+            MessageType::CLIPBOARD_REJECT => Self::ClipboardReject(decode_message(frame)?),
             _ => Self::Unknown(frame.clone()),
         };
         Ok(message)
@@ -210,6 +238,11 @@ impl ControlMessage {
             Self::HidFeatureRequest(message) => message.to_frame(),
             Self::HidFeatureResponse(message) => message.to_frame(),
             Self::DeviceStatus(message) => message.to_frame(),
+            Self::CursorSet(message) => message.to_frame(),
+            Self::CursorWarp(message) => message.to_frame(),
+            Self::ClipboardOffer(message) => message.to_frame(),
+            Self::ClipboardRequest(message) => message.to_frame(),
+            Self::ClipboardReject(message) => message.to_frame(),
             Self::Unknown(frame) => frame.clone(),
         }
     }
@@ -237,6 +270,11 @@ impl ControlMessage {
             Self::HidFeatureRequest(_) => HidFeatureRequest::MESSAGE_TYPE,
             Self::HidFeatureResponse(_) => HidFeatureResponse::MESSAGE_TYPE,
             Self::DeviceStatus(_) => DeviceStatus::MESSAGE_TYPE,
+            Self::CursorSet(_) => CursorSet::MESSAGE_TYPE,
+            Self::CursorWarp(_) => CursorWarp::MESSAGE_TYPE,
+            Self::ClipboardOffer(_) => ClipboardOffer::MESSAGE_TYPE,
+            Self::ClipboardRequest(_) => ClipboardRequest::MESSAGE_TYPE,
+            Self::ClipboardReject(_) => ClipboardReject::MESSAGE_TYPE,
             Self::Unknown(frame) => frame.message_type,
         }
     }
@@ -261,8 +299,7 @@ pub enum Datagram<'a> {
     TimePing(TimePing),
     /// `TIME_PONG` (Section 5.2.1).
     TimePong(TimePong),
-    /// A datagram of a type this implementation does not decode, which the receiver
-    /// drops (Section 3.7.3).
+    /// A datagram of an unknown type, which the receiver drops (Section 3.7.3).
     Unknown(DatagramFrame<'a>),
 }
 
@@ -435,6 +472,32 @@ mod tests {
         for datagram in datagrams {
             let bytes = datagram.to_bytes();
             assert_eq!(Datagram::decode(&bytes).unwrap(), datagram);
+        }
+    }
+
+    /// Every registered message and datagram type has its own variant: decoding an
+    /// empty payload either fails or yields a variant other than `Unknown`.
+    #[test]
+    fn every_registered_type_is_decoded() {
+        for value in 0..=0xff {
+            let message_type = MessageType(VarInt::from_u32(value));
+            if message_type.name().is_some() {
+                let frame = ControlMessageFrame::new(message_type, Vec::new());
+                let decoded = ControlMessage::decode(&frame);
+                assert!(
+                    !matches!(decoded, Ok(ControlMessage::Unknown(_))),
+                    "{message_type}"
+                );
+            }
+            let datagram_type = DatagramType(VarInt::from_u32(value));
+            if datagram_type.name().is_some() {
+                let bytes = [value as u8];
+                let decoded = Datagram::decode(&bytes);
+                assert!(
+                    !matches!(decoded, Ok(Datagram::Unknown(_))),
+                    "{datagram_type}"
+                );
+            }
         }
     }
 
