@@ -142,6 +142,19 @@ impl Writer {
         self.write_octets(value.as_bytes());
     }
 
+    /// Appends a String field that may be at most `limit` bytes long:
+    /// `value`, or its longest beginning that fits and ends on a character
+    /// boundary. It is for names and reasons, which receivers refuse when
+    /// longer than their limit, and which a sender takes from places it
+    /// does not control, such as the operating system.
+    pub fn write_string_at_most(&mut self, value: &str, limit: usize) {
+        let mut end = value.len().min(limit);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.write_string(&value[..end]);
+    }
+
     /// Appends a length-prefixed structure, such as an entry with an Entry Length,
     /// whose contents `write_contents` writes.
     pub fn write_length_prefixed(&mut self, write_contents: impl FnOnce(&mut Writer)) {
@@ -229,6 +242,21 @@ mod tests {
             [
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0xff, 0xfe, 0xff, 0xff, 0xff, 0xfd
             ]
+        );
+    }
+
+    /// A string longer than its limit is cut at the last character
+    /// boundary that fits.
+    #[test]
+    fn bounded_strings() {
+        let mut writer = Writer::new();
+        writer.write_string_at_most("qdp", 8);
+        // "é" takes two bytes, so four bytes hold "aé" and one more "a".
+        writer.write_string_at_most("aéa", 4);
+        writer.write_string_at_most("aéa", 2);
+        assert_eq!(
+            writer.as_bytes(),
+            [3, b'q', b'd', b'p', 4, b'a', 0xc3, 0xa9, b'a', 1, b'a']
         );
     }
 
