@@ -21,6 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
@@ -69,20 +70,28 @@ const DEFAULT_DISPLAY: DisplaySize = DisplaySize {
 #[cfg(feature = "window")]
 const SESSION_THREAD_NAME: &str = "qdp-session";
 
+/// How long a client waits before its first attempt to resume a lost
+/// connection.
+const FIRST_RECONNECT_DELAY: Duration = Duration::from_millis(500);
+
+/// The longest a client waits between attempts to resume a lost
+/// connection.
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(8);
+
 /// How long the session waits for the window to measure its display.
 #[cfg(feature = "window")]
-const DISPLAY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const DISPLAY_WAIT: Duration = Duration::from_secs(5);
 
 /// How long the session may take to end on its own after the window closes,
 /// before it is cut off. It normally ends at the next frame, saying goodbye to
 /// the host.
 #[cfg(feature = "window")]
-const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 /// How long the host waits, when it shuts down, for its sessions to return
 /// the client's devices to rest and for the clients to learn why the
 /// connections closed.
-const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// An error that ends the program, with a message for the user.
 type CliResult = Result<(), String>;
@@ -481,14 +490,16 @@ async fn interrupted() {
 
 /// Connects to the host and presents its stream in `sink`, shown on
 /// `display`, until the sink stops, the host closes, or `stop` completes,
-/// sending the user's input from `input`, if given. Returns the session's
-/// summary, or `None` if `stop` cut it off.
+/// sending the user's input from `input`, if given. A connection that is
+/// lost is resumed with the host's resumption token, if it gave one, while
+/// the token is valid (Section 4.4.7). Returns the session's summary, or
+/// `None` if `stop` cut it off.
 async fn receive(
     args: &ConnectArgs,
     display: DisplaySize,
     sink: &mut dyn FrameSink,
     stop: impl Future<Output = ()>,
-    input: Option<InputQueue>,
+    mut input: Option<InputQueue>,
 ) -> Result<Option<ClientSummary>, String> {
     let credentials = match (&args.token, &args.user) {
         (Some(token), _) => ClientCredentials::Token(token.as_bytes().to_vec()),
@@ -504,6 +515,72 @@ async fn receive(
         SocketAddr::from(([0u16; 8], 0))
     };
     let endpoint = ClientEndpoint::bind(local).map_err(|error| error.to_string())?;
+    let resumption = ResumptionSlot::default();
+    let sessions = async {
+        let mut credentials = credentials;
+        // While resuming: when the token in hand expires.
+        let mut deadline = None;
+        let mut delay = FIRST_RECONNECT_DELAY;
+        loop {
+            let options = ClientOptions {
+                client_name: CLIENT_NAME.to_owned(),
+                credentials: credentials.clone(),
+                display,
+                decoder_threads: 0,
+                decoder: args.decoder,
+                keyboard_info: qdp_desktop::keyboard_info(),
+                resumption: resumption.clone(),
+            };
+            let error = match connect_once(args, &endpoint, &options, sink, input.as_mut()).await {
+                Ok(summary) => return Ok(summary),
+                Err(Failure::Fatal(error)) => return Err(error),
+                Err(Failure::Lost(error)) => error,
+            };
+            // A session that became active left a fresh token to resume it
+            // with; otherwise the token in hand is tried until it expires,
+            // since a connection that was never made did not use it.
+            let now = Instant::now();
+            if let (Some(expires_at), Some(token)) =
+                (resumption.expires_at(), resumption.take_credentials(now))
+            {
+                deadline = Some(expires_at);
+                credentials = token;
+                delay = FIRST_RECONNECT_DELAY;
+            }
+            if deadline.is_none_or(|deadline| now + delay >= deadline) {
+                return Err(error);
+            }
+            warn!(%error, retry_in = ?delay, "connection lost; reconnecting");
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(MAX_RECONNECT_DELAY);
+        }
+    };
+    let summary = tokio::select! {
+        result = sessions => result.map(Some)?,
+        () = stop => None,
+    };
+    endpoint.wait_idle().await;
+    Ok(summary)
+}
+
+/// Why a connection ended without a session summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Failure {
+    /// The connection could not be made, or was lost: reconnecting may help.
+    Lost(String),
+    /// The session failed for another reason, which ends the client.
+    Fatal(String),
+}
+
+/// Connects to the host once and runs a session with `options` until it
+/// ends.
+async fn connect_once(
+    args: &ConnectArgs,
+    endpoint: &ClientEndpoint,
+    options: &ClientOptions,
+    sink: &mut dyn FrameSink,
+    input: Option<&mut InputQueue>,
+) -> Result<ClientSummary, Failure> {
     let connection = endpoint
         .connect(
             args.address,
@@ -511,34 +588,25 @@ async fn receive(
             HostVerification::PinnedKeys(vec![args.pin]),
         )
         .await
-        .map_err(|error| format!("cannot connect to {}: {error}", args.address))?;
+        .map_err(|error| Failure::Lost(format!("cannot connect to {}: {error}", args.address)))?;
     info!(address = %args.address, "connected");
-
-    let options = ClientOptions {
-        client_name: CLIENT_NAME.to_owned(),
-        credentials,
-        display,
-        decoder_threads: 0,
-        decoder: args.decoder,
-        keyboard_info: qdp_desktop::keyboard_info(),
-        resumption: ResumptionSlot::default(),
-    };
-    let result = tokio::select! {
-        result = qdp_runtime::run(
-            connection,
-            &options,
-            sink,
-            input,
-            shared_clipboard(args.clipboard),
-            client_audio(args),
-        ) => {
-            result.map(Some)
+    qdp_runtime::run(
+        connection,
+        options,
+        sink,
+        input,
+        shared_clipboard(args.clipboard),
+        client_audio(args),
+    )
+    .await
+    .map_err(|error| {
+        let message = format!("session failed: {error}");
+        if error.is_connection_lost() {
+            Failure::Lost(message)
+        } else {
+            Failure::Fatal(message)
         }
-        () = stop => Ok(None),
-    };
-    let summary = result.map_err(|error| format!("session failed: {error}"))?;
-    endpoint.wait_idle().await;
-    Ok(summary)
+    })
 }
 
 /// Finishes the output file and logs how the session ended.

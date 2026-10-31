@@ -458,7 +458,7 @@ async fn stream_with(
             HostVerification::PinnedKeys(vec![pin]),
         )
         .await?;
-    let (handle, queue) = input.unzip();
+    let (handle, mut queue) = input.unzip();
     let full_size = (display.width as usize, display.height as usize) >= (WIDTH, HEIGHT);
     let mut collector = Collector {
         input: handle,
@@ -469,7 +469,7 @@ async fn stream_with(
         connection,
         &options,
         &mut collector,
-        queue,
+        queue.as_mut(),
         None,
         ClientAudio::default(),
     )
@@ -713,7 +713,7 @@ async fn display_changes_during_the_session() {
         height: HEIGHT as u32 / 2,
         ..options.display
     };
-    let (handle, queue) = input_channel();
+    let (handle, mut queue) = input_channel();
     let mut collector = Collector {
         input: Some(handle),
         resize: Some((INPUT_FRAME, half)),
@@ -725,7 +725,7 @@ async fn display_changes_during_the_session() {
             connection,
             &options,
             &mut collector,
-            Some(queue),
+            Some(&mut queue),
             None,
             ClientAudio::default(),
         ),
@@ -1276,7 +1276,7 @@ async fn microphone_turns_on_during_the_session() {
         )
         .await
         .unwrap();
-    let (input, queue) = input_channel();
+    let (input, mut queue) = input_channel();
     let mut switch = MicrophoneSwitch {
         input,
         host_microphone: host_microphone.clone(),
@@ -1290,7 +1290,7 @@ async fn microphone_turns_on_during_the_session() {
             connection,
             &options,
             &mut switch,
-            Some(queue),
+            Some(&mut queue),
             None,
             client_audio,
         ),
@@ -1483,7 +1483,7 @@ async fn relative_mode_moves_the_mouse() {
         )
         .await
         .unwrap();
-    let (handle, queue) = input_channel();
+    let (handle, mut queue) = input_channel();
     let mut watcher = ModeWatcher {
         input: handle,
         modes: Vec::new(),
@@ -1497,7 +1497,7 @@ async fn relative_mode_moves_the_mouse() {
             connection,
             &options,
             &mut watcher,
-            Some(queue),
+            Some(&mut queue),
             None,
             ClientAudio::default(),
         ),
@@ -1632,7 +1632,7 @@ async fn gamepad_rumbles() {
         )
         .await
         .unwrap();
-    let (handle, queue) = input_channel();
+    let (handle, mut queue) = input_channel();
     let mut watcher = GamepadWatcher {
         input: handle,
         feedback: Vec::new(),
@@ -1645,7 +1645,7 @@ async fn gamepad_rumbles() {
             connection,
             &options,
             &mut watcher,
-            Some(queue),
+            Some(&mut queue),
             None,
             ClientAudio::default(),
         ),
@@ -1898,7 +1898,7 @@ async fn passthrough_round_trip() {
         )
         .await
         .unwrap();
-    let (handle, queue) = input_channel();
+    let (handle, mut queue) = input_channel();
     let mut watcher = PassthroughWatcher {
         input: handle,
         outputs: Vec::new(),
@@ -1912,7 +1912,7 @@ async fn passthrough_round_trip() {
             connection,
             &options,
             &mut watcher,
-            Some(queue),
+            Some(&mut queue),
             None,
             ClientAudio::default(),
         ),
@@ -2039,7 +2039,7 @@ async fn touchpad_reaches_the_host() {
         )
         .await
         .unwrap();
-    let (handle, queue) = input_channel();
+    let (handle, mut queue) = input_channel();
     let mut watcher = TouchpadWatcher {
         input: handle,
         frames: 0,
@@ -2051,7 +2051,7 @@ async fn touchpad_reaches_the_host() {
             connection,
             &options,
             &mut watcher,
-            Some(queue),
+            Some(&mut queue),
             None,
             ClientAudio::default(),
         ),

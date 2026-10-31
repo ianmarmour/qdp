@@ -2,7 +2,7 @@
 //! turned into standard device reports (Section 8.4) for the input sender,
 //! which delivers them reliably (Section 8.6).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +23,7 @@ use crate::client_touch::Touchscreen;
 use crate::clipboard::Focus;
 use crate::host_input::{PointerButton, TouchPhase};
 use crate::lock_keys::LockKeys;
+use crate::standing_input::StandingInput;
 
 /// The keyboard's Device ID.
 pub(crate) const KEYBOARD_ID: DeviceId = DeviceId(VarInt::from_u32(1));
@@ -295,6 +296,8 @@ pub fn input_channel() -> (InputHandle, InputQueue) {
             wake,
             gamepad_feedback: gamepad_sender,
             passthrough_feedback: passthrough_sender,
+            standing: StandingInput::default(),
+            replay: VecDeque::new(),
         },
     )
 }
@@ -343,9 +346,30 @@ pub struct InputQueue {
     gamepad_feedback: Sender<GamepadFeedback>,
     /// Sends feedback to passed-through devices.
     passthrough_feedback: Sender<PassthroughFeedback>,
+    /// The client's devices, focus and other state, as its input left them.
+    standing: StandingInput,
+    /// The standing input still to give the current session.
+    replay: VecDeque<UserInput>,
 }
 
 impl InputQueue {
+    /// Starts a session on the queue: the input waiting from before it is
+    /// dropped, except what describes the client's state, which the session
+    /// receives first, as it is now. A session that resumes after a lost
+    /// connection thus knows the client's devices and focus, but performs
+    /// none of the user's actions from while it was disconnected.
+    pub(crate) fn begin_session(&mut self) {
+        while let Ok(input) = self.receiver.try_recv() {
+            self.standing.note(&input);
+        }
+        self.replay = self.standing.replay();
+    }
+
+    /// Returns the client's latest display, if it reported one.
+    pub(crate) fn display(&self) -> Option<DisplaySize> {
+        self.standing.display()
+    }
+
     /// Sends feedback to the user's gamepads.
     pub(crate) fn send_gamepad_feedback(&self, feedback: GamepadFeedback) {
         let _ = self.gamepad_feedback.send(feedback);
@@ -357,9 +381,14 @@ impl InputQueue {
     }
 
     /// Returns the next input waiting, if any.
-    pub(crate) fn try_next(&self) -> Option<UserInput> {
+    pub(crate) fn try_next(&mut self) -> Option<UserInput> {
+        if let Some(input) = self.replay.pop_front() {
+            return Some(input);
+        }
         // An empty queue and a closed one both mean nothing is waiting.
-        self.receiver.try_recv().ok()
+        let input = self.receiver.try_recv().ok()?;
+        self.standing.note(&input);
+        Some(input)
     }
 
     /// Returns the signal notified when input arrives.
@@ -975,6 +1004,33 @@ fn rest(holding: bool) -> DeviceRest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new session on the queue receives the client's state first, and
+    /// none of the actions that waited for it.
+    #[test]
+    fn sessions_start_from_the_standing_input() {
+        let (handle, mut queue) = input_channel();
+        let gamepad = UserInput::GamepadConnected {
+            slot: 3,
+            features: DeviceFeatures::default(),
+            name: "Pad".to_owned(),
+        };
+        let key = UserInput::Key {
+            usage: 0x04,
+            pressed: true,
+        };
+        handle.send(gamepad.clone());
+        handle.send(key.clone());
+        queue.begin_session();
+        assert_eq!(queue.try_next(), Some(gamepad.clone()));
+        assert_eq!(queue.try_next(), None);
+        handle.send(key.clone());
+        assert_eq!(queue.try_next(), Some(key));
+        // The next session learns of the gamepad again.
+        queue.begin_session();
+        assert_eq!(queue.try_next(), Some(gamepad));
+        assert_eq!(queue.try_next(), None);
+    }
 
     /// Keys produce keyboard reports, once per change.
     #[test]

@@ -206,6 +206,14 @@ impl ResumptionSlot {
         }
     }
 
+    /// Returns when the kept token stops being valid, if a token is kept
+    /// and its connection has ended.
+    pub fn expires_at(&self) -> Option<Instant> {
+        self.lock()
+            .as_ref()
+            .and_then(|received| Some(received.ended_at? + received.lifetime))
+    }
+
     /// Returns whether a token is kept that is still valid at `now`.
     pub fn is_valid(&self, now: Instant) -> bool {
         self.lock()
@@ -295,7 +303,9 @@ mod tests {
             lifetime,
         });
         assert_eq!(format!("{slot:?}"), "ResumptionSlot { holds_token: true }");
+        assert_eq!(slot.expires_at(), None);
         slot.connection_ended(now);
+        assert_eq!(slot.expires_at(), Some(now + lifetime));
         assert!(slot.is_valid(now + lifetime / 2));
         assert!(!slot.is_valid(now + lifetime));
         assert!(slot.take_credentials(now + lifetime).is_none());
