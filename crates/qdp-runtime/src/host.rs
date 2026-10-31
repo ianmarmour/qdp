@@ -229,7 +229,13 @@ pub struct OpenedDesktop {
     pub source: Box<dyn FrameSource>,
     /// Performs the client's input on the host's desktop.
     pub injector: Box<dyn InputInjector>,
+    /// Locks the desktop, if it should be locked when the session ends
+    /// other than by its client disconnecting (Section 11.4).
+    pub lock: Option<DesktopLock>,
 }
+
+/// Locks a host's desktop.
+pub type DesktopLock = Box<dyn FnOnce() + Send>;
 
 /// Opens a host session's desktop.
 pub type DesktopOpener = Box<
@@ -346,6 +352,7 @@ async fn serve_session(
     let OpenedDesktop {
         source,
         mut injector,
+        lock,
     } = open().await?;
     let worker = clipboard
         .map(|shared| ClipboardWorker::spawn(shared.clipboard))
@@ -494,7 +501,31 @@ async fn serve_session(
     // Nothing the client held stays held on the host.
     let actions = active.devices.release_all();
     active.inject(&actions, active.display.layout());
+    // Unless the client disconnected, the desktop is not left unlocked:
+    // not when the network dropped, the session was replaced, or the host
+    // stopped (Section 11.4).
+    let quic = active.driver.connection().quic();
+    let lock = lock.filter(|_| !client_disconnected(&result, quic));
+    if let Some(lock) = lock {
+        info!("the session ended without its client disconnecting; locking the desktop");
+        lock();
+    }
     result
+}
+
+/// Returns whether a session that ended with `result` on `connection` ended
+/// because its client disconnected, closing the connection with
+/// `QDP_NO_ERROR`.
+fn client_disconnected(
+    result: &Result<HostSummary, RuntimeError>,
+    connection: &quinn::Connection,
+) -> bool {
+    result.is_ok()
+        && matches!(
+            connection.close_reason(),
+            Some(quinn::ConnectionError::ApplicationClosed(close))
+                if close.error_code == quinn::VarInt::from_u32(0)
+        )
 }
 
 /// Returns the next event of a session being set up, or `None` once the

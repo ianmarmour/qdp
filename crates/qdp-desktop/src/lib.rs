@@ -14,12 +14,14 @@
 //! [`SystemClipboard`] shares the system clipboard's text on each of them,
 //! [`host_audio`] and [`client_audio`] open the audio devices sessions play
 //! and capture through, `GamepadCapture` watches a client's gamepads,
-//! [`PassthroughCapture`] passes the devices the user chose through, and
-//! [`TouchpadCapture`] sends the touchpad's raw contacts.
+//! [`PassthroughCapture`] passes the devices the user chose through,
+//! [`TouchpadCapture`] sends the touchpad's raw contacts, and
+//! [`lock_desktop`] locks the desktop when a session ends unexpectedly.
 
 mod clipboard;
 #[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
 mod cpal_audio;
+mod desktop_lock;
 #[cfg(feature = "gamepad")]
 mod gamepad;
 mod keyboard_layout;
@@ -47,6 +49,7 @@ use qdp_runtime::{
 use tracing::warn;
 
 pub use clipboard::SystemClipboard;
+pub use desktop_lock::lock_desktop;
 #[cfg(feature = "gamepad")]
 pub use gamepad::GamepadCapture;
 pub use keyboard_layout::keyboard_info;

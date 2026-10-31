@@ -70,8 +70,8 @@ pub use client_input::{
 };
 pub use clipboard::{Clipboard, ClipboardDirections, Focus, SharedClipboard};
 pub use host::{
-    DesktopOpener, EncoderTuning, HostDesktop, HostOptions, HostSummary, OpenedDesktop,
-    input_classes, serve,
+    DesktopLock, DesktopOpener, EncoderTuning, HostDesktop, HostOptions, HostSummary,
+    OpenedDesktop, input_classes, serve,
 };
 pub use host_input::{
     InputAction, InputInjector, NoInput, PixelRect, PointerButton, TouchPhase, TouchPoint,
