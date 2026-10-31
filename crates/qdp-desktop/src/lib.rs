@@ -8,8 +8,8 @@
 //! - macOS: `MacScreenCapture` captures the main display with
 //!   ScreenCaptureKit, and `QuartzInjector` posts Quartz events.
 //! - Windows: `DesktopDuplication` captures the primary monitor with DXGI
-//!   Desktop Duplication, and `SendInputInjector` sends input with
-//!   `SendInput`.
+//!   Desktop Duplication, `SendInputInjector` sends input with `SendInput`,
+//!   and `WindowPen` reads the pen over a client's window.
 //!
 //! [`SystemClipboard`] shares the system clipboard's text on each of them,
 //! [`host_audio`] and [`client_audio`] open the audio devices sessions play
@@ -50,7 +50,7 @@ pub use linux::UinputInjector;
 #[cfg(target_os = "macos")]
 pub use macos::{MacScreenCapture, QuartzInjector};
 #[cfg(windows)]
-pub use win32::{DesktopDuplication, SendInputInjector};
+pub use win32::{DesktopDuplication, SendInputInjector, WindowPen};
 
 /// The file, in the host's state directory, that keeps the token restoring the
 /// user's choice of monitor.
