@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use quinn::congestion::BbrConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, IdleTimeout, ServerConfig, TransportConfig, VarInt};
 use rustls::client::Resumption;
@@ -65,6 +66,13 @@ fn transport_config(bidirectional_streams: u32) -> TransportConfig {
         .keep_alive_interval(Some(KEEP_ALIVE_INTERVAL))
         .max_concurrent_uni_streams(VarInt::from_u32(UNIDIRECTIONAL_STREAMS))
         .max_concurrent_bidi_streams(VarInt::from_u32(bidirectional_streams));
+    // BBR sizes the congestion window from the measured bandwidth and RTT. The
+    // default, CUBIC, shrinks it on every loss and only grows it back while the
+    // window is full, which a video stream rarely fills: on Wi-Fi, with random
+    // loss, its window ratchets down to a few packets and large frames then
+    // take many round trips. BBR also keeps queues short, as Section 5.5.1
+    // recommends.
+    config.congestion_controller_factory(Arc::new(BbrConfig::default()));
     config
 }
 
