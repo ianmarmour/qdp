@@ -28,17 +28,33 @@ const PERCENT: f64 = 100.0;
 /// decoding itself takes.
 const DECODE_WINDOW_SLACK: u64 = 1;
 
+/// The most frames sent beyond the client's latest `DECODED` while its
+/// decoder keeps up: enough that the frames waiting for a lost fragment's
+/// retransmission, or two, hold nothing back, and few enough that a decoder
+/// starting to fall behind has little to catch up on.
+const KEEPING_UP_WINDOW: u64 = 8;
+
 /// Returns how many frames may be sent beyond the latest one the client
-/// reported decoded: about one frame interval plus one smoothed RTT of them
-/// (Section 6.11). A client whose decoder falls behind then receives frames
-/// only as fast as it decodes them, rather than queueing them and showing
-/// each later than the last.
-pub(crate) fn decode_window(frame_interval: Duration, smoothed_rtt: Duration) -> u64 {
+/// reported decoded (Section 6.11). While its decoder is behind, about one
+/// frame interval plus one smoothed RTT of them, so that it receives frames
+/// only as fast as it decodes them rather than queueing them and showing
+/// each later than the last; otherwise [`KEEPING_UP_WINDOW`], or more on a
+/// long round trip.
+pub(crate) fn decode_window(
+    frame_interval: Duration,
+    smoothed_rtt: Duration,
+    decoder_behind: bool,
+) -> u64 {
     if frame_interval.is_zero() {
         return u64::MAX;
     }
     let intervals = (frame_interval + smoothed_rtt).as_secs_f64() / frame_interval.as_secs_f64();
-    intervals.ceil() as u64 + DECODE_WINDOW_SLACK
+    let behind = intervals.ceil() as u64 + DECODE_WINDOW_SLACK;
+    if decoder_behind {
+        behind
+    } else {
+        behind.max(KEEPING_UP_WINDOW)
+    }
 }
 
 /// Returns how long the queued datagrams will take to leave at the rate the
@@ -234,16 +250,23 @@ mod tests {
         assert_eq!(queue_delay(1, &path(0)), Duration::MAX);
     }
 
-    /// The client may fall about one frame interval and one smoothed RTT
-    /// behind, and a frame more.
+    /// A client whose decoder is behind may fall about one frame interval
+    /// and one smoothed RTT behind, and a frame more; one that keeps up,
+    /// further.
     #[test]
     fn decode_window_follows_the_round_trip() {
         let interval = Duration::from_micros(16_667);
-        assert_eq!(decode_window(interval, Duration::ZERO), 2);
-        assert_eq!(decode_window(interval, Duration::from_millis(8)), 3);
-        assert_eq!(decode_window(interval, Duration::from_millis(40)), 5);
-        assert_eq!(decode_window(interval * 4, Duration::from_millis(8)), 3);
-        assert_eq!(decode_window(Duration::ZERO, Duration::ZERO), u64::MAX);
+        let rtt = Duration::from_millis;
+        assert_eq!(decode_window(interval, Duration::ZERO, true), 2);
+        assert_eq!(decode_window(interval, rtt(8), true), 3);
+        assert_eq!(decode_window(interval, rtt(40), true), 5);
+        assert_eq!(decode_window(interval * 4, rtt(8), true), 3);
+        assert_eq!(decode_window(interval, rtt(8), false), KEEPING_UP_WINDOW);
+        assert_eq!(decode_window(interval, rtt(200), false), 14);
+        assert_eq!(
+            decode_window(Duration::ZERO, Duration::ZERO, true),
+            u64::MAX
+        );
     }
 
     /// Counts accumulate within an interval and reset when it is logged.

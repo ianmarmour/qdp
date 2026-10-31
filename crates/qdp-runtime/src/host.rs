@@ -29,6 +29,7 @@ use crate::clipboard::{
     self, ClipboardDirections, ClipboardLink, ClipboardOutput, ClipboardWorker, SharedClipboard,
     Side,
 };
+use crate::decoder_lag::DecoderLag;
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
 use crate::host_cursor::{CursorUpdate, HostCursor};
 use crate::host_display::{HostDisplay, StreamChange, VideoLimits};
@@ -60,6 +61,11 @@ const MAX_FRAME_DIMENSION: u32 = 8192;
 /// How long the host waits for an `INPUT` datagram while the client holds
 /// something before releasing it (Section 8.7, rule 8).
 const INPUT_SILENCE: Duration = Duration::from_secs(1);
+
+/// The longest the host holds frames back for the client's decoder after
+/// sending the last: a `DECODED` record that was lost would otherwise hold
+/// them back until the client's next, which may come a second later.
+const DECODED_WAIT_LIMIT: Duration = Duration::from_millis(250);
 
 /// The Reason sent with every failed authentication attempt.
 const FAILURE_REASON: &str = "authentication failed";
@@ -197,6 +203,11 @@ struct ActiveHost {
     rate: RateControl,
     /// Finds queues on the path from the frames' arrival times.
     queue: QueueDetector,
+    /// Whether the client's decoder keeps up, from the frames' decoding
+    /// times.
+    decoder_lag: DecoderLag,
+    /// When the last frame was sent, once one has been.
+    frame_sent_at: Option<Instant>,
     /// The session's statistics.
     summary: HostSummary,
     /// The statistics logged every second.
@@ -482,6 +493,8 @@ async fn serve_session(
         tuning: options.encoder,
         rate: RateControl::new(options.encoder.quantizer),
         queue: QueueDetector::default(),
+        decoder_lag: DecoderLag::default(),
+        frame_sent_at: None,
         summary: HostSummary::default(),
         outputs: DeviceOutputs::default(),
         cursor: HostCursor::default(),
@@ -749,7 +762,7 @@ impl ActiveHost {
                 } else if self.network_behind(frame_interval) {
                     self.stats.frame_skipped();
                     self.rate.frame_skipped(now);
-                } else if self.client_behind(frame_interval, smoothed_rtt) {
+                } else if self.client_behind(frame_interval, smoothed_rtt, now) {
                     self.stats.decoder_waited();
                 } else {
                     self.request_frame(now)?;
@@ -985,8 +998,23 @@ impl ActiveHost {
 
     /// Returns whether the client has decoded too few of the frames sent for
     /// another to be sent now (Section 6.11): it would only wait behind them.
-    fn client_behind(&self, frame_interval: Duration, smoothed_rtt: Duration) -> bool {
-        self.sender.undecoded_frames() >= decode_window(frame_interval, smoothed_rtt)
+    /// After [`DECODED_WAIT_LIMIT`] without a frame sent, the next is sent
+    /// anyway.
+    fn client_behind(
+        &self,
+        frame_interval: Duration,
+        smoothed_rtt: Duration,
+        now: Instant,
+    ) -> bool {
+        let window = decode_window(
+            frame_interval,
+            smoothed_rtt,
+            self.decoder_lag.is_behind(now),
+        );
+        let waited_long = self
+            .frame_sent_at
+            .is_none_or(|sent_at| now.saturating_duration_since(sent_at) >= DECODED_WAIT_LIMIT);
+        self.sender.undecoded_frames() >= window && !waited_long
     }
 
     /// Sends a datagram, dropping it if it no longer fits the path.
@@ -1110,6 +1138,7 @@ impl ActiveHost {
                 .frame_interval(self.display.plan().frame_interval()),
             now,
         );
+        self.frame_sent_at = Some(now);
         let first_sent_at = self.clock.timestamp(Instant::now());
         for datagram in sent.datagrams {
             self.send(datagram)?;
@@ -1251,6 +1280,12 @@ impl ActiveHost {
             FeedbackRecord::FrameTiming(timing) => {
                 if let Some(delay) = self.queue.frame_timing(timing, now) {
                     self.rate.queue_measured(delay, now);
+                }
+                if timing.stream_id == self.display.stream_id() {
+                    let frame_interval = self
+                        .rate
+                        .frame_interval(self.display.plan().frame_interval());
+                    self.decoder_lag.frame_timing(timing, frame_interval, now);
                 }
             }
             _ => {}
