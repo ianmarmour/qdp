@@ -11,9 +11,12 @@
 //!   integers, strings and octet sequences, and the framing of control messages and
 //!   datagrams (Sections 1.5, 3.6 and 3.7).
 //! - [`message`] holds the typed control messages and datagrams, built on [`wire`].
+//! - [`session`] holds the sans-I/O state machines that run the control stream for
+//!   a client and a host (Section 4).
 
 pub mod message;
 pub mod registry;
+pub mod session;
 pub mod wire;
 
 /// The ALPN token of the draft of the specification this crate implements
