@@ -719,6 +719,10 @@ impl ActiveHost {
         for output in outputs {
             match output {
                 ClipboardOutput::Message(message) => self.driver.session().send(&message)?,
+                ClipboardOutput::Cancel { request_id } => self.driver.cancel_stream(
+                    StreamHeader::ClipboardData { request_id },
+                    ErrorCode::REQUEST_CANCELLED,
+                ),
                 ClipboardOutput::Data { request_id, data } => {
                     let header = StreamHeader::ClipboardData { request_id }.to_bytes();
                     self.driver

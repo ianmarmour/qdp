@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use qdp::auth::scram::{ClientFirst, ScramClient, ScramCredentials, ScramServer};
 use qdp::message::{
     AuthMethod, AuthStatus, Av1Profiles, Capability, ClientHello, ClientMonitor,
-    ClientMonitorFlags, ClientMonitorId, ControlMessage, CursorId, CursorSet, Datagram,
-    DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus,
+    ClientMonitorFlags, ClientMonitorId, ClipboardRequestId, ControlMessage, CursorId, CursorSet,
+    Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus,
     DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequest, DisplayRequestId,
     HidOutputDecoder, HostHello, ImageSerial, MinorVersion, NO_LEVEL_LIMIT, PointerKind,
     PointerMode, StreamHeader, VideoCodec, VideoCodecCapability, VideoCodecFlags,
@@ -59,16 +59,22 @@ fn stream(header: StreamHeader, data: &[u8]) -> Vec<u8> {
     [header.to_bytes(), data.to_vec()].concat()
 }
 
+/// The clipboard data stream the client cancels before it arrives.
+const CANCELLED_STREAM: StreamHeader = StreamHeader::ClipboardData {
+    request_id: ClipboardRequestId(VarInt::from_u32(7)),
+};
+
 /// The client's policy for the host's streams.
 fn stream_policy(header: &StreamHeader) -> StreamPolicy {
     match header {
-        StreamHeader::CursorImage => StreamPolicy::Read(StreamLimit {
-            max_bytes: STREAM_LIMIT,
-            overflow: ErrorCode::PROTOCOL_VIOLATION,
-        }),
+        StreamHeader::CursorImage | StreamHeader::ClipboardData { .. } => {
+            StreamPolicy::Read(StreamLimit {
+                max_bytes: STREAM_LIMIT,
+                overflow: ErrorCode::PROTOCOL_VIOLATION,
+            })
+        }
         StreamHeader::HidOutput { .. } => StreamPolicy::Follow,
         StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
-        _ => StreamPolicy::Forbid(ErrorCode::STREAM_CREATION_ERROR),
     }
 }
 
@@ -207,6 +213,7 @@ async fn run_host(host: HostEndpoint, credentials: ScramCredentials) -> Transpor
         StreamHeader::Unknown(UNKNOWN_STREAM_TYPE),
         b"ignored",
     ));
+    connection.send_stream(stream(CANCELLED_STREAM, b"no longer wanted"));
     connection.send_stream(stream(StreamHeader::CursorImage, STREAM_DATA));
     connection.send_stream(stream(StreamHeader::CursorImage, &[0; STREAM_LIMIT + 1]));
     // Output reports go out on one stream as they happen, which dropping it
@@ -294,8 +301,10 @@ async fn run_client(address: SocketAddr, pin: KeyPin) {
         .expect("a clock sample");
     assert!(sample.delay < Duration::from_secs(1));
 
-    // The unknown stream is refused, so only the cursor images arrive, and
-    // the output stream's reports, as they come.
+    // The unknown stream is refused and the clipboard data cancelled, so
+    // only the cursor images arrive, and the output stream's reports, as
+    // they come.
+    driver.cancel_stream(CANCELLED_STREAM, ErrorCode::REQUEST_CANCELLED);
     driver.accept_streams(stream_policy);
     let mut received = Vec::new();
     let mut decoder = HidOutputDecoder::new();

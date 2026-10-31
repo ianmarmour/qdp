@@ -11,7 +11,9 @@ use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, ClientSession, HostConfig, HostEvent, HostSession, SessionError};
 use tracing::debug;
 
-use crate::streams::{Incoming, ReceivedStream, StreamChunk, StreamPolicy, receive_streams};
+use crate::streams::{
+    Cancellations, Incoming, ReceivedStream, StreamChunk, StreamPolicy, receive_streams,
+};
 use crate::{QdpConnection, TransportError};
 
 /// What a session state machine must provide for a driver to run it.
@@ -129,6 +131,8 @@ pub struct SessionDriver<S> {
     session: S,
     /// What the peer's streams carry, once the application accepts them.
     streams: Option<mpsc::Receiver<Incoming>>,
+    /// The peer's streams the application no longer wants.
+    cancellations: Cancellations,
 }
 
 /// The driver of a host's session.
@@ -144,6 +148,7 @@ impl HostDriver {
             connection,
             session: HostSession::new(config, Instant::now()),
             streams: None,
+            cancellations: Cancellations::default(),
         }
     }
 }
@@ -156,6 +161,7 @@ impl ClientDriver {
             connection,
             session: ClientSession::new(hello)?,
             streams: None,
+            cancellations: Cancellations::default(),
         })
     }
 }
@@ -181,7 +187,19 @@ impl<S: DrivenSession> SessionDriver<S> {
         policy: impl Fn(&StreamHeader) -> StreamPolicy + Send + Sync + 'static,
     ) {
         let connection = self.connection.quic().clone();
-        self.streams = Some(receive_streams(connection, Arc::new(policy)));
+        self.streams = Some(receive_streams(
+            connection,
+            Arc::new(policy),
+            self.cancellations.clone(),
+        ));
+    }
+
+    /// Cancels the peer's stream with `header`, being read or still to
+    /// arrive: reading is aborted with STOP_SENDING carrying `code`, and
+    /// its data is not returned, as when the application no longer needs
+    /// clipboard data it asked for (Section 10.4).
+    pub fn cancel_stream(&self, header: StreamHeader, code: ErrorCode) {
+        self.cancellations.cancel(header, code);
     }
 
     /// Writes everything the session has queued to the control stream, and closes

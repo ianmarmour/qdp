@@ -479,6 +479,10 @@ impl ActiveClient<'_> {
         for output in outputs {
             match output {
                 ClipboardOutput::Message(message) => self.driver.session().send(&message)?,
+                ClipboardOutput::Cancel { request_id } => self.driver.cancel_stream(
+                    StreamHeader::ClipboardData { request_id },
+                    ErrorCode::REQUEST_CANCELLED,
+                ),
                 ClipboardOutput::Data { request_id, data } => {
                     let header = StreamHeader::ClipboardData { request_id }.to_bytes();
                     self.driver
@@ -835,6 +839,7 @@ impl ActiveClient<'_> {
     /// Turns the user's waiting input into reports and sends the `INPUT`
     /// datagrams that are due.
     fn send_input(&mut self, smoothed_rtt: Duration, now: Instant) -> Result<(), RuntimeError> {
+        let mut clipboard_outputs = Vec::new();
         if let Some(queue) = &self.input_queue {
             while let Some(action) = queue.try_next() {
                 match action {
@@ -915,6 +920,11 @@ impl ActiveClient<'_> {
                         }
                     }
                     UserInput::Display(display) => self.display.display_changed(display),
+                    UserInput::Focus(focus) => {
+                        if let Some(link) = &mut self.clipboard {
+                            clipboard_outputs.extend(link.set_focus(focus));
+                        }
+                    }
                     UserInput::Microphone(microphone) => {
                         if let Some(request) = self.audio.set_microphone(microphone) {
                             self.driver
@@ -949,6 +959,7 @@ impl ActiveClient<'_> {
                 }
             }
         }
+        self.apply_clipboard(clipboard_outputs)?;
         let max_datagram_size = self.driver.connection().max_datagram_size();
         while let Some(datagram) = self
             .input

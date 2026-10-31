@@ -65,7 +65,7 @@ pub use client_input::{
     GamepadFeedback, InputHandle, InputQueue, PassthroughFeedback, PenInput, UserInput,
     input_channel,
 };
-pub use clipboard::{Clipboard, ClipboardDirections, SharedClipboard};
+pub use clipboard::{Clipboard, ClipboardDirections, Focus, SharedClipboard};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
 pub use host_input::{InputAction, InputInjector, NoInput, PointerButton, TouchPhase, TouchPoint};
 pub use host_passthrough::{FeatureRequest, PassthroughDevice, PassthroughPolicy};
