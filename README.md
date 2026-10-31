@@ -66,7 +66,23 @@ Clients decode on the GPU where they can: on Macs with hardware AV1 decoding
 elsewhere or if the hardware cannot handle a stream. `--decoder software` or
 `--decoder hardware` forces one.
 
-For now the host streams a test pattern. Screen capture and input come next. Run `qdp help` for every option, and set `QDP_LOG=debug`
+The client sends its keyboard, mouse and scrolling to the host while its
+window has focus. On Linux the host performs them through uinput virtual
+devices, which works under any Wayland compositor or X11, and needs write
+access to `/dev/uinput`. To allow it for members of the `input` group:
+
+```bash
+echo uinput | sudo tee /etc/modules-load.d/uinput.conf
+sudo modprobe uinput
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/60-qdp-uinput.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG input "$USER"
+```
+
+Log out and in again for the group change to apply. Without access the host
+logs a warning and ignores input.
+
+For now the host streams a test pattern. Screen capture comes next. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail.
 
 ## Crates

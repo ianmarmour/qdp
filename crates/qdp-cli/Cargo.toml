@@ -25,6 +25,7 @@ window = ["dep:softbuffer", "dep:winit", "tokio/sync", "tokio/time"]
 [dependencies]
 qdp.workspace = true
 qdp-codec.workspace = true
+qdp-desktop.workspace = true
 qdp-quic.workspace = true
 qdp-runtime.workspace = true
 softbuffer = { workspace = true, optional = true }

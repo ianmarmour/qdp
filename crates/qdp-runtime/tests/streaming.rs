@@ -119,6 +119,10 @@ impl InputInjector for Recorder {
     fn description(&self) -> &str {
         "recorder"
     }
+
+    fn supports_text(&self) -> bool {
+        true
+    }
 }
 
 impl FrameSink for Collector {

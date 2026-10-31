@@ -1617,6 +1617,7 @@ version = "0.1.0"
 dependencies = [
  "qdp",
  "qdp-codec",
+ "qdp-desktop",
  "qdp-quic",
  "qdp-runtime",
  "softbuffer",
@@ -1639,6 +1640,16 @@ dependencies = [
  "rav1d",
  "rav1e",
  "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "qdp-desktop"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "qdp",
+ "qdp-runtime",
  "tracing",
 ]
 

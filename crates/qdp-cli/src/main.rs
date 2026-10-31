@@ -22,7 +22,7 @@ use std::sync::Arc;
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     ClientCredentials, ClientOptions, ClientSummary, DisplaySize, EncoderTuning, FrameSink,
-    HostAuthenticator, HostOptions, InputQueue, NoInput, TestPattern,
+    HostAuthenticator, HostOptions, InputQueue, TestPattern,
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::filter::LevelFilter;
@@ -182,7 +182,8 @@ async fn serve(args: ServeArgs) -> CliResult {
                     let peer = connection.quic().remote_address();
                     info!(%peer, "client connected");
                     let source = Box::new(TestPattern::new(width, height));
-                    match qdp_runtime::serve(connection, &options, source, Box::new(NoInput)).await {
+                    let injector = qdp_desktop::input_injector(width as u32, height as u32);
+                    match qdp_runtime::serve(connection, &options, source, injector).await {
                         Ok(summary) => info!(
                             %peer,
                             frames = summary.frames_sent,

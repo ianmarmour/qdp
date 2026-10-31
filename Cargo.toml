@@ -4,6 +4,7 @@ members = [
     "crates/qdp",
     "crates/qdp-cli",
     "crates/qdp-codec",
+    "crates/qdp-desktop",
     "crates/qdp-quic",
     "crates/qdp-runtime",
 ]
@@ -25,6 +26,7 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = ["s
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTUtilities", "objc2-core-media", "objc2-core-video"] }
 qdp = { path = "crates/qdp" }
 qdp-codec = { path = "crates/qdp-codec" }
+qdp-desktop = { path = "crates/qdp-desktop" }
 qdp-quic = { path = "crates/qdp-quic" }
 qdp-runtime = { path = "crates/qdp-runtime" }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }

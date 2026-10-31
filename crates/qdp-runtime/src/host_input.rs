@@ -105,8 +105,14 @@ pub trait InputInjector: Send {
 
     /// Returns the host's keyboard LED state, for the keyboard output report
     /// (Section 8.4.1).
-    fn keyboard_leds(&self) -> KeyboardLeds {
+    fn keyboard_leds(&mut self) -> KeyboardLeds {
         KeyboardLeds::default()
+    }
+
+    /// Returns whether the injector can type committed text, so that the host
+    /// accepts text devices.
+    fn supports_text(&self) -> bool {
+        false
     }
 }
 
@@ -122,6 +128,10 @@ impl InputInjector for NoInput {
 
     fn description(&self) -> &str {
         "none"
+    }
+
+    fn supports_text(&self) -> bool {
+        true
     }
 }
 
