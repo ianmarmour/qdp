@@ -219,6 +219,14 @@ pub trait InputInjector: Send {
         PointerKind::Absolute
     }
 
+    /// Returns whether [`InputInjector::pointer_mode`] tells when the host's
+    /// applications capture the pointer. Where the platform does not say,
+    /// the host takes a pointer an application keeps hidden over the
+    /// captured monitor for a captured one.
+    fn detects_pointer_capture(&self) -> bool {
+        false
+    }
+
     /// Returns whether the injector can perform touches, so that the host
     /// accepts touchscreens.
     fn supports_touch(&self) -> bool {

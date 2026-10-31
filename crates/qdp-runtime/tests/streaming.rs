@@ -1443,6 +1443,25 @@ impl InputInjector for CapturedPointer {
     fn pointer_mode(&mut self) -> PointerKind {
         PointerKind::Relative
     }
+
+    fn detects_pointer_capture(&self) -> bool {
+        true
+    }
+}
+
+/// An injector that records actions on a platform that does not tell when
+/// applications capture the pointer.
+#[derive(Debug, Clone, Default)]
+struct UntoldCapture(Recorder);
+
+impl InputInjector for UntoldCapture {
+    fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        self.0.inject(action)
+    }
+
+    fn description(&self) -> &str {
+        "untold capture"
+    }
 }
 
 /// Moves the mouse once the host switches to relative mode, then streams a
@@ -1585,16 +1604,50 @@ async fn confinement_reaches_the_client() {
 /// relative mode and its motion arrives as relative moves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relative_mode_moves_the_mouse() {
+    let injector = CapturedPointer::default();
+    let actions = relative_motion(test_pattern(), Box::new(injector.clone()), &injector.0).await;
+    assert!(
+        actions.contains(&InputAction::MouseMoveBy {
+            dx: 5 * 256,
+            dy: -3 * 256
+        }),
+        "{actions:?}"
+    );
+}
+
+/// Where the platform does not tell, a pointer an application keeps hidden
+/// over the monitor, as a game drawing its own does, counts as captured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_pointer_is_captured() {
+    let source = CursorPattern {
+        pattern: TestPattern::new(WIDTH, HEIGHT),
+        captures: 0,
+        // Fully transparent after the change: the game hid the pointer.
+        shapes: [pointer_shape(4, 0x11), pointer_shape(6, 0)],
+    };
+    let injector = UntoldCapture::default();
+    let actions = relative_motion(Box::new(source), Box::new(injector.clone()), &injector.0).await;
+    assert!(
+        actions.contains(&InputAction::MouseMoveBy {
+            dx: 5 * 256,
+            dy: -3 * 256
+        }),
+        "{actions:?}"
+    );
+}
+
+/// Streams `source` to a client until the host switches to relative mode
+/// and the client's motion follows, and returns the actions `recorder`
+/// recorded through `injector`.
+async fn relative_motion(
+    source: Box<dyn FrameSource>,
+    injector: Box<dyn InputInjector>,
+    recorder: &Recorder,
+) -> Vec<InputAction> {
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
-    let injector = CapturedPointer::default();
-    let (address, pin, _host) = start_host(
-        authenticator,
-        test_pattern(),
-        Box::new(injector.clone()),
-        None,
-        HostAudio::default(),
-    );
+    let (address, pin, _host) =
+        start_host(authenticator, source, injector, None, HostAudio::default());
     let endpoint = ClientEndpoint::bind(loopback()).unwrap();
     let connection = endpoint
         .connect(
@@ -1630,14 +1683,7 @@ async fn relative_mode_moves_the_mouse() {
         watcher.modes,
         [PointerKind::Absolute, PointerKind::Relative]
     );
-    let actions = injector.0.0.lock().unwrap().clone();
-    assert!(
-        actions.contains(&InputAction::MouseMoveBy {
-            dx: 5 * 256,
-            dy: -3 * 256
-        }),
-        "{actions:?}"
-    );
+    recorder.0.lock().unwrap().clone()
 }
 
 /// The rumble the host's applications set on every gamepad they hear from.

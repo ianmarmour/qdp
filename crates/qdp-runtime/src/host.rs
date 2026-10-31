@@ -860,10 +860,18 @@ impl ActiveHost {
     }
 
     /// Tells the client when the host's applications capture or release the
-    /// pointer (Section 8.9). On returning to absolute mode the host warps the
-    /// client's cursor to where the pointer is.
+    /// pointer (Section 8.9): as the platform tells, or, where it does not,
+    /// while one keeps the pointer hidden over the captured monitor. On
+    /// returning to absolute mode the host warps the client's cursor to
+    /// where the pointer is.
     fn follow_pointer_mode(&mut self) -> Result<(), RuntimeError> {
-        let mode = self.injector.pointer_mode();
+        let mode = if self.injector.detects_pointer_capture() {
+            self.injector.pointer_mode()
+        } else if self.cursor.captured_by_application(Instant::now()) {
+            PointerKind::Relative
+        } else {
+            PointerKind::Absolute
+        };
         let confinement = match mode {
             PointerKind::Absolute => self
                 .injector
