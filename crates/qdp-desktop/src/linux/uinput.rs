@@ -6,7 +6,8 @@
 //! Three devices are created: a keyboard, a relative mouse, and an absolute
 //! pointer covering the desktop, as virtual machines' tablets do, and, when
 //! the client uses them, a touchscreen and a pen tablet covering the desktop
-//! and a gamepad for each one it attaches. Creating them needs write access
+//! and a gamepad for each one it attaches. Passthrough devices are created
+//! through uhid, which needs write access to `/dev/uhid`. Creating them needs write access
 //! to `/dev/uinput`.
 
 use std::collections::HashMap;
@@ -17,13 +18,18 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::time::Instant;
 
-use qdp::message::{DeviceId, GamepadOutput, GamepadReport, KeyboardLeds, PenReport};
-use qdp_runtime::{InputAction, InputInjector, PointerButton, TouchPoint};
+use qdp::message::{
+    DeviceId, FeatureStatus, GamepadOutput, GamepadReport, KeyboardLeds, PenReport,
+};
+use qdp_runtime::{
+    FeatureRequest, InputAction, InputInjector, PassthroughDevice, PointerButton, TouchPoint,
+};
 
 use super::gamepad::VirtualGamepad;
 use super::keycodes::{all_keys, consumer_key, keyboard_key};
 use super::pen::VirtualPen;
 use super::touchscreen::VirtualTouchscreen;
+use super::uhid::{Forwarded, UHID_PATH, UhidDevice};
 
 /// The uinput device node.
 const UINPUT_PATH: &str = "/dev/uinput";
@@ -529,6 +535,16 @@ pub struct UinputInjector {
     pen: Option<VirtualPen>,
     /// The desktop's size in pixels, which the touchscreen covers.
     desktop_size: (u32, u32),
+    /// Whether this user may create passthrough devices through uhid.
+    uhid_available: bool,
+    /// The passthrough devices.
+    passthrough: HashMap<DeviceId, UhidDevice>,
+    /// The feature report requests the client is answering, by token.
+    forwarded: HashMap<u64, (DeviceId, Forwarded)>,
+    /// The token of the last feature report request.
+    last_token: u64,
+    /// The feature report requests waiting to be relayed.
+    feature_requests: Vec<FeatureRequest>,
 }
 
 impl UinputInjector {
@@ -584,6 +600,11 @@ impl UinputInjector {
             touchscreen: None,
             pen: None,
             desktop_size: (width, height),
+            uhid_available: OpenOptions::new().write(true).open(UHID_PATH).is_ok(),
+            passthrough: HashMap::new(),
+            forwarded: HashMap::new(),
+            last_token: 0,
+            feature_requests: Vec::new(),
         })
     }
 
@@ -652,6 +673,18 @@ impl InputInjector for UinputInjector {
             InputAction::Pen(report) => {
                 return self.set_pen(report).map_err(|error| error.to_string());
             }
+            InputAction::PassthroughReport { device_id, report } => {
+                let device = self
+                    .passthrough
+                    .get_mut(device_id)
+                    .ok_or("the passthrough device is not present")?;
+                return device.input(report).map_err(|error| error.to_string());
+            }
+            InputAction::PassthroughRemoved(device_id) => {
+                self.passthrough.remove(device_id);
+                self.forwarded.retain(|_, (device, _)| device != device_id);
+                return Ok(());
+            }
             _ => {}
         }
         let Some((device, events)) = self.translator.events(action) else {
@@ -687,6 +720,54 @@ impl InputInjector for UinputInjector {
 
     fn supports_gamepads(&self) -> bool {
         true
+    }
+
+    fn supports_passthrough(&self) -> bool {
+        self.uhid_available
+    }
+
+    fn attach_passthrough(&mut self, device: &PassthroughDevice) -> Result<(), String> {
+        let created = UhidDevice::create(device)?;
+        self.passthrough.insert(device.device_id, created);
+        Ok(())
+    }
+
+    fn passthrough_outputs(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
+        let mut outputs = Vec::new();
+        for (&device_id, device) in &mut self.passthrough {
+            let requests = device.requests();
+            outputs.extend(
+                requests
+                    .outputs
+                    .into_iter()
+                    .map(|report| (device_id, report)),
+            );
+            for (forwarded, report) in requests.features {
+                self.last_token += 1;
+                self.forwarded
+                    .insert(self.last_token, (device_id, forwarded));
+                self.feature_requests.push(FeatureRequest {
+                    device_id,
+                    token: self.last_token,
+                    operation: forwarded.operation(),
+                    report,
+                });
+            }
+        }
+        outputs
+    }
+
+    fn feature_requests(&mut self) -> Vec<FeatureRequest> {
+        std::mem::take(&mut self.feature_requests)
+    }
+
+    fn answer_feature(&mut self, token: u64, status: FeatureStatus, report: &[u8]) {
+        let Some((device_id, forwarded)) = self.forwarded.remove(&token) else {
+            return;
+        };
+        if let Some(device) = self.passthrough.get_mut(&device_id) {
+            device.answer(forwarded, status, report);
+        }
     }
 
     fn gamepad_outputs(&mut self) -> Vec<(DeviceId, GamepadOutput)> {

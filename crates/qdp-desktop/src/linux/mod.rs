@@ -15,6 +15,7 @@ mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
 mod touchscreen;
+mod uhid;
 mod uinput;
 
 #[cfg(feature = "audio")]
