@@ -24,7 +24,9 @@ use pipewire as pw;
 use pw::spa;
 use pw::spa::buffer::meta::MetaCursor;
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{CursorShape, CursorState, FrameSource, PointerPosition, RuntimeError};
+use qdp_runtime::{
+    CursorShape, CursorState, DesktopScale, FrameSource, PointerPosition, RuntimeError,
+};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -71,6 +73,9 @@ struct PortalStream {
     restore_token: Option<String>,
     /// Whether the pointer comes as metadata or drawn into the frames.
     cursor_mode: CursorMode,
+    /// The monitor's size in the desktop's own coordinates, if the portal
+    /// told it.
+    desktop_size: Option<(i32, i32)>,
 }
 
 /// Captures one monitor of the desktop.
@@ -91,6 +96,9 @@ pub struct ScreenCapture {
     portal: Option<JoinHandle<()>>,
     /// The token that restores the user's choice in a later session.
     restore_token: Option<String>,
+    /// The monitor's size in the desktop's own coordinates, if the portal
+    /// told it, from which its interface scale follows.
+    desktop_size: Option<(i32, i32)>,
 }
 
 impl std::fmt::Debug for ScreenCapture {
@@ -112,6 +120,7 @@ impl ScreenCapture {
         capture.stop_portal = Some(stop_portal);
         capture.portal = Some(portal);
         capture.restore_token = stream.restore_token;
+        capture.desktop_size = stream.desktop_size;
         if stream.cursor_mode == CursorMode::Hidden {
             if let Ok(mut cursor) = capture.cursor.lock() {
                 *cursor = Some(CursorState {
@@ -121,7 +130,11 @@ impl ScreenCapture {
             }
         }
         capture.wait_for_first_frame()?;
-        info!(cursor = ?stream.cursor_mode, "screen cast started");
+        info!(
+            cursor = ?stream.cursor_mode,
+            scale_percent = capture.desktop_scale().map(DesktopScale::percent),
+            "screen cast started"
+        );
         Ok(capture)
     }
 
@@ -166,6 +179,7 @@ impl ScreenCapture {
             stop_portal: None,
             portal: None,
             restore_token: None,
+            desktop_size: None,
         })
     }
 
@@ -212,6 +226,13 @@ impl FrameSource for ScreenCapture {
 
     fn cursor(&mut self) -> Option<CursorState> {
         self.cursor.lock().ok()?.clone()
+    }
+
+    /// The monitor's pixel width over its width in the desktop's
+    /// coordinates, which the portal reports for monitor streams.
+    fn desktop_scale(&self) -> Option<DesktopScale> {
+        let (width, _) = self.desktop_size?;
+        DesktopScale::from_widths(self.size.0, usize::try_from(width).ok()?)
     }
 }
 
@@ -331,6 +352,7 @@ async fn negotiate(
         node_id: stream.pipe_wire_node_id(),
         restore_token: streams.restore_token().map(str::to_owned),
         cursor_mode,
+        desktop_size: stream.size(),
     })
 }
 

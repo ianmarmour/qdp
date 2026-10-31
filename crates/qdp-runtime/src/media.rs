@@ -108,6 +108,58 @@ pub struct CursorState {
     pub shape: Option<Arc<CursorShape>>,
 }
 
+/// The interface scale of a captured monitor: how many of its pixels make one
+/// unit of the desktop's own coordinates, in which the desktop lays out its
+/// windows and measures the pointer's motion, in thousandths: 1500 at 150 %.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DesktopScale(u32);
+
+impl DesktopScale {
+    /// The thousandths in a scale of one.
+    pub const UNIT: u32 = 1000;
+
+    /// No scaling: a pixel to each unit.
+    pub const UNSCALED: Self = Self(Self::UNIT);
+
+    /// The smallest scale taken as real, in thousandths.
+    const MIN: u32 = 500;
+
+    /// The largest scale taken as real, in thousandths.
+    const MAX: u32 = 8000;
+
+    /// Returns the scale of a monitor `pixels` wide whose desktop coordinates
+    /// make it `units` wide, or `None` if either is zero or the scale is
+    /// outside what desktops use.
+    pub fn from_widths(pixels: usize, units: usize) -> Option<Self> {
+        let (pixels, units) = (u64::try_from(pixels).ok()?, u64::try_from(units).ok()?);
+        if pixels == 0 || units == 0 {
+            return None;
+        }
+        let thousandths = (pixels * u64::from(Self::UNIT) + units / 2) / units;
+        u32::try_from(thousandths)
+            .ok()
+            .filter(|thousandths| (Self::MIN..=Self::MAX).contains(thousandths))
+            .map(Self)
+    }
+
+    /// Returns the scale in thousandths.
+    pub const fn thousandths(self) -> u32 {
+        self.0
+    }
+
+    /// Returns the scale in percent, rounded, as `DISPLAY_CONFIG` reports
+    /// it (Section 6.3).
+    pub const fn percent(self) -> u32 {
+        (self.0 + 5) / 10
+    }
+}
+
+impl Default for DesktopScale {
+    fn default() -> Self {
+        Self::UNSCALED
+    }
+}
+
 /// Produces the frames a host streams, such as a screen capture.
 pub trait FrameSource: Send {
     /// Returns the width and height of the frames, in pixels.
@@ -124,6 +176,12 @@ pub trait FrameSource: Send {
     /// it (Section 9.1). Sources that return `None` show the pointer in their
     /// frames, if at all.
     fn cursor(&mut self) -> Option<CursorState> {
+        None
+    }
+
+    /// Returns the captured monitor's interface scale, if the source knows
+    /// it.
+    fn desktop_scale(&self) -> Option<DesktopScale> {
         None
     }
 }
@@ -386,6 +444,22 @@ pub trait FrameSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A monitor's scale is its pixel width over its desktop width, within
+    /// the scales desktops use.
+    #[test]
+    fn measures_desktop_scales() {
+        let scale = DesktopScale::from_widths(5120, 3413).unwrap();
+        assert_eq!(scale.thousandths(), 1500);
+        assert_eq!(scale.percent(), 150);
+        assert_eq!(
+            DesktopScale::from_widths(2560, 2560),
+            Some(DesktopScale::UNSCALED)
+        );
+        assert_eq!(DesktopScale::from_widths(5120, 0), None);
+        assert_eq!(DesktopScale::from_widths(5120, 100), None);
+        assert_eq!(DesktopScale::default().percent(), 100);
+    }
 
     /// Consecutive test pattern frames differ only where the square moves.
     #[test]
