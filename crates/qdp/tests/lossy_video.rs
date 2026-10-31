@@ -55,6 +55,54 @@ type Downlink = BTreeMap<(Instant, u64), Vec<u8>>;
 /// What travels from the client to the host.
 type Uplink = BTreeMap<(Instant, u64), Vec<FeedbackRecord>>;
 
+/// The network a simulated session crosses.
+#[derive(Debug, Clone, Copy)]
+struct Network {
+    /// The probability that a datagram is lost, in each direction.
+    loss: f64,
+    /// How often the client's radio leaves its channel, as Wi-Fi cards do to
+    /// scan or to talk to nearby devices, or zero for never.
+    away_every: Duration,
+    /// How long it stays away: what would arrive meanwhile arrives, in order,
+    /// when it returns.
+    away_for: Duration,
+    /// The time each datagram takes to leave the host, as its congestion
+    /// controller paces them, or zero to send a frame's at once.
+    pacing: Duration,
+    /// The temporal unit size of a delta frame.
+    delta_frame_size: usize,
+}
+
+impl Network {
+    /// A network that loses `loss` of the datagrams in each direction.
+    fn lossy(loss: f64) -> Self {
+        Self {
+            loss,
+            away_every: Duration::ZERO,
+            away_for: Duration::ZERO,
+            pacing: Duration::ZERO,
+            delta_frame_size: DELTA_FRAME_SIZE,
+        }
+    }
+
+    /// Returns when something sent at `sent`, `start` being when the session
+    /// began, arrives.
+    fn arrival(&self, start: Instant, sent: Instant) -> Instant {
+        let arrival = sent + ONE_WAY_DELAY;
+        if self.away_every.is_zero() {
+            return arrival;
+        }
+        let since = arrival.saturating_duration_since(start);
+        let into_period =
+            Duration::from_nanos((since.as_nanos() % self.away_every.as_nanos()) as u64);
+        if into_period < self.away_for {
+            arrival + (self.away_for - into_period)
+        } else {
+            arrival
+        }
+    }
+}
+
 /// The outcome of a simulated session.
 #[derive(Debug)]
 struct Outcome {
@@ -70,9 +118,9 @@ struct Outcome {
     recovery_key_frames: u64,
 }
 
-/// Streams for `duration` with `loss` probability per datagram in each
-/// direction.
-fn simulate(duration: Duration, loss: f64, seed: u64) -> Outcome {
+/// Streams for `duration` across `network`.
+fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
+    let loss = network.loss;
     let start = Instant::now();
     let stream_id = StreamId(VarInt::from_u32(1));
     let mut sender = VideoSender::new(stream_id);
@@ -86,6 +134,8 @@ fn simulate(duration: Duration, loss: f64, seed: u64) -> Outcome {
     let mut downlink = Downlink::new();
     let mut uplink = Uplink::new();
     let mut sequence = 0u64;
+    // When the host's pacing lets the next datagram leave.
+    let mut paced_until = start;
     let mut next_frame_at = start;
     let mut outcome = Outcome {
         sent: 0,
@@ -101,8 +151,10 @@ fn simulate(duration: Duration, loss: f64, seed: u64) -> Outcome {
         let mut send = |datagrams: Vec<Vec<u8>>, random: &mut Random, sequence: &mut u64| {
             for datagram in datagrams {
                 *sequence += 1;
+                let sent = paced_until.max(now);
+                paced_until = sent + network.pacing;
                 if random.next() >= loss {
-                    downlink.insert((now + ONE_WAY_DELAY, *sequence), datagram);
+                    downlink.insert((network.arrival(start, sent), *sequence), datagram);
                 }
             }
         };
@@ -120,7 +172,7 @@ fn simulate(duration: Duration, loss: f64, seed: u64) -> Outcome {
             let size = if matches!(kind, FrameKind::Key | FrameKind::KeyRecovery) {
                 KEY_FRAME_SIZE
             } else {
-                DELTA_FRAME_SIZE
+                network.delta_frame_size
             };
             let header = FrameHeader {
                 capture_timestamp: Timestamp::default(),
@@ -190,7 +242,7 @@ fn simulate(duration: Duration, loss: f64, seed: u64) -> Outcome {
         if !records.is_empty() {
             sequence += 1;
             if random.next() >= loss {
-                uplink.insert((now + ONE_WAY_DELAY, sequence), records);
+                uplink.insert((network.arrival(start, now), sequence), records);
             }
         }
         now += STEP;
@@ -215,11 +267,40 @@ fn recovers_from_random_loss() {
     ];
     for seed in 1..=20 {
         for (loss, longest_stall) in limits {
-            let outcome = simulate(Duration::from_secs(20), loss, seed);
+            let outcome = simulate(Duration::from_secs(20), Network::lossy(loss), seed);
             assert!(
                 outcome.longest_stall < longest_stall && outcome.last_decoded + 10 >= outcome.sent,
                 "seed {seed}, loss {loss}: {outcome:?}"
             );
         }
+    }
+}
+
+/// A client whose radio leaves its channel for a moment loses nothing: what
+/// arrives late is not mistaken for lost, so the host sends no recovery
+/// frames and the client decodes every frame.
+///
+/// Before frames were declared lost only while the stream showed it, each
+/// absence that split a frame cost a recovery frame: 16 in 20 seconds.
+#[test]
+fn late_fragments_are_not_lost() {
+    for away_ms in [10, 20, 30, 40] {
+        // Frames of about 70 fragments, paced out at about 100 Mbit/s, as a
+        // 2560 × 1080 desktop playing video sends them.
+        // A period that is no whole number of frames, so that absences
+        // begin at every point of a frame.
+        let network = Network {
+            away_every: Duration::from_millis(487),
+            away_for: Duration::from_millis(away_ms),
+            pacing: Duration::from_micros(100),
+            delta_frame_size: 80_000,
+            ..Network::lossy(0.0)
+        };
+        let outcome = simulate(Duration::from_secs(20), network, 1);
+        // The frames still on their way when the session ends excepted.
+        assert!(
+            outcome.recovery_key_frames <= 1 && outcome.decoded + 2 >= outcome.sent,
+            "away {away_ms} ms: {outcome:?}"
+        );
     }
 }
