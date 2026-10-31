@@ -1088,15 +1088,13 @@ impl ActiveHost {
             self.display.plan().frame_interval(),
             now,
         );
+        let first_sent_at = self.clock.timestamp(Instant::now());
         for datagram in sent.datagrams {
             self.send(datagram)?;
         }
         if !output.frame.is_key_frame {
-            self.queue.frame_sent(
-                self.display.stream_id(),
-                sent.frame_number,
-                self.clock.timestamp(Instant::now()),
-            );
+            self.queue
+                .frame_sent(self.display.stream_id(), sent.frame_number, first_sent_at);
         }
         Ok(())
     }
