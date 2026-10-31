@@ -38,5 +38,11 @@ objc2-core-video.workspace = true
 objc2-foundation.workspace = true
 objc2-screen-capture-kit.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
+
 [lints]
 workspace = true
