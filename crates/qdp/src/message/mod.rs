@@ -11,6 +11,8 @@ mod block_map;
 mod capability;
 mod feedback;
 mod ids;
+mod input;
+mod report;
 mod session;
 mod timing;
 mod video;
@@ -31,8 +33,21 @@ pub use feedback::{
     LossRecord, MissingRange, NackRecord, VideoFeedback,
 };
 pub use ids::{
-    AudioConfigId, ClientMonitorId, DisplayConfigId, DisplayRequestId, FrameNumber, MonitorId,
-    StreamId,
+    AudioConfigId, ClientMonitorId, DeviceId, DisplayConfigId, DisplayRequestId, FeatureRequestId,
+    FrameNumber, InputSequence, MonitorId, StreamId, WarpId,
+};
+pub use input::{
+    BusType, DesktopRect, DeviceAttach, DeviceDetach, DeviceFeatures, DeviceKind, DeviceOutput,
+    DeviceStatus, DeviceStatusCode, FeatureOperation, FeatureStatus, HidFeatureRequest,
+    HidFeatureResponse, Input, InputAck, InputReport, KeyboardInfo, LayoutPlatform,
+    MAX_PASSTHROUGH_REPORT_LENGTH, MAX_REPORT_DESCRIPTOR_LENGTH, PassthroughInfo, PointerKind,
+    PointerMode, TouchpadInfo,
+};
+pub use report::{
+    GamepadButtons, GamepadOutput, GamepadReport, KeyboardLeds, KeyboardOutput, KeyboardReport,
+    MAX_CONTACTS, MAX_TEXT_REPORT_LENGTH, MouseReport, PenFlags, PenReport, PointerButtons,
+    PointerReport, TextReport, TouchContact, TouchContactFlags, TouchpadButtons, TouchpadContact,
+    TouchpadContactFlags, TouchpadReport, TouchscreenReport,
 };
 pub use session::{
     AuthContinue, AuthMethod, AuthResult, AuthStart, AuthStatus, ClientHello, ClientReady,
@@ -124,6 +139,20 @@ pub enum ControlMessage {
     AudioRequest(AudioRequest),
     /// `AUDIO_CONFIG` (Section 7.3).
     AudioConfig(AudioConfig),
+    /// `KEYBOARD_INFO` (Section 8.2.3).
+    KeyboardInfo(KeyboardInfo),
+    /// `DEVICE_ATTACH` (Section 8.2.1).
+    DeviceAttach(DeviceAttach),
+    /// `DEVICE_DETACH` (Section 8.2.2).
+    DeviceDetach(DeviceDetach),
+    /// `POINTER_MODE` (Section 8.9).
+    PointerMode(PointerMode),
+    /// `HID_FEATURE_REQUEST` (Section 8.8.3).
+    HidFeatureRequest(HidFeatureRequest),
+    /// `HID_FEATURE_RESPONSE` (Section 8.8.3).
+    HidFeatureResponse(HidFeatureResponse),
+    /// `DEVICE_STATUS` (Section 8.2.4).
+    DeviceStatus(DeviceStatus),
     /// A message of a type this implementation does not decode, which the receiver
     /// ignores (Section 3.6.2).
     Unknown(ControlMessageFrame),
@@ -146,6 +175,13 @@ impl ControlMessage {
             MessageType::KEYFRAME_REQUEST => Self::KeyframeRequest(decode_message(frame)?),
             MessageType::AUDIO_REQUEST => Self::AudioRequest(decode_message(frame)?),
             MessageType::AUDIO_CONFIG => Self::AudioConfig(decode_message(frame)?),
+            MessageType::KEYBOARD_INFO => Self::KeyboardInfo(decode_message(frame)?),
+            MessageType::DEVICE_ATTACH => Self::DeviceAttach(decode_message(frame)?),
+            MessageType::DEVICE_DETACH => Self::DeviceDetach(decode_message(frame)?),
+            MessageType::POINTER_MODE => Self::PointerMode(decode_message(frame)?),
+            MessageType::HID_FEATURE_REQUEST => Self::HidFeatureRequest(decode_message(frame)?),
+            MessageType::HID_FEATURE_RESPONSE => Self::HidFeatureResponse(decode_message(frame)?),
+            MessageType::DEVICE_STATUS => Self::DeviceStatus(decode_message(frame)?),
             _ => Self::Unknown(frame.clone()),
         };
         Ok(message)
@@ -167,6 +203,13 @@ impl ControlMessage {
             Self::KeyframeRequest(message) => message.to_frame(),
             Self::AudioRequest(message) => message.to_frame(),
             Self::AudioConfig(message) => message.to_frame(),
+            Self::KeyboardInfo(message) => message.to_frame(),
+            Self::DeviceAttach(message) => message.to_frame(),
+            Self::DeviceDetach(message) => message.to_frame(),
+            Self::PointerMode(message) => message.to_frame(),
+            Self::HidFeatureRequest(message) => message.to_frame(),
+            Self::HidFeatureResponse(message) => message.to_frame(),
+            Self::DeviceStatus(message) => message.to_frame(),
             Self::Unknown(frame) => frame.clone(),
         }
     }
@@ -187,6 +230,13 @@ impl ControlMessage {
             Self::KeyframeRequest(_) => KeyframeRequest::MESSAGE_TYPE,
             Self::AudioRequest(_) => AudioRequest::MESSAGE_TYPE,
             Self::AudioConfig(_) => AudioConfig::MESSAGE_TYPE,
+            Self::KeyboardInfo(_) => KeyboardInfo::MESSAGE_TYPE,
+            Self::DeviceAttach(_) => DeviceAttach::MESSAGE_TYPE,
+            Self::DeviceDetach(_) => DeviceDetach::MESSAGE_TYPE,
+            Self::PointerMode(_) => PointerMode::MESSAGE_TYPE,
+            Self::HidFeatureRequest(_) => HidFeatureRequest::MESSAGE_TYPE,
+            Self::HidFeatureResponse(_) => HidFeatureResponse::MESSAGE_TYPE,
+            Self::DeviceStatus(_) => DeviceStatus::MESSAGE_TYPE,
             Self::Unknown(frame) => frame.message_type,
         }
     }
@@ -201,6 +251,12 @@ pub enum Datagram<'a> {
     VideoFeedback(VideoFeedback),
     /// `AUDIO_PACKET` (Section 7.4).
     AudioPacket(AudioPacket<'a>),
+    /// `INPUT` (Section 8.3).
+    Input(Input<'a>),
+    /// `INPUT_ACK` (Section 8.5).
+    InputAck(InputAck),
+    /// `DEVICE_OUTPUT` (Section 8.8.1).
+    DeviceOutput(DeviceOutput<'a>),
     /// `TIME_PING` (Section 5.2.1).
     TimePing(TimePing),
     /// `TIME_PONG` (Section 5.2.1).
@@ -223,6 +279,9 @@ impl<'a> Datagram<'a> {
                 Self::VideoFeedback(VideoFeedback::decode(&mut payload)?)
             }
             DatagramType::AUDIO_PACKET => Self::AudioPacket(AudioPacket::decode(&mut payload)?),
+            DatagramType::INPUT => Self::Input(Input::decode(&mut payload)?),
+            DatagramType::INPUT_ACK => Self::InputAck(InputAck::decode(&mut payload)?),
+            DatagramType::DEVICE_OUTPUT => Self::DeviceOutput(DeviceOutput::decode(&mut payload)?),
             DatagramType::TIME_PING => Self::TimePing(TimePing::decode(&mut payload)?),
             DatagramType::TIME_PONG => Self::TimePong(TimePong::decode(&mut payload)?),
             _ => Self::Unknown(frame),
@@ -236,6 +295,9 @@ impl<'a> Datagram<'a> {
             Self::VideoFragment(datagram) => datagram.to_bytes(),
             Self::VideoFeedback(datagram) => datagram.to_bytes(),
             Self::AudioPacket(datagram) => datagram.to_bytes(),
+            Self::Input(datagram) => datagram.to_bytes(),
+            Self::InputAck(datagram) => datagram.to_bytes(),
+            Self::DeviceOutput(datagram) => datagram.to_bytes(),
             Self::TimePing(datagram) => datagram.to_bytes(),
             Self::TimePong(datagram) => datagram.to_bytes(),
             Self::Unknown(frame) => {
@@ -252,6 +314,9 @@ impl<'a> Datagram<'a> {
             Self::VideoFragment(_) => VideoFragment::DATAGRAM_TYPE,
             Self::VideoFeedback(_) => VideoFeedback::DATAGRAM_TYPE,
             Self::AudioPacket(_) => AudioPacket::DATAGRAM_TYPE,
+            Self::Input(_) => Input::DATAGRAM_TYPE,
+            Self::InputAck(_) => InputAck::DATAGRAM_TYPE,
+            Self::DeviceOutput(_) => DeviceOutput::DATAGRAM_TYPE,
             Self::TimePing(_) => TimePing::DATAGRAM_TYPE,
             Self::TimePong(_) => TimePong::DATAGRAM_TYPE,
             Self::Unknown(frame) => frame.datagram_type,
@@ -326,7 +391,7 @@ mod tests {
         assert_eq!(datagram.datagram_type(), DatagramType::TIME_PING);
     }
 
-    /// Every media datagram dispatches to its own variant and round-trips.
+    /// Every media and input datagram dispatches to its own variant and round-trips.
     #[test]
     fn media_datagram_dispatch() {
         let stream_id = StreamId(VarInt::from_u32(1));
@@ -350,6 +415,21 @@ mod tests {
                 sample_position: VarInt::ZERO,
                 capture_timestamp: Timestamp::default(),
                 payload: &[0xbb],
+            }),
+            Datagram::Input(Input {
+                timestamp: Timestamp::default(),
+                oldest_retained: InputSequence::NONE,
+                display_config_id: DisplayConfigId(VarInt::from_u32(1)),
+                warp_id: WarpId::NONE,
+                reports: Vec::new(),
+            }),
+            Datagram::InputAck(InputAck {
+                largest_sequence: InputSequence::NONE,
+            }),
+            Datagram::DeviceOutput(DeviceOutput {
+                device_id: DeviceId(VarInt::from_u32(1)),
+                output_sequence: VarInt::from_u32(1),
+                data: &[0x02],
             }),
         ];
         for datagram in datagrams {

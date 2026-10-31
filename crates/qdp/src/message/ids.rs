@@ -50,3 +50,30 @@ impl FrameNumber {
     /// The first frame of every stream.
     pub const FIRST: Self = Self(VarInt::from_u32(1));
 }
+
+/// An input device attached by the client, numbered from 1 (Section 8.2.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceId(pub VarInt);
+
+/// The sequence number of an input report, shared by all devices and numbered from
+/// 1 (Section 8.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InputSequence(pub VarInt);
+
+impl InputSequence {
+    /// No report: the acknowledgement before any report has been applied.
+    pub const NONE: Self = Self(VarInt::ZERO);
+}
+
+/// A `CURSOR_WARP`, numbered from 1 (Section 9.4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WarpId(pub VarInt);
+
+impl WarpId {
+    /// No warp processed yet.
+    pub const NONE: Self = Self(VarInt::ZERO);
+}
+
+/// A `HID_FEATURE_REQUEST`, numbered from 1 (Section 8.8.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FeatureRequestId(pub VarInt);
