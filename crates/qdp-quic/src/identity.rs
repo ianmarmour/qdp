@@ -42,8 +42,10 @@ impl fmt::Debug for KeyPin {
     }
 }
 
-/// The certificate chain and private key a host presents in the TLS handshake.
-pub struct HostIdentity {
+/// The certificate chain and private key an endpoint presents in the TLS
+/// handshake: a host's, or a client's for the `CLIENT_CERTIFICATE` method
+/// (Section 4.4.2).
+pub struct TlsIdentity {
     /// The certificate chain, end-entity certificate first.
     pub certificate_chain: Vec<CertificateDer<'static>>,
     /// The private key of the end-entity certificate.
@@ -51,16 +53,16 @@ pub struct HostIdentity {
 }
 
 /// Hides the private key.
-impl fmt::Debug for HostIdentity {
+impl fmt::Debug for TlsIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("HostIdentity")
+            .debug_struct("TlsIdentity")
             .field("certificate_chain", &self.certificate_chain.len())
             .finish_non_exhaustive()
     }
 }
 
-impl HostIdentity {
+impl TlsIdentity {
     /// Generates a self-signed identity valid for `names`, for hosts whose clients
     /// pin their key rather than use public key infrastructure.
     pub fn generate_self_signed(names: Vec<String>) -> Result<Self, TransportError> {
@@ -85,7 +87,7 @@ impl HostIdentity {
     }
 
     /// Creates an identity from a DER-encoded certificate and a DER-encoded
-    /// PKCS #8 private key, as [`HostIdentity::to_der`] returns them.
+    /// PKCS #8 private key, as [`TlsIdentity::to_der`] returns them.
     pub fn from_der(certificate: Vec<u8>, private_key: Vec<u8>) -> Result<Self, TransportError> {
         let identity = Self {
             certificate_chain: vec![CertificateDer::from(certificate)],
@@ -126,8 +128,8 @@ mod tests {
     /// A generated identity has a stable pin, distinct from another identity's.
     #[test]
     fn generated_identity_pins() {
-        let first = HostIdentity::generate_self_signed(vec!["host".to_owned()]).unwrap();
-        let second = HostIdentity::generate_self_signed(vec!["host".to_owned()]).unwrap();
+        let first = TlsIdentity::generate_self_signed(vec!["host".to_owned()]).unwrap();
+        let second = TlsIdentity::generate_self_signed(vec!["host".to_owned()]).unwrap();
         assert_eq!(first.key_pin().unwrap(), first.key_pin().unwrap());
         assert_ne!(first.key_pin().unwrap(), second.key_pin().unwrap());
         assert!(!format!("{first:?}").contains("private_key"));
@@ -140,10 +142,10 @@ mod tests {
     /// An identity survives storage as DER.
     #[test]
     fn der_round_trip() {
-        let identity = HostIdentity::generate_self_signed(vec!["host".to_owned()]).unwrap();
+        let identity = TlsIdentity::generate_self_signed(vec!["host".to_owned()]).unwrap();
         let (certificate, key) = identity.to_der().unwrap();
-        let restored = HostIdentity::from_der(certificate, key).unwrap();
+        let restored = TlsIdentity::from_der(certificate, key).unwrap();
         assert_eq!(restored.key_pin().unwrap(), identity.key_pin().unwrap());
-        assert!(HostIdentity::from_der(vec![1, 2, 3], vec![4]).is_err());
+        assert!(TlsIdentity::from_der(vec![1, 2, 3], vec![4]).is_err());
     }
 }

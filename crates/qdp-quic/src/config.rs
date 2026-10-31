@@ -10,7 +10,8 @@ use rustls::client::Resumption;
 use rustls::crypto::CryptoProvider;
 use rustls::server::NoServerSessionStorage;
 
-use crate::{HostIdentity, KeyPin, PinnedKeyVerifier, TransportError};
+use crate::verify::ClientKeyVerifier;
+use crate::{KeyPin, PinnedKeyVerifier, TlsIdentity, TransportError};
 
 /// The `max_datagram_frame_size` an endpoint advertises: the recommended 65535
 /// (Section 3.3). quinn advertises its datagram receive buffer size, capped at
@@ -83,11 +84,14 @@ fn transport_config(bidirectional_streams: u32) -> TransportConfig {
 /// Returns the QUIC configuration of a host presenting `identity`.
 ///
 /// TLS 1.3 only, ALPN `qdp-draft-00`, no session tickets and no 0-RTT
-/// (Section 3.4).
-pub fn host_config(identity: HostIdentity) -> Result<ServerConfig, TransportError> {
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider())
+/// (Section 3.4). The host asks every client for a certificate, which it
+/// may decline, so that it can authorize clients by their keys (Section
+/// 4.4.2).
+pub fn host_config(identity: TlsIdentity) -> Result<ServerConfig, TransportError> {
+    let provider = provider();
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_no_client_auth()
+        .with_client_cert_verifier(Arc::new(ClientKeyVerifier::new(provider)))
         .with_single_cert(identity.certificate_chain, identity.private_key)?;
     tls.alpn_protocols = vec![qdp::ALPN.to_vec()];
     tls.max_early_data_size = 0;
@@ -101,19 +105,26 @@ pub fn host_config(identity: HostIdentity) -> Result<ServerConfig, TransportErro
 }
 
 /// Returns the QUIC configuration of a client that verifies the host with
-/// `verification`.
-pub fn client_config(verification: HostVerification) -> Result<ClientConfig, TransportError> {
+/// `verification`, and presents `identity`, if given, when the host asks
+/// for a certificate.
+pub fn client_config(
+    verification: HostVerification,
+    identity: Option<TlsIdentity>,
+) -> Result<ClientConfig, TransportError> {
     let provider = provider();
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?;
-    let mut tls = match verification {
+    let builder = match verification {
         HostVerification::PinnedKeys(pins) => builder
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(PinnedKeyVerifier::new(pins, provider)))
-            .with_no_client_auth(),
-        HostVerification::WebPki(roots) => {
-            builder.with_root_certificates(roots).with_no_client_auth()
+            .with_custom_certificate_verifier(Arc::new(PinnedKeyVerifier::new(pins, provider))),
+        HostVerification::WebPki(roots) => builder.with_root_certificates(roots),
+    };
+    let mut tls = match identity {
+        Some(identity) => {
+            builder.with_client_auth_cert(identity.certificate_chain, identity.private_key)?
         }
+        None => builder.with_no_client_auth(),
     };
     tls.alpn_protocols = vec![qdp::ALPN.to_vec()];
     tls.resumption = Resumption::disabled();

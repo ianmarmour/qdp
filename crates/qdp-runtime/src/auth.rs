@@ -7,8 +7,9 @@ use qdp::auth::precis::prepare_username;
 use qdp::auth::scram::{
     ChannelBinding, ClientFirst, ScramClient, ScramClientFinal, ScramCredentials, ScramServer,
 };
-use qdp::message::{AuthMethod, AuthResult, AuthStatus, ResumptionToken};
+use qdp::message::{AuthMethod, AuthResult, AuthStatus, PasswordAuthData, ResumptionToken};
 use qdp::session::AuthResponse;
+use qdp_quic::KeyPin;
 use ring::rand::{SecureRandom, SystemRandom};
 use tracing::{debug, info};
 
@@ -62,6 +63,9 @@ pub struct HostAuthenticator {
     tokens: Vec<Vec<u8>>,
     /// SCRAM credentials by prepared user name.
     users: HashMap<String, ScramCredentials>,
+    /// The keys of the client certificates accepted with the
+    /// `CLIENT_CERTIFICATE` method.
+    client_keys: Vec<KeyPin>,
     /// The secret from which credentials for unknown user names derive.
     secret: [u8; HOST_SECRET_LENGTH],
     /// The resumption tokens issued to sessions (Section 4.4.7).
@@ -79,6 +83,7 @@ impl HostAuthenticator {
         Ok(Self {
             tokens: Vec::new(),
             users: HashMap::new(),
+            client_keys: Vec::new(),
             secret: random_bytes()?,
             resumption: ResumptionTokens::default(),
             resumption_lifetime: Some(DEFAULT_RESUMPTION_LIFETIME),
@@ -95,6 +100,12 @@ impl HostAuthenticator {
     /// Accepts `token` with the `TOKEN` method.
     pub fn add_token(&mut self, token: Vec<u8>) {
         self.tokens.push(token);
+    }
+
+    /// Accepts clients presenting a certificate whose key hashes to `pin`,
+    /// with the `CLIENT_CERTIFICATE` method (Section 4.4.2).
+    pub fn add_client_key(&mut self, pin: KeyPin) {
+        self.client_keys.push(pin);
     }
 
     /// Accepts the user `username` with SCRAM-SHA-256-PLUS. The name must already
@@ -114,12 +125,24 @@ impl HostAuthenticator {
         Ok(())
     }
 
-    /// Returns the methods to offer, in order of preference: `TOKEN` also
-    /// for resumption tokens, if the host accepts anyone to issue them to.
-    pub fn methods(&self) -> Vec<AuthMethod> {
+    /// Returns whether the host accepts anyone at all: a token, a user or a
+    /// client key.
+    pub fn accepts_anyone(&self) -> bool {
+        !self.tokens.is_empty() || !self.users.is_empty() || !self.client_keys.is_empty()
+    }
+
+    /// Returns the methods to offer, in order of preference, on a connection
+    /// whose client presented a certificate with `client_key`, if any:
+    /// `CLIENT_CERTIFICATE` only to a client that presented one (Section
+    /// 4.4.2), and `TOKEN` also for resumption tokens, if the host accepts
+    /// anyone to issue them to.
+    pub fn methods(&self, client_key: Option<KeyPin>) -> Vec<AuthMethod> {
         let mut methods = Vec::new();
-        let accepts_anyone = !self.tokens.is_empty() || !self.users.is_empty();
-        if !self.tokens.is_empty() || (accepts_anyone && self.resumption_lifetime.is_some()) {
+        if client_key.is_some() && !self.client_keys.is_empty() {
+            methods.push(AuthMethod::CLIENT_CERTIFICATE);
+        }
+        if !self.tokens.is_empty() || (self.accepts_anyone() && self.resumption_lifetime.is_some())
+        {
             methods.push(AuthMethod::TOKEN);
         }
         if !self.users.is_empty() {
@@ -157,6 +180,7 @@ impl HostAuthenticator {
         let accepted = match &identity {
             ClientIdentity::Token(position) => *position < self.tokens.len(),
             ClientIdentity::User(user) => self.users.contains_key(user),
+            ClientIdentity::Certificate(pin) => self.client_keys.contains(pin),
         };
         info!(accepted, "resumption token redeemed");
         accepted.then_some(identity)
@@ -170,6 +194,8 @@ pub(crate) struct HostAuthExchange<'a> {
     authenticator: &'a HostAuthenticator,
     /// The connection's channel binding.
     binding: ChannelBinding,
+    /// The key of the certificate the client presented, if any.
+    client_key: Option<KeyPin>,
     /// A SCRAM exchange waiting for the client-final-message.
     scram: Option<ScramServer>,
     /// The user the last SCRAM attempt was for, if it is one of the host's.
@@ -182,11 +208,17 @@ pub(crate) struct HostAuthExchange<'a> {
 }
 
 impl<'a> HostAuthExchange<'a> {
-    /// Starts authentication on a connection with `binding`.
-    pub(crate) fn new(authenticator: &'a HostAuthenticator, binding: ChannelBinding) -> Self {
+    /// Starts authentication on a connection with `binding`, whose client
+    /// presented a certificate with `client_key`, if any.
+    pub(crate) fn new(
+        authenticator: &'a HostAuthenticator,
+        binding: ChannelBinding,
+        client_key: Option<KeyPin>,
+    ) -> Self {
         Self {
             authenticator,
             binding,
+            client_key,
             scram: None,
             user: None,
             locked: false,
@@ -227,8 +259,29 @@ impl<'a> HostAuthExchange<'a> {
                     None => AuthResponse::Reject,
                 }
             }
+            AuthMethod::CLIENT_CERTIFICATE => self.start_certificate(auth_data),
             AuthMethod::SCRAM_SHA_256_PLUS => self.start_scram(auth_data, ticket),
             _ => AuthResponse::Reject,
+        }
+    }
+
+    /// Answers `AUTH_START` for the `CLIENT_CERTIFICATE` method, which
+    /// carries no Auth Data, accepting a client whose certificate has one of
+    /// the host's client keys (Section 4.4.2).
+    fn start_certificate(&mut self, auth_data: &[u8]) -> AuthResponse {
+        let accepted = self
+            .client_key
+            .filter(|pin| auth_data.is_empty() && self.authenticator.client_keys.contains(pin));
+        info!(
+            accepted = accepted.is_some(),
+            "client certificate authentication"
+        );
+        match accepted {
+            Some(pin) => {
+                self.identity = Some(ClientIdentity::Certificate(pin));
+                AuthResponse::Accept(Vec::new())
+            }
+            None => AuthResponse::Reject,
         }
     }
 
@@ -286,9 +339,14 @@ impl<'a> HostAuthExchange<'a> {
 /// How a client proves its identity.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ClientCredentials {
+    /// The certificate the client presents in the TLS handshake, for the
+    /// `CLIENT_CERTIFICATE` method; the connection's endpoint must present
+    /// one (Section 4.4.2).
+    Certificate,
     /// A token for the `TOKEN` method.
     Token(Vec<u8>),
-    /// A user name and password for SCRAM-SHA-256-PLUS.
+    /// A user name and password for SCRAM-SHA-256-PLUS, or for the
+    /// `PASSWORD` method with a host that offers only that (Section 4.4.8).
     Password {
         /// The user name.
         username: String,
@@ -301,6 +359,7 @@ pub enum ClientCredentials {
 impl std::fmt::Debug for ClientCredentials {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Certificate => formatter.write_str("Certificate"),
             Self::Token(_) => formatter.write_str("Token(..)"),
             Self::Password { username, .. } => formatter
                 .debug_struct("Password")
@@ -315,8 +374,12 @@ impl std::fmt::Debug for ClientCredentials {
 enum ClientAuthState {
     /// No attempt has started.
     Idle,
+    /// The client asked the host to accept its certificate.
+    Certificate,
     /// A token was sent.
     Token,
+    /// A user name and password were sent with the `PASSWORD` method.
+    Password,
     /// The client-first-message was sent.
     ScramFirst(ScramClient),
     /// The client-final-message was sent.
@@ -345,12 +408,19 @@ impl ClientAuthExchange {
     }
 
     /// Returns the method and Auth Data of `AUTH_START`, given the methods the host
-    /// offers.
+    /// offers. A password goes with SCRAM-SHA-256-PLUS where the host offers
+    /// it, which never reveals it, and with `PASSWORD` only otherwise: the
+    /// client always verifies the host's key or certificate first (Section
+    /// 11.2).
     pub(crate) fn start(
         &mut self,
         offered: &[AuthMethod],
     ) -> Result<(AuthMethod, Vec<u8>), RuntimeError> {
         match &self.credentials {
+            ClientCredentials::Certificate if offered.contains(&AuthMethod::CLIENT_CERTIFICATE) => {
+                self.state = ClientAuthState::Certificate;
+                Ok((AuthMethod::CLIENT_CERTIFICATE, Vec::new()))
+            }
             ClientCredentials::Token(token) if offered.contains(&AuthMethod::TOKEN) => {
                 self.state = ClientAuthState::Token;
                 Ok((AuthMethod::TOKEN, token.clone()))
@@ -362,6 +432,16 @@ impl ClientAuthExchange {
                 let (client, first) = ScramClient::new(username, password, &nonce, self.binding)?;
                 self.state = ClientAuthState::ScramFirst(client);
                 Ok((AuthMethod::SCRAM_SHA_256_PLUS, first))
+            }
+            ClientCredentials::Password { username, password }
+                if offered.contains(&AuthMethod::PASSWORD) =>
+            {
+                self.state = ClientAuthState::Password;
+                let auth_data = PasswordAuthData {
+                    user_name: username.clone(),
+                    password: password.clone(),
+                };
+                Ok((AuthMethod::PASSWORD, auth_data.to_bytes()))
             }
             _ => Err(RuntimeError::NoCommonAuthMethod),
         }
@@ -391,7 +471,9 @@ impl ClientAuthExchange {
             ClientAuthState::ScramFinal(client) => {
                 Ok(client.verify_server_final(&result.auth_data)?)
             }
-            ClientAuthState::Token => Ok(()),
+            ClientAuthState::Certificate | ClientAuthState::Token | ClientAuthState::Password => {
+                Ok(())
+            }
             ClientAuthState::Idle | ClientAuthState::ScramFirst(_) => {
                 Err(RuntimeError::UnexpectedAuthStep)
             }
@@ -423,10 +505,10 @@ mod tests {
     fn tokens() {
         let mut authenticator = HostAuthenticator::new().unwrap();
         authenticator.add_token(b"secret".to_vec());
-        assert_eq!(authenticator.methods(), [AuthMethod::TOKEN]);
+        assert_eq!(authenticator.methods(None), [AuthMethod::TOKEN]);
         let admission = Admission::default();
         let ticket = ticket(&admission);
-        let mut exchange = HostAuthExchange::new(&authenticator, binding());
+        let mut exchange = HostAuthExchange::new(&authenticator, binding(), None);
         assert_eq!(
             exchange.start(AuthMethod::TOKEN, b"secret", &ticket),
             AuthResponse::Accept(Vec::new())
@@ -449,12 +531,12 @@ mod tests {
             ScramCredentials::derive("pencil", b"salt".to_vec(), 4096).unwrap(),
         );
         assert_eq!(
-            authenticator.methods(),
+            authenticator.methods(None),
             [AuthMethod::TOKEN, AuthMethod::SCRAM_SHA_256_PLUS]
         );
         let admission = Admission::default();
         let ticket = ticket(&admission);
-        let mut exchange = HostAuthExchange::new(&authenticator, binding());
+        let mut exchange = HostAuthExchange::new(&authenticator, binding(), None);
         for (user, accepted) in [("ian", true), ("ada", false)] {
             let identity = ClientIdentity::User(user.to_owned());
             let (message, _guard) = authenticator
@@ -475,14 +557,17 @@ mod tests {
         }
 
         authenticator.set_resumption_lifetime(None);
-        assert_eq!(authenticator.methods(), [AuthMethod::SCRAM_SHA_256_PLUS]);
+        assert_eq!(
+            authenticator.methods(None),
+            [AuthMethod::SCRAM_SHA_256_PLUS]
+        );
         assert!(
             authenticator
                 .issue_resumption(ClientIdentity::User("ian".to_owned()))
                 .unwrap()
                 .is_none()
         );
-        assert!(HostAuthenticator::new().unwrap().methods().is_empty());
+        assert!(HostAuthenticator::new().unwrap().methods(None).is_empty());
     }
 
     /// A client and host complete a SCRAM exchange, and a wrong password
@@ -500,7 +585,7 @@ mod tests {
         });
         let ticket = ticket(&admission);
         for (password, succeeds) in [("pencil", true), ("wrong", false), ("pencil", false)] {
-            let mut host = HostAuthExchange::new(&authenticator, binding());
+            let mut host = HostAuthExchange::new(&authenticator, binding(), None);
             let mut client = ClientAuthExchange::new(
                 ClientCredentials::Password {
                     username: "ian".to_owned(),
@@ -508,7 +593,7 @@ mod tests {
                 },
                 binding(),
             );
-            let (method, first) = client.start(&authenticator.methods()).unwrap();
+            let (method, first) = client.start(&authenticator.methods(None)).unwrap();
             let AuthResponse::Continue(server_first) = host.start(method, &first, &ticket) else {
                 panic!("expected a server-first-message");
             };
@@ -531,6 +616,94 @@ mod tests {
             };
             assert_eq!(client.finish(&result).is_ok(), succeeds, "{password}");
         }
+    }
+
+    /// A client presenting one of the host's client keys is accepted with
+    /// `CLIENT_CERTIFICATE`, which is offered only to clients that present a
+    /// certificate, and a resumption token resumes it.
+    #[test]
+    fn client_certificates() {
+        let pin = |byte: u8| KeyPin([byte; 32]);
+        let mut authenticator = HostAuthenticator::new().unwrap();
+        authenticator.add_client_key(pin(1));
+        assert!(authenticator.accepts_anyone());
+        assert_eq!(authenticator.methods(None), [AuthMethod::TOKEN]);
+        assert_eq!(
+            authenticator.methods(Some(pin(2))),
+            [AuthMethod::CLIENT_CERTIFICATE, AuthMethod::TOKEN]
+        );
+        let admission = Admission::default();
+        let ticket = ticket(&admission);
+        for (client_key, auth_data, accepted) in [
+            (Some(pin(1)), &b""[..], true),
+            (Some(pin(1)), &b"extra"[..], false),
+            (Some(pin(2)), &b""[..], false),
+            (None, &b""[..], false),
+        ] {
+            let mut host = HostAuthExchange::new(&authenticator, binding(), client_key);
+            let response = host.start(AuthMethod::CLIENT_CERTIFICATE, auth_data, &ticket);
+            assert_eq!(
+                response == AuthResponse::Accept(Vec::new()),
+                accepted,
+                "{client_key:?} {auth_data:?}"
+            );
+        }
+        let mut client = ClientAuthExchange::new(ClientCredentials::Certificate, binding());
+        assert_eq!(
+            client.start(&authenticator.methods(Some(pin(1)))).unwrap(),
+            (AuthMethod::CLIENT_CERTIFICATE, Vec::new())
+        );
+        let success = AuthResult {
+            status: AuthStatus::Success,
+            reason: String::new(),
+            auth_data: Vec::new(),
+        };
+        assert!(client.finish(&success).is_ok());
+
+        let identity = ClientIdentity::Certificate(pin(1));
+        let (message, _guard) = authenticator
+            .issue_resumption(identity.clone())
+            .unwrap()
+            .unwrap();
+        let mut host = HostAuthExchange::new(&authenticator, binding(), None);
+        let response = host.start(AuthMethod::TOKEN, &message.token, &ticket);
+        assert_eq!(response, AuthResponse::Accept(Vec::new()));
+        assert_eq!(host.identity(), Some(&identity));
+    }
+
+    /// A password goes with SCRAM where the host offers it, and with
+    /// `PASSWORD` only to a host that offers nothing else.
+    #[test]
+    fn password_method() {
+        let credentials = ClientCredentials::Password {
+            username: "ian".to_owned(),
+            password: "pencil".to_owned(),
+        };
+        let mut client = ClientAuthExchange::new(credentials.clone(), binding());
+        let both = [AuthMethod::PASSWORD, AuthMethod::SCRAM_SHA_256_PLUS];
+        assert_eq!(
+            client.start(&both).unwrap().0,
+            AuthMethod::SCRAM_SHA_256_PLUS
+        );
+        let mut client = ClientAuthExchange::new(credentials, binding());
+        let (method, auth_data) = client.start(&[AuthMethod::PASSWORD]).unwrap();
+        assert_eq!(method, AuthMethod::PASSWORD);
+        let sent = PasswordAuthData::decode(&auth_data).unwrap();
+        assert_eq!(
+            (sent.user_name.as_str(), sent.password.as_str()),
+            ("ian", "pencil")
+        );
+        let success = AuthResult {
+            status: AuthStatus::Success,
+            reason: String::new(),
+            auth_data: Vec::new(),
+        };
+        assert!(client.finish(&success).is_ok());
+        let mut certificate = ClientAuthExchange::new(ClientCredentials::Certificate, binding());
+        assert!(matches!(
+            certificate.start(&[AuthMethod::TOKEN]),
+            Err(RuntimeError::NoCommonAuthMethod)
+        ));
     }
 
     /// A client without credentials for any offered method cannot start.

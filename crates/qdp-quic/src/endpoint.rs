@@ -8,7 +8,7 @@ use qdp::registry::ErrorCode;
 use quinn::Endpoint;
 
 use crate::config::{client_config, host_config};
-use crate::{HostIdentity, HostVerification, QdpConnection, TransportError};
+use crate::{HostVerification, QdpConnection, TlsIdentity, TransportError};
 
 /// A host listening for QDP connections.
 #[derive(Debug)]
@@ -19,7 +19,7 @@ pub struct HostEndpoint {
 
 impl HostEndpoint {
     /// Listens on `address`, presenting `identity` to clients.
-    pub fn bind(address: SocketAddr, identity: HostIdentity) -> Result<Self, TransportError> {
+    pub fn bind(address: SocketAddr, identity: TlsIdentity) -> Result<Self, TransportError> {
         let endpoint = Endpoint::server(host_config(identity)?, address)?;
         Ok(Self { endpoint })
     }
@@ -119,15 +119,24 @@ impl IncomingConnection {
 pub struct ClientEndpoint {
     /// The QUIC endpoint.
     endpoint: Endpoint,
+    /// The certificate presented to hosts that ask for one, if any.
+    identity: Option<TlsIdentity>,
 }
 
 impl ClientEndpoint {
     /// Creates a client endpoint bound to `address`, usually an unspecified
-    /// address with port 0.
+    /// address with port 0, which presents no certificate.
     pub fn bind(address: SocketAddr) -> Result<Self, TransportError> {
         Ok(Self {
             endpoint: Endpoint::client(address)?,
+            identity: None,
         })
+    }
+
+    /// Presents `identity` to the hosts the endpoint connects to from now
+    /// on, for the `CLIENT_CERTIFICATE` method (Section 4.4.2).
+    pub fn set_identity(&mut self, identity: TlsIdentity) {
+        self.identity = Some(identity);
     }
 
     /// Connects to the host at `address`, verifying it with `verification`, and
@@ -141,7 +150,8 @@ impl ClientEndpoint {
         server_name: &str,
         verification: HostVerification,
     ) -> Result<QdpConnection, TransportError> {
-        let config = client_config(verification)?;
+        let identity = self.identity.as_ref().map(TlsIdentity::clone_key);
+        let config = client_config(verification, identity)?;
         let connection = self
             .endpoint
             .connect_with(config, address, server_name)?
