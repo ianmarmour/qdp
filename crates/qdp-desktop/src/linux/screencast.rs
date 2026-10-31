@@ -60,8 +60,38 @@ const CURSOR_SIDES: (i32, i32, i32) = (64, 1, 1024);
 /// The largest value of an 8-bit channel.
 const CHANNEL_MAX: u32 = 255;
 
-/// The pointer as the PipeWire thread last saw it, once metadata arrived.
-type SharedCursor = Arc<Mutex<Option<CursorState>>>;
+/// The least distance, in pixels, from the monitor's edges within which a
+/// pointer the compositor stops reporting is taken to have left for another
+/// monitor.
+const MIN_EDGE_MARGIN: i32 = 64;
+
+/// The part of the monitor's smaller side, as its divisor, within which a
+/// pointer the compositor stops reporting is taken to have left: a quick
+/// move crosses that much between two frames.
+const EDGE_MARGIN_DIVISOR: i32 = 10;
+
+/// The pointer the stream's metadata describes.
+#[derive(Debug, Default)]
+struct StreamCursor {
+    /// The pointer as the host sees it, once metadata arrived.
+    state: Option<CursorState>,
+    /// The image put aside while an application hides the pointer, shown
+    /// again if it comes back without a new one.
+    hidden_shape: Option<Arc<CursorShape>>,
+}
+
+/// One buffer's report of the pointer.
+#[derive(Debug, Clone)]
+struct CursorReport {
+    /// The image the buffer carries, if it carries one: `Some(None)` for an
+    /// image that shows nothing.
+    shape: Option<Option<Arc<CursorShape>>>,
+    /// Where the pointer's hotspot is in the frame, in pixels.
+    position: (i32, i32),
+}
+
+/// The pointer as the PipeWire thread last saw it.
+type SharedCursor = Arc<Mutex<StreamCursor>>;
 
 /// What the portal returned for the chosen monitor.
 struct PortalStream {
@@ -123,7 +153,7 @@ impl ScreenCapture {
         capture.desktop_size = stream.desktop_size;
         if stream.cursor_mode == CursorMode::Hidden {
             if let Ok(mut cursor) = capture.cursor.lock() {
-                *cursor = Some(CursorState {
+                cursor.state = Some(CursorState {
                     position: PointerPosition::Unknown,
                     shape: Some(Arc::new(CursorShape::arrow())),
                 });
@@ -225,7 +255,7 @@ impl FrameSource for ScreenCapture {
     }
 
     fn cursor(&mut self) -> Option<CursorState> {
-        self.cursor.lock().ok()?.clone()
+        self.cursor.lock().ok()?.state.clone()
     }
 
     /// The monitor's pixel width over its width in the desktop's
@@ -444,28 +474,70 @@ fn cursor_shape(
     })
 }
 
-/// Records the pointer a buffer's cursor metadata describes.
-fn update_cursor(shared: &SharedCursor, meta: &MetaCursor) {
-    if !meta.is_valid() {
-        // The buffer carries no new pointer information.
-        return;
+/// Records the pointer a buffer's cursor metadata describes, for a
+/// `frame`-sized monitor.
+fn update_cursor(shared: &SharedCursor, meta: &MetaCursor, frame: (u32, u32)) {
+    // KWin and Mutter mark the metadata invalid while the pointer is not in
+    // the stream.
+    let report = meta.is_valid().then(|| CursorReport {
+        shape: meta.bitmap().map(|bitmap| {
+            let hotspot = (meta.hotspot().x, meta.hotspot().y);
+            let size = bitmap.size();
+            BitmapOrder::of(bitmap.format())
+                .and_then(|order| {
+                    let data = bitmap.bitmap_data()?;
+                    let stride = bitmap.stride().unsigned_abs() as usize;
+                    cursor_shape(order, (size.width, size.height), stride, data, hotspot)
+                })
+                .map(Arc::new)
+        }),
+        position: (meta.position().x, meta.position().y),
+    });
+    if let Ok(mut cursor) = shared.lock() {
+        note_report(&mut cursor, report, frame);
     }
-    let Ok(mut cursor) = shared.lock() else {
+}
+
+/// Notes one buffer's report of the pointer, or that it reported none, for a
+/// `frame`-sized monitor.
+fn note_report(cursor: &mut StreamCursor, report: Option<CursorReport>, frame: (u32, u32)) {
+    let Some(report) = report else {
+        // No pointer in the stream: it left the monitor, or an application
+        // hid it, which KWin reports the same way, since a pointer without
+        // an image covers none of the monitor. Only one last seen near an
+        // edge can have left.
+        let Some(state) = cursor.state.as_mut() else {
+            return;
+        };
+        if let PointerPosition::At(x, y) = state.position {
+            if near_edge((x, y), frame) {
+                state.position = PointerPosition::Hidden;
+            } else if let Some(shape) = state.shape.take() {
+                cursor.hidden_shape = Some(shape);
+            }
+        }
         return;
     };
-    let state = cursor.get_or_insert_with(CursorState::default);
-    if let Some(bitmap) = meta.bitmap() {
-        let hotspot = (meta.hotspot().x, meta.hotspot().y);
-        let size = bitmap.size();
-        let shape = BitmapOrder::of(bitmap.format()).and_then(|order| {
-            let data = bitmap.bitmap_data()?;
-            let stride = bitmap.stride().unsigned_abs() as usize;
-            cursor_shape(order, (size.width, size.height), stride, data, hotspot)
-        });
-        state.shape = shape.map(Arc::new);
+    let hidden_shape = cursor.hidden_shape.take();
+    let state = cursor.state.get_or_insert_with(CursorState::default);
+    match report.shape {
+        Some(shape) => state.shape = shape,
+        None => {
+            if state.shape.is_none() {
+                state.shape = hidden_shape;
+            }
+        }
     }
-    let position = meta.position();
-    state.position = PointerPosition::At(position.x, position.y);
+    state.position = PointerPosition::At(report.position.0, report.position.1);
+}
+
+/// Returns whether `position` is near enough an edge of a `frame`-sized
+/// monitor for a pointer last seen there to have left it.
+fn near_edge((x, y): (i32, i32), (width, height): (u32, u32)) -> bool {
+    let width = i32::try_from(width).unwrap_or(i32::MAX);
+    let height = i32::try_from(height).unwrap_or(i32::MAX);
+    let margin = (width.min(height) / EDGE_MARGIN_DIVISOR).max(MIN_EDGE_MARGIN);
+    x < margin || y < margin || x >= width - margin || y >= height - margin
 }
 
 /// Returns the parameter asking for cursor metadata on each buffer.
@@ -585,7 +657,7 @@ fn run_pipewire(
                 return;
             };
             if let Some(meta) = buffer.find_meta::<MetaCursor>() {
-                update_cursor(&cursor, meta);
+                update_cursor(&cursor, meta, (format.width, format.height));
             }
             let Some(order) = format.order else {
                 return;
@@ -732,6 +804,63 @@ mod tests {
     fn refuses_empty_bitmaps() {
         assert!(cursor_shape(BitmapOrder::Rgba, (0, 0), 0, &[], (0, 0)).is_none());
         assert!(cursor_shape(BitmapOrder::Rgba, (2, 2), 8, &[0; 12], (0, 0)).is_none());
+    }
+
+    /// Returns a report of a pointer at `position` without a new image.
+    fn at(position: (i32, i32)) -> CursorReport {
+        CursorReport {
+            shape: None,
+            position,
+        }
+    }
+
+    /// A pointer the compositor stops reporting inside the monitor was hidden
+    /// by an application, and comes back with its image; one last seen at an
+    /// edge left the monitor.
+    #[test]
+    fn tells_hidden_pointers_from_departed_ones() {
+        let frame = (5120, 2160);
+        let arrow = Arc::new(CursorShape::arrow());
+        let mut cursor = StreamCursor::default();
+        note_report(
+            &mut cursor,
+            Some(CursorReport {
+                shape: Some(Some(Arc::clone(&arrow))),
+                position: (2000, 1000),
+            }),
+            frame,
+        );
+        // Hidden in the middle: on the monitor, with nothing to show.
+        note_report(&mut cursor, None, frame);
+        let state = cursor.state.clone().unwrap();
+        assert_eq!(state.position, PointerPosition::At(2000, 1000));
+        assert!(state.shape.is_none());
+        // Shown again without a new image: the old one returns.
+        note_report(&mut cursor, Some(at((2010, 1000))), frame);
+        let state = cursor.state.clone().unwrap();
+        assert_eq!(state.shape.as_deref(), Some(&*arrow));
+        // Gone past the right edge: off the monitor, its image kept.
+        note_report(&mut cursor, Some(at((5100, 1000))), frame);
+        note_report(&mut cursor, None, frame);
+        let state = cursor.state.clone().unwrap();
+        assert_eq!(state.position, PointerPosition::Hidden);
+        assert!(state.shape.is_some());
+        // Before any report, nothing is known.
+        let mut unknown = StreamCursor::default();
+        note_report(&mut unknown, None, frame);
+        assert!(unknown.state.is_none());
+    }
+
+    /// The edge margin grows with the monitor, from a floor.
+    #[test]
+    fn measures_edge_margins() {
+        assert!(near_edge((100, 1000), (5120, 2160)));
+        assert!(!near_edge((300, 1000), (5120, 2160)));
+        assert!(near_edge((5000, 1000), (5120, 2160)));
+        assert!(near_edge((40, 300), (640, 480)));
+        assert!(!near_edge((100, 300), (640, 480)));
+        // An unknown size counts as all edge.
+        assert!(near_edge((10, 10), (0, 0)));
     }
 
     /// The metadata parameter serializes.
