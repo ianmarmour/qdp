@@ -65,6 +65,10 @@ const MILLIHERTZ_PER_HERTZ: u32 = 1000;
 /// The largest frame the host's AV1 capability advertises.
 const MAX_FRAME_DIMENSION: u32 = 8192;
 
+/// How long the host waits for an `INPUT` datagram while the client holds
+/// something before releasing it (Section 8.7, rule 8).
+const INPUT_SILENCE: Duration = Duration::from_secs(1);
+
 /// The Reason sent with every failed authentication attempt.
 const FAILURE_REASON: &str = "authentication failed";
 
@@ -196,6 +200,8 @@ struct ActiveHost {
     audio: HostAudioStreams,
     /// The pointer mode the client was last told.
     pointer_mode: PointerKind,
+    /// When the last `INPUT` datagram arrived.
+    last_input_at: Instant,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
@@ -339,6 +345,7 @@ pub async fn serve(
         clipboard,
         audio,
         pointer_mode: PointerKind::Absolute,
+        last_input_at: Instant::now(),
     };
     active.update_outputs(Instant::now())?;
     if let Some(link) = &mut active.clipboard {
@@ -447,6 +454,7 @@ impl ActiveHost {
                 Some(self.stats.next_log_at()),
                 self.clipboard.as_ref().map(ClipboardLink::poll_timeout),
                 self.outputs.poll_timeout(),
+                self.input_silence_deadline(),
             ]
             .into_iter()
             .flatten()
@@ -476,6 +484,14 @@ impl ActiveHost {
             }
             let events = self.input.handle_timeout(smoothed_rtt, now);
             self.apply_input(&events);
+            if self
+                .input_silence_deadline()
+                .is_some_and(|deadline| now >= deadline)
+            {
+                warn!("no input for a second while keys or buttons were held; releasing them");
+                let actions = self.devices.release_all();
+                self.inject(&actions);
+            }
             if let Some(link) = &mut self.clipboard {
                 let outputs = link.service(now);
                 self.apply_clipboard(outputs)?;
@@ -509,6 +525,14 @@ impl ActiveHost {
                     .map(|since| now.saturating_duration_since(since)),
             );
         }
+    }
+
+    /// Returns when the host releases what the client holds if no `INPUT`
+    /// datagram arrives first, or `None` while nothing is held.
+    fn input_silence_deadline(&self) -> Option<Instant> {
+        self.devices
+            .is_holding()
+            .then_some(self.last_input_at + INPUT_SILENCE)
     }
 
     /// Applies input reports through the injector. Positions the client
@@ -802,6 +826,7 @@ impl ActiveHost {
             }
             Datagram::AudioPacket(packet) => self.audio.handle_packet(&packet, now),
             Datagram::Input(input) => {
+                self.last_input_at = now;
                 let devices = &self.devices;
                 let events = self.input.handle_input(
                     &input,
