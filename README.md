@@ -199,7 +199,14 @@ the primary monitor with DXGI Desktop Duplication, and holds the last image
 while the sign-in screen or an elevation prompt is shown. If the screen cannot
 be captured the host
 streams a test pattern instead, and `--source screen` or `--source
-test-pattern` forces one. Run `qdp help` for every option, and set `QDP_LOG=debug`
+test-pattern` forces one.
+
+On KDE Plasma, `qdp serve --source virtual` streams a virtual monitor instead
+of a real one: KWin adds a monitor of exactly the client's display, its size
+and interface scale (with `qdp connect --resolution`, the chosen size), so the
+host streams it without scaling, and makes a new one when the client's
+display changes. The monitor joins the desktop beside the real ones while the
+session lasts. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail. `QDP_LOG` also takes levels for single parts after the
 default one: `QDP_LOG=info,qdp::window=debug` on the client and
 `QDP_LOG=info,qdp_runtime::host=debug,qdp_runtime::host_cursor=debug` on the
