@@ -24,6 +24,38 @@ const LIMITED_BLACK: u8 = 16;
 /// The chroma value of a neutral colour.
 const NEUTRAL_CHROMA: u8 = 128;
 
+/// The number of fractional bits of the RGB to YUV coefficients.
+const FRACTION_BITS: u32 = 16;
+
+/// BT.709 luma weights of red, green and blue, scaled to limited range
+/// (219/255) in 16-bit fixed point.
+const LUMA_WEIGHTS: [i32; 3] = [11_966, 40_254, 4_064];
+
+/// BT.709 blue-difference weights, scaled to limited range (224/255).
+const CB_WEIGHTS: [i32; 3] = [-6_598, -22_186, 28_784];
+
+/// BT.709 red-difference weights, scaled to limited range (224/255).
+const CR_WEIGHTS: [i32; 3] = [28_784, -26_148, -2_636];
+
+/// The bytes of one 32-bit RGB pixel.
+const RGB32_PIXEL: usize = 4;
+
+/// The order of the colour bytes of a 32-bit pixel; the fourth byte, alpha
+/// or padding, is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rgb32Order {
+    /// Blue, green, red, then padding: `BGRx` or `BGRA`.
+    Bgr,
+    /// Red, green, blue, then padding: `RGBx` or `RGBA`.
+    Rgb,
+}
+
+/// Applies 16-bit fixed-point weights to red, green and blue, with rounding.
+fn weigh(weights: [i32; 3], [red, green, blue]: [i32; 3]) -> i32 {
+    (weights[0] * red + weights[1] * green + weights[2] * blue + (1 << (FRACTION_BITS - 1)))
+        >> FRACTION_BITS
+}
+
 impl Yuv420Frame {
     /// Returns a black frame of `width × height` pixels.
     pub fn black(width: usize, height: usize) -> Self {
@@ -57,6 +89,63 @@ impl Yuv420Frame {
                 v,
             },
         )
+    }
+
+    /// Converts a 32-bit RGB image, `stride` bytes per row, to a BT.709
+    /// limited-range frame, as standard dynamic range QDP streams use. Chroma
+    /// is the average of each 2 × 2 block. Returns `None` if `data` is too
+    /// short.
+    pub fn from_rgb32(
+        width: usize,
+        height: usize,
+        stride: usize,
+        order: Rgb32Order,
+        data: &[u8],
+    ) -> Option<Self> {
+        if width == 0 || height == 0 || stride < width * RGB32_PIXEL {
+            return None;
+        }
+        if data.len() < stride * (height - 1) + width * RGB32_PIXEL {
+            return None;
+        }
+        let pixel = |x: usize, y: usize| -> [i32; 3] {
+            let start = y * stride + x * RGB32_PIXEL;
+            let bytes = &data[start..start + 3];
+            let [first, second, third] = [bytes[0], bytes[1], bytes[2]].map(i32::from);
+            match order {
+                Rgb32Order::Bgr => [third, second, first],
+                Rgb32Order::Rgb => [first, second, third],
+            }
+        };
+        let (chroma_width, chroma_height) = chroma_size(width, height);
+        let mut frame = Self::black(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                frame.y[y * width + x] =
+                    (i32::from(LIMITED_BLACK) + weigh(LUMA_WEIGHTS, pixel(x, y))) as u8;
+            }
+        }
+        for chroma_y in 0..chroma_height {
+            for chroma_x in 0..chroma_width {
+                let mut sum = [0; 3];
+                let mut count = 0;
+                for y in (2 * chroma_y)..(2 * chroma_y + 2).min(height) {
+                    for x in (2 * chroma_x)..(2 * chroma_x + 2).min(width) {
+                        let rgb = pixel(x, y);
+                        for channel in 0..3 {
+                            sum[channel] += rgb[channel];
+                        }
+                        count += 1;
+                    }
+                }
+                let average = sum.map(|total| total / count);
+                let index = chroma_y * chroma_width + chroma_x;
+                let neutral = i32::from(NEUTRAL_CHROMA);
+                frame.u[index] = (neutral + weigh(CB_WEIGHTS, average)).clamp(0, 255) as u8;
+                frame.v[index] = (neutral + weigh(CR_WEIGHTS, average)).clamp(0, 255) as u8;
+            }
+        }
+        Some(frame)
     }
 
     /// Returns the width in pixels.
@@ -170,6 +259,31 @@ mod tests {
         assert_eq!((frame.chroma_width(), frame.chroma_height()), (3, 2));
         assert_eq!(frame.u().len(), 6);
         assert!(Yuv420Frame::from_planes(5, 3, vec![0; 15], vec![0; 6], vec![0; 5]).is_none());
+    }
+
+    /// Reference colours convert to their BT.709 limited-range values, in
+    /// either byte order.
+    #[test]
+    fn converts_rgb() {
+        let convert = |order, pixel: [u8; 4]| {
+            let data: Vec<u8> = pixel.repeat(4);
+            let frame = Yuv420Frame::from_rgb32(2, 2, 8, order, &data).unwrap();
+            (frame.y()[0], frame.u()[0], frame.v()[0])
+        };
+        assert_eq!(convert(Rgb32Order::Rgb, [0, 0, 0, 255]), (16, 128, 128));
+        assert_eq!(
+            convert(Rgb32Order::Rgb, [255, 255, 255, 255]),
+            (235, 128, 128)
+        );
+        assert_eq!(convert(Rgb32Order::Rgb, [255, 0, 0, 0]), (63, 102, 240));
+        assert_eq!(convert(Rgb32Order::Bgr, [0, 0, 255, 0]), (63, 102, 240));
+        assert_eq!(convert(Rgb32Order::Rgb, [0, 255, 0, 0]), (173, 42, 26));
+        assert_eq!(convert(Rgb32Order::Bgr, [255, 0, 0, 0]), (32, 240, 118));
+        // Rows may be padded, and the data must cover every row.
+        let padded = vec![0; 3 * 12];
+        let frame = Yuv420Frame::from_rgb32(3, 3, 12, Rgb32Order::Rgb, &padded).unwrap();
+        assert_eq!((frame.chroma_width(), frame.chroma_height()), (2, 2));
+        assert!(Yuv420Frame::from_rgb32(3, 3, 12, Rgb32Order::Rgb, &padded[..20]).is_none());
     }
 
     /// Cropping keeps the top-left pixels of every plane.

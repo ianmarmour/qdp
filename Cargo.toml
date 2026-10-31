@@ -17,6 +17,8 @@ license = "Apache-2.0"
 repository = "https://github.com/ianmarmour/qdp"
 
 [workspace.dependencies]
+# The ScreenCast portal, for screen capture on Linux.
+ashpd = { version = "0.13.13", default-features = false, features = ["screencast", "tokio"] }
 bytes = { version = "1.10", default-features = false, features = ["std"] }
 libc = { version = "0.2.172", default-features = false }
 # Apple's frameworks, for hardware video decoding on macOS.
@@ -26,9 +28,11 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = ["s
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTUtilities", "objc2-core-media", "objc2-core-video"] }
 qdp = { path = "crates/qdp" }
 qdp-codec = { path = "crates/qdp-codec" }
-qdp-desktop = { path = "crates/qdp-desktop" }
+qdp-desktop = { path = "crates/qdp-desktop", default-features = false }
 qdp-quic = { path = "crates/qdp-quic" }
 qdp-runtime = { path = "crates/qdp-runtime" }
+# PipeWire, which delivers captured screens on Linux.
+pipewire = { version = "0.10.1", default-features = false }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rav1d = { version = "1.1.0", default-features = false, features = ["asm", "bitdepth_8", "bitdepth_16"] }
 rav1e = { version = "0.8.1", default-features = false, features = ["asm", "threading"] }

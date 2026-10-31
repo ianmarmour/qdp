@@ -72,6 +72,7 @@ impl Host {
             ])
             .arg(identity)
             .args(["--token", TOKEN, "--size", &format!("{WIDTH}x{HEIGHT}")])
+            .args(["--source", "test-pattern"])
             .env("QDP_LOG", "warn")
             .stdout(Stdio::null())
             .stderr(Stdio::null())

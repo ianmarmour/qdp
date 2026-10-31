@@ -1,0 +1,44 @@
+//! Captures the screen of a running desktop session through the ScreenCast
+//! portal. It needs a session with a portal that shares a monitor without
+//! asking, so it is ignored by default; run it with `--ignored` inside one.
+//!
+//! When `QDP_TEST_SCREEN_COLOUR` is `red`, the frames are expected to be solid
+//! red.
+
+#![cfg(all(target_os = "linux", feature = "screen-capture"))]
+
+use qdp_desktop::ScreenCapture;
+use qdp_runtime::FrameSource;
+
+/// Checks that `capture` delivers frames of its size, with the expected
+/// colour if one is set.
+fn check_frames(mut capture: ScreenCapture) {
+    let (width, height) = capture.size();
+    assert!(width > 0 && height > 0);
+    let frame = capture.capture().unwrap();
+    assert_eq!((frame.width(), frame.height()), (width, height));
+    if std::env::var("QDP_TEST_SCREEN_COLOUR").as_deref() == Ok("red") {
+        let centre = (height / 2) * width + width / 2;
+        let chroma = (height / 4) * frame.chroma_width() + width / 4;
+        let sample = (frame.y()[centre], frame.u()[chroma], frame.v()[chroma]);
+        assert_eq!(sample, (63, 102, 240), "luma and chroma at the centre");
+    }
+}
+
+/// A monitor shared through the portal delivers frames.
+#[test]
+#[ignore = "needs a desktop session with a ScreenCast portal"]
+fn captures_the_screen() {
+    check_frames(ScreenCapture::open(None).unwrap());
+}
+
+/// A PipeWire video source named by `QDP_TEST_PIPEWIRE_NODE` delivers frames.
+#[test]
+#[ignore = "needs a PipeWire daemon with a video source"]
+fn captures_a_pipewire_node() {
+    let node = std::env::var("QDP_TEST_PIPEWIRE_NODE")
+        .expect("QDP_TEST_PIPEWIRE_NODE names a video source")
+        .parse()
+        .unwrap();
+    check_frames(ScreenCapture::from_pipewire_node(node).unwrap());
+}

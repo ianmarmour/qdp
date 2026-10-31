@@ -20,6 +20,8 @@ Serve options:
   --identity DIR       Directory holding the host's key (default ./qdp-identity)
   --token TOKEN        Accept clients presenting TOKEN (repeatable)
   --user NAME          Accept NAME with the password in QDP_PASSWORD
+  --source KIND        auto, screen or test-pattern (default auto: the screen,
+                       or the test pattern if it cannot be captured)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
   --fps N              Frames per second (default 60)
   --encoder KIND       auto, hardware or software (default auto: the GPU's
@@ -83,6 +85,17 @@ pub enum Command {
     Help,
 }
 
+/// What the host streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceKind {
+    /// The screen if it can be captured, otherwise the test pattern.
+    Auto,
+    /// The screen.
+    Screen,
+    /// A moving test pattern.
+    TestPattern,
+}
+
 /// The options of `qdp serve`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeArgs {
@@ -94,6 +107,8 @@ pub struct ServeArgs {
     pub tokens: Vec<String>,
     /// The accepted user, whose password is in `QDP_PASSWORD`.
     pub user: Option<String>,
+    /// What to stream.
+    pub source: SourceKind,
     /// The size of the test pattern.
     pub size: (usize, usize),
     /// The frame rate.
@@ -255,6 +270,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         user: None,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         fps: DEFAULT_FPS,
+        source: SourceKind::Auto,
         encoder: CodecPreference::Auto,
         speed: DEFAULT_SPEED,
         quantizer: DEFAULT_QUANTIZER,
@@ -267,6 +283,18 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             "--user" => serve.user = Some(value("--user", &mut arguments)?),
             "--size" => serve.size = parse_size(&value("--size", &mut arguments)?)?,
             "--fps" => serve.fps = parse("--fps", &mut arguments)?,
+            "--source" => {
+                serve.source = match value("--source", &mut arguments)?.as_str() {
+                    "auto" => SourceKind::Auto,
+                    "screen" => SourceKind::Screen,
+                    "test-pattern" => SourceKind::TestPattern,
+                    other => {
+                        return Err(error(format!(
+                            "--source must be auto, screen or test-pattern, not {other}"
+                        )));
+                    }
+                }
+            }
             "--encoder" => {
                 serve.encoder = parse_preference("--encoder", &value("--encoder", &mut arguments)?)?
             }
@@ -361,6 +389,13 @@ mod tests {
         assert_eq!(serve.fps, 30);
         assert_eq!(serve.listen.port(), DEFAULT_PORT);
         assert_eq!(serve.encoder, CodecPreference::Auto);
+        assert_eq!(serve.source, SourceKind::Auto);
+        let Command::Serve(serve) = parse_line("serve --token abc --source test-pattern").unwrap()
+        else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.source, SourceKind::TestPattern);
+        assert!(parse_line("serve --token abc --source camera").is_err());
         let Command::Serve(serve) = parse_line("serve --token abc --encoder software").unwrap()
         else {
             panic!("expected serve");
