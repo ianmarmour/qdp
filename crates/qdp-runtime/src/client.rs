@@ -915,6 +915,13 @@ impl ActiveClient<'_> {
                         }
                     }
                     UserInput::Display(display) => self.display.display_changed(display),
+                    UserInput::Microphone(microphone) => {
+                        if let Some(request) = self.audio.set_microphone(microphone) {
+                            self.driver
+                                .session()
+                                .send(&ControlMessage::AudioRequest(request))?;
+                        }
+                    }
                     UserInput::FeatureResponse {
                         request_id,
                         status,

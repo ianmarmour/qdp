@@ -21,7 +21,7 @@ use qdp_codec::{
     AudioContent, AudioFormat, OPUS_MAX_CHANNELS, OPUS_SAMPLE_RATE, PCM_MAX_CHANNELS,
     open_audio_decoder, open_audio_encoder,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::RuntimeError;
 use crate::audio_receiver::AudioReceiver;
@@ -56,8 +56,19 @@ const CAPTURE_QUEUE: usize = 64;
 const CAPTURE_WAIT: Duration = Duration::from_millis(100);
 
 /// The loss the microphone's forward error correction is tuned for, in
-/// percent: the client has no loss reports for its own stream.
+/// percent, until the connection has measured its own.
 const CAPTURE_EXPECTED_LOSS: u8 = 10;
+
+/// How often a stream with forward error correction tunes it to the loss
+/// the connection observes (Section 7.5.1).
+const LOSS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The sample rate PCM streams may have besides [`SAMPLE_RATE`] (Section
+/// 7.3).
+const PCM_CD_RATE: u32 = 44_100;
+
+/// The percentage of a whole.
+const PERCENT: u64 = 100;
 
 /// The names of the audio threads, as debuggers and profilers show them.
 const SENDER_THREAD: &str = "qdp-audio-send";
@@ -196,14 +207,19 @@ impl AudioSender {
                 let (sink, captured) = mpsc::sync_channel(CAPTURE_QUEUE);
                 match input.start(CaptureSink(sink)) {
                     Ok(device) => {
+                        let channels = usize::from(format.channels);
                         let mut stream = SendLoop {
                             stream_id,
                             format,
                             limit,
+                            loss: (content == AudioContent::Speech)
+                                .then(|| LossMeter::new(&connection, Instant::now())),
                             connection,
                             clock,
                             active,
                             input_channels: usize::from(input.channels()),
+                            resampler: (format.sample_rate != SAMPLE_RATE)
+                                .then(|| Resampler::new(SAMPLE_RATE, format.sample_rate, channels)),
                             pending: Vec::new(),
                             sequence: 0,
                             position: 0,
@@ -283,6 +299,11 @@ struct SendLoop {
     active: SessionActive,
     /// The channels the device captures.
     input_channels: usize,
+    /// Converts the devices' rate to the stream's, if they differ.
+    resampler: Option<Resampler>,
+    /// Measures the connection's loss, for a stream whose encoder protects
+    /// packets against it.
+    loss: Option<LossMeter>,
     /// Captured samples not yet sent, remixed to the stream's channels.
     pending: Vec<f32>,
     /// The Sequence Number of the last packet.
@@ -304,18 +325,30 @@ impl SendLoop {
                 Err(mpsc::TryRecvError::Empty) => {}
                 _ => return,
             }
+            if let Some(percent) = self
+                .loss
+                .as_mut()
+                .and_then(|meter| meter.poll(&self.connection, Instant::now()))
+            {
+                encoder.set_expected_loss(percent);
+            }
             match captured.recv_timeout(CAPTURE_WAIT) {
                 Ok(chunk) => {
                     let channels = usize::from(self.format.channels);
-                    self.pending
-                        .extend(remix(&chunk, self.input_channels, channels));
+                    let remixed = remix(&chunk, self.input_channels, channels);
+                    match &mut self.resampler {
+                        Some(resampler) => self.pending.extend(resampler.process(&remixed)),
+                        None => self.pending.extend(remixed),
+                    }
                     while self.pending.len() >= self.format.frame_len() {
                         let frame: Vec<f32> =
                             self.pending.drain(..self.format.frame_len()).collect();
                         // The frame's first sample was captured before the
                         // frame and everything still waiting.
                         let queued = self.pending.len() / channels + self.format.frame_samples;
-                        let age = Duration::from_secs_f64(queued as f64 / f64::from(SAMPLE_RATE));
+                        let age = Duration::from_secs_f64(
+                            queued as f64 / f64::from(self.format.sample_rate),
+                        );
                         let captured_at =
                             Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
                         self.send(encoder, &frame, captured_at);
@@ -370,6 +403,106 @@ impl SendLoop {
             debug!(%error, "audio packet dropped");
         }
     }
+}
+
+/// Converts interleaved audio from one sample rate to another by linear
+/// interpolation, which suits 44.1 and 48 kHz: they differ by under a tenth.
+struct Resampler {
+    /// The channels.
+    channels: usize,
+    /// The input samples, per channel, for each output sample.
+    step: f64,
+    /// Where the next output sample falls, in input samples per channel from
+    /// the start of `held`.
+    phase: f64,
+    /// The input not yet passed, which keeps the last sample to interpolate
+    /// across chunks.
+    held: Vec<f32>,
+}
+
+impl Resampler {
+    /// Returns a resampler of `channels` channels from `from` hertz to `to`.
+    fn new(from: u32, to: u32, channels: usize) -> Self {
+        Self {
+            channels,
+            step: f64::from(from) / f64::from(to),
+            phase: 0.0,
+            held: Vec::new(),
+        }
+    }
+
+    /// Returns the output for the next chunk of input.
+    fn process(&mut self, input: &[f32]) -> Vec<f32> {
+        self.held.extend_from_slice(input);
+        let channels = self.channels.max(1);
+        let frames = self.held.len() / channels;
+        let mut output = Vec::new();
+        while self.phase + 1.0 < frames as f64 {
+            let index = self.phase as usize;
+            let fraction = (self.phase - index as f64) as f32;
+            for channel in 0..channels {
+                let current = self.held[index * channels + channel];
+                let following = self.held[(index + 1) * channels + channel];
+                output.push(current + (following - current) * fraction);
+            }
+            self.phase += self.step;
+        }
+        let consumed = (self.phase as usize).min(frames);
+        self.held.drain(..consumed * channels);
+        self.phase -= consumed as f64;
+        output
+    }
+}
+
+/// Measures the loss of the connection's packets, which the stream's
+/// encoder protects against (Section 7.5.1).
+struct LossMeter {
+    /// When the counts were last read.
+    measured_at: Instant,
+    /// The packets lost by then.
+    lost: u64,
+    /// The packets sent by then.
+    sent: u64,
+}
+
+impl LossMeter {
+    /// Starts measuring `connection` at `now`.
+    fn new(connection: &quinn::Connection, now: Instant) -> Self {
+        let path = connection.stats().path;
+        Self {
+            measured_at: now,
+            lost: path.lost_packets,
+            sent: path.sent_packets,
+        }
+    }
+
+    /// Returns the percentage of packets lost since the last measurement,
+    /// once one is due.
+    fn poll(&mut self, connection: &quinn::Connection, now: Instant) -> Option<u8> {
+        if now.saturating_duration_since(self.measured_at) < LOSS_INTERVAL {
+            return None;
+        }
+        let path = connection.stats().path;
+        let percent = loss_percent(
+            path.lost_packets.saturating_sub(self.lost),
+            path.sent_packets.saturating_sub(self.sent),
+        );
+        *self = Self {
+            measured_at: now,
+            lost: path.lost_packets,
+            sent: path.sent_packets,
+        };
+        Some(percent)
+    }
+}
+
+/// Returns `lost` of `sent` packets as a percentage, rounded up so that
+/// any loss is protected against.
+fn loss_percent(lost: u64, sent: u64) -> u8 {
+    if sent == 0 {
+        return 0;
+    }
+    u8::try_from((lost * PERCENT).div_ceil(sent).min(PERCENT)).unwrap_or(u8::MAX)
 }
 
 /// A stream the endpoint plays: its jitter buffer, and a thread that keeps
@@ -540,6 +673,15 @@ fn stream_config(
     }
 }
 
+/// Returns a stream that started, or `None`, with a warning, if it could
+/// not: the session goes on with fewer streams, as the host's answer to
+/// every request does (Section 7.3).
+fn started<T>(direction: AudioDirection, stream: Result<T, RuntimeError>) -> Option<T> {
+    stream
+        .inspect_err(|error| warn!(%error, ?direction, "audio stream not started"))
+        .ok()
+}
+
 /// Returns the format of a stream described in `AUDIO_CONFIG`, if this
 /// endpoint can handle it.
 fn stream_format(config: &AudioStreamConfig) -> Option<AudioFormat> {
@@ -547,13 +689,16 @@ fn stream_format(config: &AudioStreamConfig) -> Option<AudioFormat> {
     let channels = u16::try_from(config.channel_count.into_inner()).ok()?;
     let duration = u64::from(config.frame_duration.into_inner().min(u64::from(u32::MAX)) as u32);
     let frame_samples = usize::try_from(duration * u64::from(sample_rate) / 1_000_000).ok()?;
-    (sample_rate == SAMPLE_RATE && (1..=PCM_MAX_CHANNELS).contains(&channels) && frame_samples > 0)
-        .then_some(AudioFormat {
+    let rate_supported = sample_rate == SAMPLE_RATE
+        || (sample_rate == PCM_CD_RATE && config.codec != AudioCodec::OPUS);
+    (rate_supported && (1..=PCM_MAX_CHANNELS).contains(&channels) && frame_samples > 0).then_some(
+        AudioFormat {
             codec: config.codec,
             sample_rate,
             channels,
             frame_samples,
-        })
+        },
+    )
 }
 
 /// The audio devices of a host.
@@ -598,10 +743,14 @@ pub(crate) struct HostAudioStreams {
     devices: HostAudio,
     /// The playback stream being sent.
     playback: Option<AudioSender>,
+    /// The playback stream's format.
+    playback_format: Option<AudioFormat>,
     /// The client's microphone being played.
     capture: Option<AudioPlayer>,
     /// The Config ID of the last `AUDIO_CONFIG`.
     config_id: u64,
+    /// The client's latest `AUDIO_REQUEST`.
+    request: Option<AudioRequest>,
     /// Whether the session is active, so that packets may be sent.
     active: SessionActive,
 }
@@ -612,8 +761,10 @@ impl HostAudioStreams {
         Self {
             devices,
             playback: None,
+            playback_format: None,
             capture: None,
             config_id: 0,
+            request: None,
             active: SessionActive::default(),
         }
     }
@@ -637,6 +788,8 @@ impl HostAudioStreams {
         clock: SessionClock,
         stream_ids: &mut StreamIds,
     ) -> Result<AudioConfig, RuntimeError> {
+        self.request = Some(*request);
+        self.playback_format = None;
         if let Some(desktop) = self.playback.take().and_then(AudioSender::stop) {
             self.devices.desktop = Some(desktop);
         }
@@ -666,17 +819,22 @@ impl HostAudioStreams {
                 Some(format) => {
                     let stream_id = stream_ids.next();
                     let kind = (AudioContent::General, PacketLimit::Path);
-                    let sender = AudioSender::spawn(
-                        desktop,
-                        stream_id,
-                        format,
-                        kind,
-                        connection.clone(),
-                        clock,
-                        self.active.clone(),
-                    )?;
-                    self.playback = Some(sender);
-                    streams.push(stream_config(stream_id, AudioDirection::Playback, format));
+                    self.playback = started(
+                        AudioDirection::Playback,
+                        AudioSender::spawn(
+                            desktop,
+                            stream_id,
+                            format,
+                            kind,
+                            connection.clone(),
+                            clock,
+                            self.active.clone(),
+                        ),
+                    );
+                    if self.playback.is_some() {
+                        self.playback_format = Some(format);
+                        streams.push(stream_config(stream_id, AudioDirection::Playback, format));
+                    }
                 }
                 None => self.devices.desktop = Some(desktop),
             }
@@ -693,8 +851,13 @@ impl HostAudioStreams {
             match format {
                 Some(format) => {
                     let stream_id = stream_ids.next();
-                    self.capture = Some(AudioPlayer::spawn(microphone, stream_id, format)?);
-                    streams.push(stream_config(stream_id, AudioDirection::Capture, format));
+                    self.capture = started(
+                        AudioDirection::Capture,
+                        AudioPlayer::spawn(microphone, stream_id, format),
+                    );
+                    if self.capture.is_some() {
+                        streams.push(stream_config(stream_id, AudioDirection::Capture, format));
+                    }
                 }
                 None => self.devices.microphone = Some(microphone),
             }
@@ -704,6 +867,36 @@ impl HostAudioStreams {
             config_id: AudioConfigId(VarInt::new(self.config_id).unwrap_or(VarInt::MAX)),
             streams,
         })
+    }
+
+    /// Returns a new `AUDIO_CONFIG` if the path's maximum datagram size
+    /// shrank so far that the playback stream's PCM packets no longer fit:
+    /// its streams are configured again for the client's latest request
+    /// (Section 7.4). Opus packets always fit, since each is limited to the
+    /// space the path leaves.
+    pub(crate) fn check_path(
+        &mut self,
+        negotiated: &Negotiated,
+        connection: &quinn::Connection,
+        clock: SessionClock,
+        stream_ids: &mut StreamIds,
+    ) -> Result<Option<AudioConfig>, RuntimeError> {
+        let (Some(format), Some(request)) = (self.playback_format, self.request) else {
+            return Ok(None);
+        };
+        let Some(packet) = format.pcm_packet_bytes() else {
+            return Ok(None);
+        };
+        let max_payload = connection
+            .max_datagram_size()
+            .unwrap_or(CAPTURE_DATAGRAM_LIMIT)
+            .saturating_sub(PACKET_HEADER_BOUND);
+        if packet <= max_payload {
+            return Ok(None);
+        }
+        info!(max_payload, "audio packets no longer fit the path");
+        self.configure(&request, negotiated, connection, clock, stream_ids)
+            .map(Some)
     }
 
     /// Takes a packet of the client's microphone.
@@ -723,9 +916,22 @@ impl HostAudioStreams {
 pub struct ClientAudio {
     /// The speakers the host's audio plays on.
     pub speakers: Option<Box<dyn AudioOutput>>,
-    /// The microphone the host receives, present only when the user turned it
-    /// on for the session (Section 7.7).
+    /// The microphone, which the host receives only while it is on.
     pub microphone: Option<Box<dyn AudioInput>>,
+    /// Whether the user turned the microphone on for the session, as the
+    /// session starts (Section 7.7).
+    pub microphone_state: Microphone,
+}
+
+/// Whether the user turned the client's microphone on for the session
+/// (Section 7.7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Microphone {
+    /// The microphone is off: nothing is captured.
+    #[default]
+    Off,
+    /// The microphone is on: the host hears it.
+    On,
 }
 
 impl std::fmt::Debug for ClientAudio {
@@ -740,6 +946,7 @@ impl std::fmt::Debug for ClientAudio {
                 "microphone",
                 &self.microphone.as_ref().map(|input| input.description()),
             )
+            .field("microphone_state", &self.microphone_state)
             .finish()
     }
 }
@@ -753,15 +960,34 @@ impl ClientAudio {
         )
     }
 
-    /// Returns the client's `AUDIO_REQUEST`, or `None` if it has no audio
-    /// devices.
+    /// Returns the channels of the speakers and the microphone, 0 for a
+    /// device the client lacks.
+    fn channels(&self) -> (u16, u16) {
+        (
+            self.speakers.as_ref().map_or(0, |output| output.channels()),
+            self.microphone.as_ref().map_or(0, |input| input.channels()),
+        )
+    }
+
+    /// Returns the client's first `AUDIO_REQUEST`, or `None` if it has no
+    /// audio devices.
     pub(crate) fn request(&self) -> Option<AudioRequest> {
-        let playback = self.speakers.as_ref().map_or(0, |output| output.channels());
-        let capture = self.microphone.as_ref().map_or(0, |input| input.channels());
-        (playback > 0 || capture > 0).then(|| AudioRequest {
-            playback_channels: VarInt::from(u32::from(playback)),
-            capture_channels: VarInt::from(u32::from(capture)),
-        })
+        let (playback, capture) = self.channels();
+        (playback > 0 || capture > 0)
+            .then(|| audio_request(playback, capture, self.microphone_state))
+    }
+}
+
+/// Returns an `AUDIO_REQUEST` for speakers and a microphone of these
+/// channels: the microphone's only while it is on (Section 7.2).
+fn audio_request(playback: u16, capture: u16, microphone: Microphone) -> AudioRequest {
+    let capture = match microphone {
+        Microphone::On => capture,
+        Microphone::Off => 0,
+    };
+    AudioRequest {
+        playback_channels: VarInt::from(u32::from(playback)),
+        capture_channels: VarInt::from(u32::from(capture)),
     }
 }
 
@@ -769,6 +995,9 @@ impl ClientAudio {
 pub(crate) struct ClientAudioStreams {
     /// The devices not in use by a stream.
     devices: ClientAudio,
+    /// The channels of the speakers and the microphone, 0 for a device the
+    /// client lacks.
+    channels: (u16, u16),
     /// The host's audio being played.
     playback: Option<AudioPlayer>,
     /// The microphone being sent.
@@ -779,10 +1008,32 @@ impl ClientAudioStreams {
     /// Returns the streams of a client with `devices`, none defined yet.
     pub(crate) fn new(devices: ClientAudio) -> Self {
         Self {
+            channels: devices.channels(),
             devices,
             playback: None,
             capture: None,
         }
+    }
+
+    /// Turns the microphone on or off, returning the `AUDIO_REQUEST` to send
+    /// if that changed anything (Section 7.2). Turned off, it stops sending
+    /// at once, before the host's new `AUDIO_CONFIG` arrives (Section 7.7).
+    pub(crate) fn set_microphone(&mut self, microphone: Microphone) -> Option<AudioRequest> {
+        if microphone == self.devices.microphone_state || self.channels.1 == 0 {
+            return None;
+        }
+        self.devices.microphone_state = microphone;
+        if microphone == Microphone::Off {
+            if let Some(device) = self.capture.take().and_then(AudioSender::stop) {
+                self.devices.microphone = Some(device);
+            }
+        }
+        info!(?microphone, "microphone");
+        Some(audio_request(
+            self.channels.0,
+            self.channels.1,
+            self.devices.microphone_state,
+        ))
     }
 
     /// Applies an `AUDIO_CONFIG`: keeps the streams it still defines, stops the
@@ -828,24 +1079,33 @@ impl ClientAudioStreams {
             match stream.direction {
                 AudioDirection::Playback if self.playback.is_none() => {
                     if let Some(speakers) = self.devices.speakers.take() {
-                        self.playback =
-                            Some(AudioPlayer::spawn(speakers, stream.stream_id, format)?);
+                        self.playback = started(
+                            AudioDirection::Playback,
+                            AudioPlayer::spawn(speakers, stream.stream_id, format),
+                        );
                     }
                 }
-                AudioDirection::Capture if self.capture.is_none() => {
-                    // A capture stream the client did not ask for is ignored,
-                    // since only an enabled microphone is among the devices.
+                // A capture stream the client did not ask for, as one
+                // defined before the user turned the microphone off, is
+                // ignored (Section 7.7).
+                AudioDirection::Capture
+                    if self.capture.is_none()
+                        && self.devices.microphone_state == Microphone::On =>
+                {
                     if let Some(microphone) = self.devices.microphone.take() {
                         let kind = (AudioContent::Speech, PacketLimit::Smallest);
-                        self.capture = Some(AudioSender::spawn(
-                            microphone,
-                            stream.stream_id,
-                            format,
-                            kind,
-                            connection.clone(),
-                            clock,
-                            SessionActive::active(),
-                        )?);
+                        self.capture = started(
+                            AudioDirection::Capture,
+                            AudioSender::spawn(
+                                microphone,
+                                stream.stream_id,
+                                format,
+                                kind,
+                                connection.clone(),
+                                clock,
+                                SessionActive::active(),
+                            ),
+                        );
                     }
                 }
                 _ => {}
@@ -916,11 +1176,89 @@ mod tests {
         );
         assert_eq!(config.frame_duration.into_inner(), 5000);
         assert_eq!(stream_format(&config), Some(format));
+        // PCM may also run at 44.1 kHz, Opus may not.
+        let cd = AudioStreamConfig {
+            sample_rate: VarInt::from_u32(PCM_CD_RATE),
+            ..config.clone()
+        };
+        let cd_format = stream_format(&cd).unwrap();
+        assert_eq!(
+            (cd_format.sample_rate, cd_format.frame_samples),
+            (PCM_CD_RATE, 220)
+        );
+        let opus = AudioStreamConfig {
+            codec: AudioCodec::OPUS,
+            ..cd
+        };
+        assert_eq!(stream_format(&opus), None);
         let foreign = AudioStreamConfig {
-            sample_rate: VarInt::from_u32(44_100),
+            sample_rate: VarInt::from_u32(32_000),
             ..config
         };
         assert_eq!(stream_format(&foreign), None);
+    }
+
+    /// Resampling keeps a steady signal steady, makes as many samples as
+    /// the rates ask across chunks, and interpolates between samples.
+    #[test]
+    fn resamples() {
+        let mut resampler = Resampler::new(SAMPLE_RATE, PCM_CD_RATE, 2);
+        let mut output = Vec::new();
+        for _ in 0..10 {
+            output.extend(resampler.process(&[0.5; 2 * 480]));
+        }
+        let frames = output.len() / 2;
+        assert!((4405..=4410).contains(&frames), "{frames} frames");
+        assert!(output.iter().all(|&sample| (sample - 0.5).abs() < 1e-6));
+        let mut ramp = Resampler::new(2, 4, 1);
+        assert_eq!(ramp.process(&[0.0, 1.0, 2.0]), [0.0, 0.5, 1.0, 1.5]);
+    }
+
+    /// A microphone with no sound, for the tests.
+    struct SilentMicrophone;
+
+    impl AudioInput for SilentMicrophone {
+        fn channels(&self) -> u16 {
+            1
+        }
+
+        fn start(&mut self, _capture: CaptureSink) -> Result<ActiveDevice, String> {
+            Ok(ActiveDevice(Box::new(())))
+        }
+
+        fn description(&self) -> &str {
+            "silent microphone"
+        }
+    }
+
+    /// Turning the microphone on or off asks for capture channels only
+    /// while it is on, and only when something changed.
+    #[test]
+    fn switches_the_microphone() {
+        let devices = ClientAudio {
+            speakers: None,
+            microphone: Some(Box::new(SilentMicrophone)),
+            microphone_state: Microphone::Off,
+        };
+        assert_eq!(devices.request().unwrap().capture_channels, VarInt::ZERO);
+        let mut streams = ClientAudioStreams::new(devices);
+        assert_eq!(streams.set_microphone(Microphone::Off), None);
+        let on = streams.set_microphone(Microphone::On).unwrap();
+        assert_eq!(on.capture_channels, VarInt::from_u32(1));
+        let off = streams.set_microphone(Microphone::Off).unwrap();
+        assert_eq!(off.capture_channels, VarInt::ZERO);
+        let mut without = ClientAudioStreams::new(ClientAudio::default());
+        assert_eq!(without.set_microphone(Microphone::On), None);
+    }
+
+    /// Loss percentages round up, and no traffic means no loss.
+    #[test]
+    fn measures_loss() {
+        assert_eq!(loss_percent(0, 0), 0);
+        assert_eq!(loss_percent(0, 500), 0);
+        assert_eq!(loss_percent(1, 500), 1);
+        assert_eq!(loss_percent(25, 100), 25);
+        assert_eq!(loss_percent(9, 4), 100);
     }
 
     /// Capabilities name each codec in the directions the devices allow.

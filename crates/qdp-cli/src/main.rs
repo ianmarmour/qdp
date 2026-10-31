@@ -34,8 +34,6 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use qdp_desktop::Microphone;
-
 use crate::args::{
     Audio, Command, ConnectArgs, Presentation, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
 };
@@ -292,7 +290,7 @@ fn client_audio(args: &ConnectArgs) -> ClientAudio {
         Audio::On => devices,
         Audio::Off => ClientAudio {
             speakers: None,
-            microphone: devices.microphone,
+            ..devices
         },
     }
 }
@@ -388,11 +386,8 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
     let touchpad = args.touchpad;
     let slot = FrameSlot::default();
     let close = Arc::new(CloseSignal::default());
-    // The title shows while the microphone is on (Section 7.7).
-    let title = match args.microphone {
-        Microphone::On => format!("QDP: {} (microphone on)", args.address),
-        Microphone::Off => format!("QDP: {}", args.address),
-    };
+    let title = format!("QDP: {}", args.address);
+    let microphone = args.microphone;
     let proxy = event_loop.create_proxy();
     let mut sink = WindowSink::new(sink, slot.clone(), proxy.clone(), Arc::clone(&close));
     let (display_sender, display) = tokio::sync::oneshot::channel();
@@ -424,6 +419,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
 
     let choices = WindowChoices {
         title,
+        microphone,
         passthrough: &passthrough,
         touchpad,
     };

@@ -56,8 +56,8 @@ use thiserror::Error;
 
 pub use admission::{Admission, AdmissionLimits, AdmissionTicket, Refusal};
 pub use audio::{
-    ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, HostAudio, Playout,
-    SAMPLE_RATE,
+    ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, HostAudio, Microphone,
+    Playout, SAMPLE_RATE,
 };
 pub use auth::{ClientCredentials, HostAuthenticator};
 pub use client::{ClientOptions, ClientSummary, DisplaySize, run};

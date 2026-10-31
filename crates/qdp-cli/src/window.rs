@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use qdp::message::{CursorImage, FrameNumber, PointerKind, PointerMode, StreamId};
 use qdp_codec::Yuv420Frame;
-use qdp_desktop::{DeviceSelector, PassthroughCapture, TouchpadCapture};
+use qdp_desktop::{DeviceSelector, Microphone, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
     CursorWarp, DisplaySize, DisplayTiming, FrameInfo, FrameSink, InputHandle, PenInput,
     PointerButton, Presentation, PresentationTiming, SinkControl, TouchPhase, UserInput, WarpKind,
@@ -59,6 +59,19 @@ const DEFAULT_IMAGE_SCALE: f64 = 100.0;
 /// The key that, with Ctrl, Alt and Shift held, releases the pointer from
 /// capture (Section 8.9). It is never sent to the host.
 const RELEASE_KEY: KeyCode = KeyCode::KeyZ;
+
+/// The key that, with Ctrl, Alt and Shift held, turns the microphone on or
+/// off (Section 7.7). It is never sent to the host.
+const MICROPHONE_KEY: KeyCode = KeyCode::KeyM;
+
+/// What the window does itself for a key held with Ctrl, Alt and Shift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LocalAction {
+    /// Releases the pointer and the keys held.
+    Release,
+    /// Turns the microphone on or off.
+    ToggleMicrophone,
+}
 
 /// What the session thread tells the window.
 #[derive(Debug, Clone)]
@@ -284,6 +297,8 @@ struct Display {
 
 /// The application the window's event loop runs.
 pub struct WindowApp {
+    /// Whether the microphone is on.
+    microphone: Microphone,
     /// The window's title.
     title: String,
     /// The window, once the event loop has started.
@@ -343,8 +358,11 @@ pub struct WindowApp {
 /// What the user chose for the window's session.
 #[derive(Debug, Clone)]
 pub struct WindowChoices<'a> {
-    /// The window's title.
+    /// The window's title, to which the window adds whether the microphone
+    /// is on.
     pub title: String,
+    /// Whether the microphone is on as the session starts.
+    pub microphone: Microphone,
     /// The devices to pass through.
     pub passthrough: &'a [DeviceSelector],
     /// How the touchpad is sent.
@@ -363,10 +381,12 @@ impl WindowApp {
     ) -> Self {
         let WindowChoices {
             title,
+            microphone,
             passthrough,
             touchpad,
         } = choices;
         Self {
+            microphone,
             display_sender: Some(display_sender),
             title,
             display: None,
@@ -445,13 +465,39 @@ impl WindowApp {
         }
     }
 
-    /// Returns whether a key event is the local release action, which
-    /// releases the pointer and the keys held and is not sent to the host.
-    fn is_release_action(&self, event: &KeyEvent) -> bool {
-        event.physical_key == PhysicalKey::Code(RELEASE_KEY)
-            && self.modifiers.control_key()
-            && self.modifiers.alt_key()
-            && self.modifiers.shift_key()
+    /// Returns the window's own action for a key event, which is not sent
+    /// to the host, if it is one.
+    fn local_action(&self, event: &KeyEvent) -> Option<LocalAction> {
+        if !(self.modifiers.control_key() && self.modifiers.alt_key() && self.modifiers.shift_key())
+        {
+            return None;
+        }
+        match event.physical_key {
+            PhysicalKey::Code(RELEASE_KEY) => Some(LocalAction::Release),
+            PhysicalKey::Code(MICROPHONE_KEY) => Some(LocalAction::ToggleMicrophone),
+            _ => None,
+        }
+    }
+
+    /// Returns the window's title, which shows while the microphone is on
+    /// (Section 7.7).
+    fn window_title(&self) -> String {
+        match self.microphone {
+            Microphone::On => format!("{} (microphone on)", self.title),
+            Microphone::Off => self.title.clone(),
+        }
+    }
+
+    /// Turns the microphone on or off.
+    fn toggle_microphone(&mut self) {
+        self.microphone = match self.microphone {
+            Microphone::On => Microphone::Off,
+            Microphone::Off => Microphone::On,
+        };
+        self.input.send(UserInput::Microphone(self.microphone));
+        if let Some(display) = &self.display {
+            display.window.set_title(&self.window_title());
+        }
     }
 
     /// Returns where the picture sits in the window and the picture's size,
@@ -721,7 +767,7 @@ impl WindowApp {
     /// Opens the window and its drawing surface.
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<Display, String> {
         let attributes = Window::default_attributes()
-            .with_title(self.title.clone())
+            .with_title(self.window_title())
             .with_inner_size(INITIAL_SIZE);
         let window = event_loop
             .create_window(attributes)
@@ -905,10 +951,17 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 self.display_changed();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
-            WindowEvent::KeyboardInput { event, .. } if self.is_release_action(&event) => {
-                if event.state == ElementState::Pressed {
-                    self.release_pointer();
-                    self.input.send(UserInput::ReleaseAll);
+            WindowEvent::KeyboardInput { event, .. } if self.local_action(&event).is_some() => {
+                if event.state != ElementState::Pressed || event.repeat {
+                    return;
+                }
+                match self.local_action(&event) {
+                    Some(LocalAction::Release) => {
+                        self.release_pointer();
+                        self.input.send(UserInput::ReleaseAll);
+                    }
+                    Some(LocalAction::ToggleMicrophone) => self.toggle_microphone(),
+                    None => {}
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.key(&event),

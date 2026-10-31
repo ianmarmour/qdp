@@ -16,6 +16,7 @@ use qdp::message::{
 use qdp::wire::VarInt;
 use tokio::sync::Notify;
 
+use crate::audio::Microphone;
 use crate::client::DisplaySize;
 use crate::client_passthrough::PassthroughDevices;
 use crate::client_touch::Touchscreen;
@@ -229,6 +230,8 @@ pub enum UserInput {
     /// The display the session is shown on changed size, refresh rate or
     /// scale, as when the user resizes the window (Section 6.2).
     Display(DisplaySize),
+    /// The user turned the microphone on or off (Section 7.7).
+    Microphone(Microphone),
 }
 
 /// A gamepad's rumble and LED, from the host's applications (Section 8.4.7).
@@ -865,7 +868,8 @@ impl ClientDevices {
             | UserInput::PassthroughConnected { .. }
             | UserInput::PassthroughDisconnected { .. }
             | UserInput::FeatureResponse { .. }
-            | UserInput::Display(_) => Vec::new(),
+            | UserInput::Display(_)
+            | UserInput::Microphone(_) => Vec::new(),
         }
     }
 

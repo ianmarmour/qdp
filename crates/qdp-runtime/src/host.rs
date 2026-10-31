@@ -604,6 +604,7 @@ impl ActiveHost {
                 let outputs = link.service(now);
                 self.apply_clipboard(outputs)?;
             }
+            self.check_audio_path()?;
             if let Some(ack) = self.input.poll_ack(now) {
                 self.send(ack.to_bytes())?;
             }
@@ -873,6 +874,23 @@ impl ActiveHost {
         })?;
         self.pending_since = Some(now);
         self.frames_requested += 1;
+        Ok(())
+    }
+
+    /// Configures the audio streams again if the path no longer fits their
+    /// packets (Section 7.4).
+    fn check_audio_path(&mut self) -> Result<(), RuntimeError> {
+        let quic = self.driver.connection().quic().clone();
+        let session = self.driver.session();
+        let Some(negotiated) = session.negotiated() else {
+            return Ok(());
+        };
+        if let Some(config) =
+            self.audio
+                .check_path(negotiated, &quic, self.clock, &mut self.stream_ids)?
+        {
+            session.send(&ControlMessage::AudioConfig(config))?;
+        }
         Ok(())
     }
 
