@@ -1081,6 +1081,7 @@ impl ActiveHost {
             output.frame.temporal_unit.len(),
             output.frame.is_key_frame,
             now.saturating_duration_since(output.captured_at),
+            output.scale_time,
         );
         self.rate.frame_sent(
             output.frame.temporal_unit.len(),

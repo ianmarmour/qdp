@@ -631,17 +631,21 @@ impl VaapiEncoder {
             let start = offset(0) + row * pitch(0);
             data[start..start + width].copy_from_slice(source);
         }
+        // Each row is interleaved in memory first and then copied whole,
+        // since the mapped buffer may be uncached memory that is slow to
+        // write a byte at a time.
+        let mut interleaved = vec![0_u8; 2 * chroma_width];
         let chroma_rows = frame
             .u()
             .chunks_exact(chroma_width)
             .zip(frame.v().chunks_exact(chroma_width));
         for (row, (u, v)) in chroma_rows.enumerate() {
-            let start = offset(1) + row * pitch(1);
-            let destination = &mut data[start..start + 2 * chroma_width];
-            for ((pair, &u), &v) in destination.chunks_exact_mut(2).zip(u).zip(v) {
+            for ((pair, &u), &v) in interleaved.chunks_exact_mut(2).zip(u).zip(v) {
                 pair[0] = u;
                 pair[1] = v;
             }
+            let start = offset(1) + row * pitch(1);
+            data[start..start + 2 * chroma_width].copy_from_slice(&interleaved);
         }
         // SAFETY: the buffer was mapped above and `data` is no longer used.
         let status = unsafe { (self.display.va.unmap_buffer)(self.display.handle, image.buf) };

@@ -57,6 +57,9 @@ pub(crate) struct SendStats {
     encode_total: Duration,
     /// The longest time from capture to encoded frame.
     encode_max: Duration,
+    /// The summed time spent capturing and scaling frames, a part of the
+    /// time to encode them.
+    scale_total: Duration,
     /// The path's statistics when the interval started.
     path_at_start: PathStats,
 }
@@ -73,17 +76,26 @@ impl SendStats {
             retransmissions: 0,
             encode_total: Duration::ZERO,
             encode_max: Duration::ZERO,
+            scale_total: Duration::ZERO,
             path_at_start: path,
         }
     }
 
-    /// Counts a frame of `bytes` that took `encode_time` to capture and encode.
-    pub(crate) fn frame_sent(&mut self, bytes: usize, is_key_frame: bool, encode_time: Duration) {
+    /// Counts a frame of `bytes` that took `encode_time` to capture and
+    /// encode, `scale_time` of it to capture and scale.
+    pub(crate) fn frame_sent(
+        &mut self,
+        bytes: usize,
+        is_key_frame: bool,
+        encode_time: Duration,
+        scale_time: Duration,
+    ) {
         self.frames += 1;
         self.key_frames += u64::from(is_key_frame);
         self.bytes += bytes as u64;
         self.encode_total += encode_time;
         self.encode_max = self.encode_max.max(encode_time);
+        self.scale_total += scale_time;
     }
 
     /// Counts a frame skipped because the network was behind.
@@ -118,10 +130,9 @@ impl SendStats {
             return;
         }
         let seconds = elapsed.as_secs_f64();
-        let encode_average = self
-            .encode_total
-            .checked_div(u32::try_from(self.frames).unwrap_or(u32::MAX))
-            .unwrap_or_default();
+        let frames = u32::try_from(self.frames).unwrap_or(u32::MAX);
+        let encode_average = self.encode_total.checked_div(frames).unwrap_or_default();
+        let scale_average = self.scale_total.checked_div(frames).unwrap_or_default();
         info!(
             fps = format!("{:.1}", self.frames as f64 / seconds),
             mbps = format!(
@@ -134,6 +145,7 @@ impl SendStats {
             retransmissions = self.retransmissions,
             encode_ms = milliseconds(encode_average),
             encode_max_ms = milliseconds(self.encode_max),
+            scale_ms = milliseconds(scale_average),
             rtt_ms = milliseconds(path.rtt),
             cwnd_kb = format!("{:.0}", path.congestion_window as f64 / BYTES_PER_KILOBYTE),
             queued_kb = format!("{:.1}", queued_bytes as f64 / BYTES_PER_KILOBYTE),
@@ -185,13 +197,24 @@ mod tests {
     fn counts_and_resets() {
         let start = Instant::now();
         let mut stats = SendStats::new(start, path(10_000));
-        stats.frame_sent(1000, true, Duration::from_millis(4));
-        stats.frame_sent(500, false, Duration::from_millis(2));
+        stats.frame_sent(
+            1000,
+            true,
+            Duration::from_millis(4),
+            Duration::from_millis(1),
+        );
+        stats.frame_sent(
+            500,
+            false,
+            Duration::from_millis(2),
+            Duration::from_millis(1),
+        );
         stats.frame_skipped();
         stats.retransmitted();
         assert_eq!((stats.frames, stats.key_frames, stats.skipped), (2, 1, 1));
         assert_eq!(stats.bytes, 1500);
         assert_eq!(stats.encode_max, Duration::from_millis(4));
+        assert_eq!(stats.scale_total, Duration::from_millis(2));
         stats.log_if_due(
             start + Duration::from_millis(500),
             path(10_000),

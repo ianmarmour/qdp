@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use qdp::message::{BlockGrid, BlockSet, StreamId};
 use qdp_codec::{
@@ -51,6 +51,9 @@ pub(crate) struct EncodedOutput {
     pub(crate) blocks: BlockSet,
     /// When the source frame was captured.
     pub(crate) captured_at: Instant,
+    /// How long capturing the frame and scaling it to the stream's size
+    /// took, before it was encoded.
+    pub(crate) scale_time: Duration,
     /// The size of the captured frame, before it was scaled.
     pub(crate) capture_size: (usize, usize),
     /// The pointer when the frame was captured, if the source reports it
@@ -187,14 +190,15 @@ fn run(
             job,
             &mut last_capture,
         )
-        .map(|(frame, capture_size, cursor, encoded)| {
+        .map(|captured| {
             let input_index = next_input_index;
             next_input_index += 1;
             let changed = previous
                 .as_ref()
-                .map(|previous| changed_blocks(previous, &frame, grid));
-            previous = Some(frame);
-            encoded
+                .map(|previous| changed_blocks(previous, &captured.frame, grid));
+            previous = Some(captured.frame);
+            captured
+                .encoded
                 .into_iter()
                 .map(|frame| {
                     // The encoder returns each frame immediately; if it ever
@@ -213,8 +217,9 @@ fn run(
                         frame,
                         blocks,
                         captured_at,
-                        capture_size,
-                        cursor: cursor.clone(),
+                        scale_time: captured.scale_time,
+                        capture_size: captured.capture_size,
+                        cursor: captured.cursor.clone(),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -232,15 +237,19 @@ fn run(
     }
 }
 
-/// The output of [`encode_one`]: the frame as encoded, the size it was
-/// captured at, the pointer if the source reports it, and the encoded
-/// frames.
-type Encoded = (
-    Arc<Yuv420Frame>,
-    (usize, usize),
-    Option<CursorState>,
-    Vec<EncodedFrame>,
-);
+/// The output of [`encode_one`].
+struct Encoded {
+    /// The frame as encoded, after scaling.
+    frame: Arc<Yuv420Frame>,
+    /// The size it was captured at.
+    capture_size: (usize, usize),
+    /// The pointer, if the source reports it.
+    cursor: Option<CursorState>,
+    /// How long capturing and scaling took.
+    scale_time: Duration,
+    /// The encoded frames.
+    encoded: Vec<EncodedFrame>,
+}
 
 /// The last frame captured, and the frame it was scaled to for encoding.
 type LastCapture = Option<(Arc<Yuv420Frame>, Arc<Yuv420Frame>)>;
@@ -270,6 +279,7 @@ fn encode_one(
         };
     }
     opened.encoder.set_quantizer(job.quantizer);
+    let capture_started_at = Instant::now();
     let captured = source.capture()?;
     let capture_size = (captured.width(), captured.height());
     let size = (job.settings.width, job.settings.height);
@@ -291,8 +301,15 @@ fn encode_one(
         }
     };
     let cursor = source.cursor();
+    let scale_time = capture_started_at.elapsed();
     let encoded = opened.encoder.encode(&frame, job.request)?;
-    Ok((frame, capture_size, cursor, encoded))
+    Ok(Encoded {
+        frame,
+        capture_size,
+        cursor,
+        scale_time,
+        encoded,
+    })
 }
 
 #[cfg(test)]
