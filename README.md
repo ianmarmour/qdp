@@ -130,10 +130,14 @@ clients a pen's pressure, tilt, rotation, eraser and barrel button reach every
 host as a pen; on other clients a pen moves the pointer. The client also
 sends the gamepads connected to it while its window has focus, and plays the
 rumble the host's games set on them. A Linux host presents each as a virtual Xbox 360
-controller; hosts on other systems decline them. A client can also pass a HID
-device through as it is, which a Linux host recreates through uhid for its
-games; by default the host accepts only game controllers, and `qdp serve
---passthrough all` or `--passthrough off` accepts every device or none. On
+controller; hosts on other systems decline them. A Linux client can also pass
+a HID device through as it is, with `qdp connect --passthrough
+VENDOR:PRODUCT` (the IDs `lsusb` shows, such as `054c:09cc`), which needs
+read and write access to its `/dev/hidraw*` node, as the udev rules for game
+controllers grant. A Linux host recreates the device through uhid for its
+games, rumble and lights included; by default the host accepts only game
+controllers, and `qdp serve --passthrough all` or `--passthrough off`
+accepts every device or none. On
 Windows the host sends input with
 `SendInput`; Windows keeps it from reaching programs run as administrator unless
 the host runs as administrator too, and from the sign-in screen and elevation

@@ -10,6 +10,7 @@
 #[cfg(feature = "audio")]
 mod audio;
 mod gamepad;
+mod hidraw;
 mod keycodes;
 mod pen;
 #[cfg(feature = "screen-capture")]
@@ -23,3 +24,5 @@ pub use audio::{PipeWireInput, PipeWireOutput};
 #[cfg(feature = "screen-capture")]
 pub use screencast::ScreenCapture;
 pub use uinput::UinputInjector;
+
+pub(crate) use hidraw::start as start_passthrough;

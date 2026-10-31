@@ -334,6 +334,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
 
     let event_loop = window::event_loop()?;
     let (input, input_queue) = qdp_runtime::input_channel();
+    let passthrough = args.passthrough.clone();
     let slot = FrameSlot::default();
     let close = Arc::new(CloseSignal::default());
     // The title shows while the microphone is on (Section 7.7).
@@ -367,6 +368,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
         Arc::clone(&close),
         input,
         event_loop.create_proxy(),
+        &passthrough,
     );
     let window_result = event_loop
         .run_app(&mut app)
