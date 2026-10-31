@@ -887,6 +887,7 @@ impl ActiveHost {
         let switched = mode != self.pointer_mode;
         self.pointer_mode = mode;
         self.confinement = confinement;
+        self.cursor.set_pointer_mode(mode);
         info!(?mode, ?confinement, "pointer mode");
         let session = self.driver.session();
         session.send(&ControlMessage::PointerMode(PointerMode {

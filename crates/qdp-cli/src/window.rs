@@ -460,6 +460,10 @@ impl WindowApp {
         }
         display.window.set_cursor_visible(false);
         self.captured = true;
+        // Moving the pointer would release it: on macOS the window library
+        // reconnects the pointer to the mouse whenever it moves it.
+        self.pending_warp = None;
+        self.follow = None;
     }
 
     /// Releases the pointer from capture, showing the host's cursor again.
@@ -599,14 +603,26 @@ impl WindowApp {
                 display
                     .window
                     .set_cursor(event_loop.create_custom_cursor(source));
-                display.window.set_cursor_visible(self.follow.is_none());
+                display
+                    .window
+                    .set_cursor_visible(self.follow.is_none() && !self.captured);
             }
             Err(error) => warn!(%error, "the host's cursor cannot be shown"),
         }
     }
 
-    /// Follows a move of the host's pointer that the user did not make.
+    /// Follows a move of the host's pointer that the user did not make, in
+    /// absolute mode: while the pointer is captured it stays where it is,
+    /// and moving it would release it.
     fn warp(&mut self, warp: CursorWarp) {
+        if self.captured {
+            debug!(
+                x = warp.position.0,
+                y = warp.position.1,
+                "a warp while the pointer is captured is ignored"
+            );
+            return;
+        }
         match warp.kind {
             WarpKind::Follow => {
                 debug!(
@@ -679,7 +695,9 @@ impl WindowApp {
     fn stop_following(&mut self) {
         if self.follow.take().is_some() {
             if let Some(display) = &self.display {
-                display.window.set_cursor_visible(self.cursor.is_some());
+                display
+                    .window
+                    .set_cursor_visible(self.cursor.is_some() && !self.captured);
             }
             self.request_redraw();
         }
