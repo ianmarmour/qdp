@@ -114,7 +114,10 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Pin { identity, role } => print_pin(&identity, role),
-        Command::Serve(args) => run_async(serve(args)),
+        Command::Serve(args) => {
+            adopt_session_display();
+            run_async(serve(args))
+        }
         Command::Connect(args) => connect(args),
         Command::Decoder => qdp_codec::serve_decoder_on_stdio()
             .map_err(|error| format!("the decoder process failed: {error}")),
@@ -163,6 +166,24 @@ fn log_filter(setting: Option<&str>) -> Targets {
         filter.with_target(ZBUS_TARGET, default.min(LevelFilter::ERROR))
     }
 }
+
+/// Names the session's Wayland display for the host when its environment
+/// names none, as when it is started over SSH, so that the clipboard reaches
+/// the compositor rather than an X server that is not there.
+#[cfg(target_os = "linux")]
+fn adopt_session_display() {
+    // SAFETY: called before the runtime starts, while this is the only
+    // thread.
+    #[allow(unsafe_code)]
+    let adopted = unsafe { qdp_desktop::adopt_wayland_display() };
+    if let Some(name) = adopted {
+        info!(socket = name, "using the session's Wayland display");
+    }
+}
+
+/// Does nothing: only Linux sessions are found through the environment.
+#[cfg(not(target_os = "linux"))]
+fn adopt_session_display() {}
 
 /// Runs `future` on a multi-threaded runtime.
 fn run_async<T>(future: impl Future<Output = Result<T, String>>) -> Result<T, String> {

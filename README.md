@@ -125,7 +125,9 @@ shared. `--clipboard send` or `--clipboard receive` limits sharing to one
 direction, and `--clipboard off` turns it off, on either side. On Linux this
 uses the Wayland compositor's data control protocol where it has one (KDE and
 wlroots compositors), and the X11 clipboard otherwise, which GNOME keeps in step
-with its Wayland clipboard.
+with its Wayland clipboard. A host started where `WAYLAND_DISPLAY` is not set,
+as over SSH, finds the session's Wayland display in `XDG_RUNTIME_DIR` itself
+and logs the one it uses.
 
 The client sends its keyboard, mouse and scrolling to the host while its
 window has focus. When an application on a Windows host hides and confines the

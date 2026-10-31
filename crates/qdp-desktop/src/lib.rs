@@ -46,9 +46,11 @@ pub use qdp_runtime::Microphone;
 use qdp_runtime::{
     ClientAudio, Clipboard, DisplayTiming, FrameSource, HostAudio, InputInjector, NoInput,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 pub use clipboard::SystemClipboard;
+#[cfg(target_os = "linux")]
+pub use clipboard::adopt_wayland_display;
 pub use desktop_lock::lock_desktop;
 #[cfg(feature = "gamepad")]
 pub use gamepad::GamepadCapture;
@@ -196,7 +198,10 @@ pub fn display_timing() -> Option<DisplayTiming> {
 /// if it cannot be used.
 pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
     match SystemClipboard::open() {
-        Ok(clipboard) => Some(Box::new(clipboard)),
+        Ok(clipboard) => {
+            info!(clipboard = clipboard.description(), "sharing the clipboard");
+            Some(Box::new(clipboard))
+        }
         Err(error) => {
             warn!(%error, "the clipboard will not be shared");
             None
