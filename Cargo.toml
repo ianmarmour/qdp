@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/qdp"]
+members = ["crates/qdp", "crates/qdp-quic"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,8 +10,15 @@ license = "Apache-2.0"
 repository = "https://github.com/ianmarmour/qdp"
 
 [workspace.dependencies]
+bytes = { version = "1.10", default-features = false, features = ["std"] }
+qdp = { path = "crates/qdp" }
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 ring = { version = "0.17.14", default-features = false }
+rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
 thiserror = { version = "2.0.17", default-features = false }
+tokio = { version = "1.47", default-features = false }
+tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 unicode-normalization = { version = "0.1.24", default-features = false }
 
 [workspace.lints.rust]
