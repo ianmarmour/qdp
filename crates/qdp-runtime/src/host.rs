@@ -202,7 +202,7 @@ pub async fn serve(
                 driver.session().respond_auth(response, now)?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
-                answer_attach(&mut driver, &attach, &mut devices)?;
+                answer_attach(&mut driver, &attach, &mut devices, &*injector)?;
             }
             HostEvent::Message(ControlMessage::DisplayRequest(request)) => {
                 request_id = request.request_id;
@@ -283,13 +283,16 @@ pub async fn serve(
 }
 
 /// Answers a `DEVICE_ATTACH`, accepting the standard devices this host
-/// supports, and returns whether the device was accepted.
+/// supports, and returns whether the device was accepted. Text devices are
+/// accepted only if `injector` can type text.
 fn answer_attach(
     driver: &mut HostDriver,
     attach: &DeviceAttach,
     devices: &mut StandardInput,
+    injector: &dyn InputInjector,
 ) -> Result<bool, RuntimeError> {
-    let accepted = devices.attach(attach.device_id, attach.kind);
+    let accepted = (attach.kind != DeviceKind::TEXT || injector.supports_text())
+        && devices.attach(attach.device_id, attach.kind);
     let status = if accepted {
         DeviceStatusCode::Accepted
     } else {
@@ -531,7 +534,12 @@ impl ActiveHost {
                     .send(&ControlMessage::DisplayConfig(self.display_config.clone()))?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
-                let accepted = answer_attach(&mut self.driver, &attach, &mut self.devices)?;
+                let accepted = answer_attach(
+                    &mut self.driver,
+                    &attach,
+                    &mut self.devices,
+                    &*self.injector,
+                )?;
                 if accepted && attach.kind == DeviceKind::KEYBOARD {
                     self.send_keyboard_output(attach.device_id)?;
                 }
