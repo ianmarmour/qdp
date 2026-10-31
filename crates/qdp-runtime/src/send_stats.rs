@@ -103,13 +103,15 @@ impl SendStats {
 
     /// Logs the statistics and starts a new interval if this one has ended.
     /// `encoder_wait` is how long the encoder has been working on the frame
-    /// it was last asked for, if any.
+    /// it was last asked for, if any, and `quantizer` the one rate control
+    /// chose.
     pub(crate) fn log_if_due(
         &mut self,
         now: Instant,
         path: PathStats,
         queued_bytes: usize,
         encoder_wait: Option<Duration>,
+        quantizer: u8,
     ) {
         let elapsed = now.saturating_duration_since(self.started);
         if elapsed < STATS_INTERVAL {
@@ -128,6 +130,7 @@ impl SendStats {
             ),
             key_frames = self.key_frames,
             skipped = self.skipped,
+            quantizer,
             retransmissions = self.retransmissions,
             encode_ms = milliseconds(encode_average),
             encode_max_ms = milliseconds(self.encode_max),
@@ -189,10 +192,16 @@ mod tests {
         assert_eq!((stats.frames, stats.key_frames, stats.skipped), (2, 1, 1));
         assert_eq!(stats.bytes, 1500);
         assert_eq!(stats.encode_max, Duration::from_millis(4));
-        stats.log_if_due(start + Duration::from_millis(500), path(10_000), 0, None);
+        stats.log_if_due(
+            start + Duration::from_millis(500),
+            path(10_000),
+            0,
+            None,
+            100,
+        );
         assert_eq!(stats.frames, 2);
         let later = start + STATS_INTERVAL;
-        stats.log_if_due(later, path(10_000), 0, None);
+        stats.log_if_due(later, path(10_000), 0, None, 100);
         assert_eq!(stats, SendStats::new(later, path(10_000)));
     }
 }

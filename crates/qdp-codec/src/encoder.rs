@@ -29,6 +29,14 @@ const FOUR_TILE_SAMPLES: usize = 2560 * 1600;
 /// one, so the encoder never chooses one on its own.
 const MAX_KEY_FRAME_INTERVAL: u64 = 715_827_882;
 
+/// How far the wanted quantizer must be from a context's before a new
+/// context takes it without waiting for a key frame.
+const REOPEN_STEP: u8 = 24;
+
+/// The frames a context encodes before a new one may take a new quantizer
+/// without waiting for a key frame: two seconds at 60 frames per second.
+const REOPEN_FRAMES: u64 = 120;
+
 /// How [`Av1Encoder`] describes itself.
 const DESCRIPTION: &str = "rav1e (software)";
 
@@ -95,18 +103,24 @@ pub struct Av1Encoder {
     /// The sequence header OBU of the first key frame, added to later key
     /// frames that lack one.
     sequence_header: Vec<u8>,
-    /// The frame width.
-    width: usize,
-    /// The frame height.
-    height: usize,
+    /// The settings contexts are made with.
+    settings: EncoderSettings,
+    /// The quantizer of the current context.
+    quantizer: u8,
+    /// The quantizer asked for, which a new context takes.
+    wanted_quantizer: u8,
+    /// The frames passed to the current context.
+    frames_in_context: u64,
+    /// The frames passed to earlier contexts, which input indices count.
+    index_offset: u64,
 }
 
 impl std::fmt::Debug for Av1Encoder {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Av1Encoder")
-            .field("width", &self.width)
-            .field("height", &self.height)
+            .field("settings", &self.settings)
+            .field("quantizer", &self.quantizer)
             .finish_non_exhaustive()
     }
 }
@@ -118,52 +132,34 @@ impl Av1Encoder {
     /// encoded. Streams signal BT.709 primaries, sRGB transfer and the BT.709
     /// matrix in limited range, as QDP requires for standard dynamic range.
     pub fn new(settings: EncoderSettings) -> Result<Self, CodecError> {
-        let tiles = tile_count(settings.width, settings.height);
-        // rav1e chooses the tile layout itself, so the level allows for the
-        // tiles lying in one row.
-        let level = level_for(
-            settings.width as u32,
-            settings.height as u32,
-            settings.frame_rate,
-            TileCount::at_most_columns(tiles as u32),
-        );
-        let mut speed_settings = SpeedSettings::from_preset(settings.speed.min(FASTEST_SPEED));
-        speed_settings.rdo_lookahead_frames = 0;
-        speed_settings.scene_detection_mode = SceneDetectionSpeed::None;
-        let encoder = EncoderConfig {
-            width: settings.width,
-            height: settings.height,
-            bit_depth: BIT_DEPTH,
-            chroma_sampling: ChromaSampling::Cs420,
-            pixel_range: PixelRange::Limited,
-            color_description: Some(ColorDescription {
-                color_primaries: ColorPrimaries::BT709,
-                transfer_characteristics: TransferCharacteristics::SRGB,
-                matrix_coefficients: MatrixCoefficients::BT709,
-            }),
-            time_base: TIME_BASE,
-            low_latency: true,
-            min_key_frame_interval: 0,
-            max_key_frame_interval: MAX_KEY_FRAME_INTERVAL,
-            reservoir_frame_delay: None,
-            quantizer: usize::from(settings.quantizer),
-            bitrate: 0,
-            tiles,
-            level_idx: Some(level),
-            speed_settings,
-            ..EncoderConfig::default()
-        };
-        let context: Context<u8> = Config::new()
-            .with_encoder_config(encoder)
-            .with_threads(settings.threads)
-            .new_context()
-            .map_err(|error| CodecError::Encoder(error.to_string()))?;
         Ok(Self {
-            context,
+            context: open_context(&settings, settings.quantizer)?,
             sequence_header: Vec::new(),
-            width: settings.width,
-            height: settings.height,
+            settings,
+            quantizer: settings.quantizer,
+            wanted_quantizer: settings.quantizer,
+            frames_in_context: 0,
+            index_offset: 0,
         })
+    }
+
+    /// Sets the quantizer of the frames encoded from now on.
+    ///
+    /// rav1e fixes the quantizer when its context is made, so a new context
+    /// takes it, whose first frame is a key frame. That happens when a key
+    /// frame is due anyway, or when the quantizer moved far from the
+    /// context's and the context has encoded for a while.
+    pub fn set_quantizer(&mut self, quantizer: u8) {
+        self.wanted_quantizer = quantizer;
+    }
+
+    /// Returns whether a new context should take the wanted quantizer before
+    /// a frame encoded as `request` asks.
+    fn should_reopen(&self, request: KeyFrameRequest) -> bool {
+        self.wanted_quantizer != self.quantizer
+            && (request == KeyFrameRequest::Force
+                || (self.wanted_quantizer.abs_diff(self.quantizer) >= REOPEN_STEP
+                    && self.frames_in_context >= REOPEN_FRAMES))
     }
 
     /// Passes one frame to the encoder and returns the frames whose encoding has
@@ -178,8 +174,18 @@ impl Av1Encoder {
         frame: &Yuv420Frame,
         request: KeyFrameRequest,
     ) -> Result<Vec<EncodedFrame>, CodecError> {
-        if frame.width() != self.width || frame.height() != self.height {
+        if frame.width() != self.settings.width || frame.height() != self.settings.height {
             return Err(CodecError::FrameSize);
+        }
+        let mut frames = Vec::new();
+        if self.should_reopen(request) {
+            // The old context's last frames come out first.
+            self.context.flush();
+            frames = self.receive_packets()?;
+            self.context = open_context(&self.settings, self.wanted_quantizer)?;
+            self.quantizer = self.wanted_quantizer;
+            self.index_offset += self.frames_in_context;
+            self.frames_in_context = 0;
         }
         let mut input = self.context.new_frame();
         input.planes[0].copy_from_raw_u8(frame.y(), frame.width(), 1);
@@ -195,7 +201,9 @@ impl Av1Encoder {
         self.context
             .send_frame((input, parameters))
             .map_err(|status| CodecError::Encoder(status.to_string()))?;
-        self.receive_packets()
+        self.frames_in_context += 1;
+        frames.extend(self.receive_packets()?);
+        Ok(frames)
     }
 
     /// Ends the stream and returns every frame still in the encoder.
@@ -224,7 +232,7 @@ impl Av1Encoder {
                     let temporal_unit =
                         to_qdp_temporal_unit(&packet.data, is_key_frame, &self.sequence_header)?;
                     frames.push(EncodedFrame {
-                        input_index: packet.input_frameno,
+                        input_index: self.index_offset + packet.input_frameno,
                         temporal_unit,
                         is_key_frame,
                     });
@@ -248,9 +256,61 @@ impl VideoEncoder for Av1Encoder {
         Av1Encoder::encode(self, frame, request)
     }
 
+    fn set_quantizer(&mut self, quantizer: u8) {
+        Av1Encoder::set_quantizer(self, quantizer);
+    }
+
     fn description(&self) -> &str {
         DESCRIPTION
     }
+}
+
+/// Makes a rav1e context with `settings`, at `quantizer`.
+///
+/// Frames are never reordered and each one is emitted as soon as it is
+/// encoded. Streams signal BT.709 primaries, sRGB transfer and the BT.709
+/// matrix in limited range, as QDP requires for standard dynamic range.
+fn open_context(settings: &EncoderSettings, quantizer: u8) -> Result<Context<u8>, CodecError> {
+    let tiles = tile_count(settings.width, settings.height);
+    // rav1e chooses the tile layout itself, so the level allows for the
+    // tiles lying in one row.
+    let level = level_for(
+        settings.width as u32,
+        settings.height as u32,
+        settings.frame_rate,
+        TileCount::at_most_columns(tiles as u32),
+    );
+    let mut speed_settings = SpeedSettings::from_preset(settings.speed.min(FASTEST_SPEED));
+    speed_settings.rdo_lookahead_frames = 0;
+    speed_settings.scene_detection_mode = SceneDetectionSpeed::None;
+    let encoder = EncoderConfig {
+        width: settings.width,
+        height: settings.height,
+        bit_depth: BIT_DEPTH,
+        chroma_sampling: ChromaSampling::Cs420,
+        pixel_range: PixelRange::Limited,
+        color_description: Some(ColorDescription {
+            color_primaries: ColorPrimaries::BT709,
+            transfer_characteristics: TransferCharacteristics::SRGB,
+            matrix_coefficients: MatrixCoefficients::BT709,
+        }),
+        time_base: TIME_BASE,
+        low_latency: true,
+        min_key_frame_interval: 0,
+        max_key_frame_interval: MAX_KEY_FRAME_INTERVAL,
+        reservoir_frame_delay: None,
+        quantizer: usize::from(quantizer),
+        bitrate: 0,
+        tiles,
+        level_idx: Some(level),
+        speed_settings,
+        ..EncoderConfig::default()
+    };
+    Config::new()
+        .with_encoder_config(encoder)
+        .with_threads(settings.threads)
+        .new_context()
+        .map_err(|error| CodecError::Encoder(error.to_string()))
 }
 
 #[cfg(test)]
@@ -301,6 +361,49 @@ mod tests {
         assert_eq!(record[..4], expected);
         assert_eq!(record[4..], *header.obu());
         assert_eq!(encoder.sequence_header, header.obu());
+    }
+
+    /// A new quantizer waits for a key frame or a large change, and the
+    /// stream keeps its sequence header and input indices across the new
+    /// context.
+    #[test]
+    fn takes_new_quantizers() {
+        let mut encoder = Av1Encoder::new(EncoderSettings {
+            width: 64,
+            height: 64,
+            frame_rate: 60,
+            speed: FASTEST_SPEED,
+            quantizer: 100,
+            threads: 1,
+        })
+        .unwrap();
+        let black = Yuv420Frame::black(64, 64);
+        let mut frames = encoder.encode(&black, KeyFrameRequest::Force).unwrap();
+        encoder.set_quantizer(110);
+        assert!(!encoder.should_reopen(KeyFrameRequest::Auto));
+        encoder.set_quantizer(100 + REOPEN_STEP);
+        assert!(!encoder.should_reopen(KeyFrameRequest::Auto));
+        for _ in 1..REOPEN_FRAMES {
+            frames.extend(encoder.encode(&black, KeyFrameRequest::Auto).unwrap());
+        }
+        assert!(encoder.should_reopen(KeyFrameRequest::Auto));
+        frames.extend(encoder.encode(&black, KeyFrameRequest::Auto).unwrap());
+        assert_eq!(encoder.quantizer, 100 + REOPEN_STEP);
+        frames.extend(encoder.flush().unwrap());
+        let indices: Vec<u64> = frames.iter().map(|frame| frame.input_index).collect();
+        assert_eq!(indices, (0..=REOPEN_FRAMES).collect::<Vec<_>>());
+        let keys: Vec<u64> = frames
+            .iter()
+            .filter(|frame| frame.is_key_frame)
+            .map(|frame| frame.input_index)
+            .collect();
+        assert_eq!(keys, [0, REOPEN_FRAMES]);
+        let headers: Vec<SequenceHeader> = frames
+            .iter()
+            .filter_map(|frame| SequenceHeader::find(&frame.temporal_unit).unwrap())
+            .collect();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].obu(), headers[1].obu());
     }
 
     /// Tile counts follow the table of Section 6.4.4.

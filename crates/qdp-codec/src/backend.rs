@@ -17,6 +17,11 @@ pub trait VideoEncoder {
         request: KeyFrameRequest,
     ) -> Result<Vec<EncodedFrame>, CodecError>;
 
+    /// Sets the quantizer, from 0 (best) to 255, of the frames encoded from
+    /// now on, as rate control asks (Section 5.5). An encoder that cannot
+    /// change it at every frame takes it when it can.
+    fn set_quantizer(&mut self, quantizer: u8);
+
     /// Returns which encoder this is, for logs.
     fn description(&self) -> &str;
 }
