@@ -11,6 +11,7 @@
 mod audio;
 mod gamepad;
 mod keycodes;
+mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
 mod touchscreen;

@@ -29,7 +29,7 @@ use crate::audio::{ClientAudio, ClientAudioStreams};
 use crate::auth::ClientAuthExchange;
 use crate::client_cursor::{ClientCursor, CursorChange};
 use crate::client_input::{
-    ClientDevices, DeviceFeedback, InputQueue, KEYBOARD_ID, MOUSE_ID, POINTER_ID, TEXT_ID,
+    ClientDevices, DeviceFeedback, InputQueue, KEYBOARD_ID, MOUSE_ID, PEN_ID, POINTER_ID, TEXT_ID,
     TOUCHSCREEN_ID, UserInput,
 };
 use crate::clipboard::{
@@ -111,13 +111,32 @@ pub struct ClientSummary {
 
 /// The devices every client attaches during configuration, if the session
 /// negotiated their input class (Section 8.2.1).
-const STANDARD_DEVICES: [(DeviceId, DeviceKind, &str); 5] = [
+const STANDARD_DEVICES: [(DeviceId, DeviceKind, &str); 6] = [
     (KEYBOARD_ID, DeviceKind::KEYBOARD, "Keyboard"),
     (POINTER_ID, DeviceKind::POINTER, "Pointer"),
     (MOUSE_ID, DeviceKind::MOUSE, "Mouse"),
     (TEXT_ID, DeviceKind::TEXT, "Text"),
     (TOUCHSCREEN_ID, DeviceKind::TOUCHSCREEN, "Touchscreen"),
+    (PEN_ID, DeviceKind::PEN, "Pen"),
 ];
+
+/// Returns the features the client attaches a standard device of `kind`
+/// with: its pen reports everything a pen can.
+fn standard_features(kind: DeviceKind) -> DeviceFeatures {
+    if kind == DeviceKind::PEN {
+        [
+            DeviceFeatures::PEN_PRESSURE,
+            DeviceFeatures::PEN_TILT,
+            DeviceFeatures::PEN_TWIST,
+            DeviceFeatures::PEN_ERASER,
+            DeviceFeatures::PEN_BARREL_BUTTON,
+        ]
+        .into_iter()
+        .fold(DeviceFeatures::default(), DeviceFeatures::union)
+    } else {
+        DeviceFeatures::default()
+    }
+}
 
 /// Returns how the input sender treats a standard device's reports.
 fn device_class(device_id: DeviceId) -> Option<DeviceClass> {
@@ -139,6 +158,7 @@ fn input_classes() -> InputClasses {
         .union(InputClasses::MOUSE)
         .union(InputClasses::TEXT)
         .union(InputClasses::TOUCHSCREEN)
+        .union(InputClasses::PEN)
         .union(InputClasses::GAMEPAD)
 }
 
@@ -340,7 +360,7 @@ pub async fn run(
                     session.send(&ControlMessage::DeviceAttach(DeviceAttach {
                         device_id,
                         kind,
-                        features: DeviceFeatures::default(),
+                        features: standard_features(kind),
                         name: name.to_owned(),
                         touchpad: None,
                         passthrough: None,

@@ -32,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use super::keycodes::{ScanCode, WindowsKey, consumer_key, keyboard_key};
+use super::pen::PenInjector;
 use super::touch::TouchInjector;
 
 /// QDP positions and motion are in 1/256 pixel or count (Section 1.5.6).
@@ -244,8 +245,10 @@ impl Translator {
             InputAction::Gamepad { .. } | InputAction::GamepadRemoved(_) => {
                 return Err("SendInput cannot present gamepads".to_owned());
             }
-            // Touches are injected apart from `SendInput`.
-            InputAction::Touch(_) => return Err("SendInput cannot touch".to_owned()),
+            // Touches and the pen are injected apart from `SendInput`.
+            InputAction::Touch(_) | InputAction::Pen(_) => {
+                return Err("SendInput cannot touch".to_owned());
+            }
         })
     }
 }
@@ -258,6 +261,8 @@ pub struct SendInputInjector {
     translator: Translator,
     /// Performs touches.
     touch: TouchInjector,
+    /// Performs the pen's input.
+    pen: PenInjector,
 }
 
 impl SendInputInjector {
@@ -267,14 +272,17 @@ impl SendInputInjector {
         Self {
             translator: Translator::new(width, height),
             touch: TouchInjector::default(),
+            pen: PenInjector::default(),
         }
     }
 }
 
 impl InputInjector for SendInputInjector {
     fn inject(&mut self, action: &InputAction) -> Result<(), String> {
-        if let InputAction::Touch(points) = action {
-            return self.touch.touch(points);
+        match action {
+            InputAction::Touch(points) => return self.touch.touch(points),
+            InputAction::Pen(report) => return self.pen.set(report),
+            _ => {}
         }
         let inputs = self.translator.inputs(action)?;
         if inputs.is_empty() {
@@ -297,6 +305,10 @@ impl InputInjector for SendInputInjector {
     }
 
     fn supports_touch(&self) -> bool {
+        true
+    }
+
+    fn supports_pen(&self) -> bool {
         true
     }
 

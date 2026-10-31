@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use qdp::input::{InputEvent, total_delta};
 use qdp::message::{
     DeviceId, DeviceKind, GamepadOutput, GamepadReport, KeyboardInfo, KeyboardLeds, KeyboardReport,
-    MouseReport, PointerButtons, PointerKind, PointerReport, TextReport, TouchContact,
-    TouchContactFlags, TouchscreenReport,
+    MouseReport, PenFlags, PenReport, PointerButtons, PointerKind, PointerReport, TextReport,
+    TouchContact, TouchContactFlags, TouchscreenReport,
 };
 use tracing::debug;
 
@@ -136,6 +136,9 @@ pub enum InputAction {
     /// Changes a touchscreen's contacts together: every contact that touched
     /// or touches, each with what happened to it.
     Touch(Vec<TouchPoint>),
+    /// Sets the pen's state: where it is, whether it is in range or touching,
+    /// and how it is held. Out of range, it has left the surface.
+    Pen(PenReport),
 }
 
 /// Performs input actions on the host's desktop.
@@ -168,6 +171,12 @@ pub trait InputInjector: Send {
     /// Returns whether the injector can perform touches, so that the host
     /// accepts touchscreens.
     fn supports_touch(&self) -> bool {
+        false
+    }
+
+    /// Returns whether the injector can perform a pen's input, so that the host
+    /// accepts pens.
+    fn supports_pen(&self) -> bool {
         false
     }
 
@@ -235,6 +244,8 @@ enum DeviceState {
     Gamepad(GamepadReport),
     /// A touchscreen, with the contacts touching.
     Touchscreen(Vec<TouchContact>),
+    /// A pen.
+    Pen(PenReport),
 }
 
 /// The standard devices of one session and their last applied states.
@@ -255,6 +266,7 @@ impl StandardInput {
             DeviceKind::TEXT => DeviceState::Text,
             DeviceKind::GAMEPAD => DeviceState::Gamepad(GamepadReport::default()),
             DeviceKind::TOUCHSCREEN => DeviceState::Touchscreen(Vec::new()),
+            DeviceKind::PEN => DeviceState::Pen(PenReport::default()),
             _ => return false,
         };
         self.devices.insert(device_id, state);
@@ -273,7 +285,7 @@ impl StandardInput {
     /// Returns whether any device holds something: a key, button, contact or
     /// gamepad control away from rest.
     pub(crate) fn is_holding(&self) -> bool {
-        self.devices.values().any(|state| *state != at_rest(state))
+        self.devices.values().any(holds)
     }
 
     /// Returns whether a device has been accepted.
@@ -408,8 +420,41 @@ impl StandardInput {
                 }
                 Err(_) => debug!("malformed touchscreen report skipped"),
             },
+            DeviceState::Pen(previous) => match PenReport::decode(&event.data) {
+                Ok(report) if report != *previous => {
+                    actions.push(InputAction::Pen(report));
+                    *previous = report;
+                }
+                Ok(_) => {}
+                Err(_) => debug!("malformed pen report skipped"),
+            },
         }
         actions
+    }
+}
+
+/// Returns whether a device holds something: a key, button, contact, pen
+/// tip or gamepad control away from rest. A pen merely hovering holds
+/// nothing.
+fn holds(state: &DeviceState) -> bool {
+    match state {
+        DeviceState::Pen(report) => [
+            PenFlags::TIP_SWITCH,
+            PenFlags::ERASER,
+            PenFlags::BARREL_SWITCH,
+        ]
+        .into_iter()
+        .any(|flag| report.flags.contains(flag)),
+        _ => *state != at_rest(state),
+    }
+}
+
+/// Returns a pen's state out of range, where it was.
+fn pen_at_rest(report: &PenReport) -> PenReport {
+    PenReport {
+        flags: PenFlags::default(),
+        pressure: 0,
+        ..*report
     }
 }
 
@@ -537,6 +582,11 @@ fn release(device_id: DeviceId, state: &DeviceState) -> Vec<InputAction> {
                 ));
             }
         }
+        DeviceState::Pen(report) => {
+            if report.flags != PenFlags::default() {
+                actions.push(InputAction::Pen(pen_at_rest(report)));
+            }
+        }
         DeviceState::Gamepad(report) => {
             let rest = gamepad_at_rest(report);
             if rest != *report {
@@ -579,6 +629,7 @@ fn at_rest(state: &DeviceState) -> DeviceState {
         DeviceState::Text => DeviceState::Text,
         DeviceState::Gamepad(report) => DeviceState::Gamepad(gamepad_at_rest(report)),
         DeviceState::Touchscreen(_) => DeviceState::Touchscreen(Vec::new()),
+        DeviceState::Pen(report) => DeviceState::Pen(pen_at_rest(report)),
     }
 }
 
@@ -602,6 +653,9 @@ mod tests {
 
     /// The touchscreen's Device ID in the tests.
     const TOUCHSCREEN: DeviceId = DeviceId(VarInt::from_u32(5));
+
+    /// The pen's Device ID in the tests.
+    const PEN: DeviceId = DeviceId(VarInt::from_u32(6));
 
     /// Returns an event carrying `data` from `device_id`.
     fn event(device_id: DeviceId, data: Vec<u8>) -> InputEvent {
@@ -938,5 +992,52 @@ mod tests {
         assert_eq!(apply(vec![contact(3, 5, none)]), [(3, TouchPhase::Down, 5)]);
         assert_eq!(phases(&input.release_all()), [(3, TouchPhase::Cancel, 5)]);
         assert!(input.release_all().is_empty());
+    }
+
+    /// Pen reports become actions when they change; a hovering pen holds
+    /// nothing, and releasing takes the pen out of range where it was.
+    #[test]
+    fn pen_states() {
+        let mut input = devices();
+        assert!(input.attach(PEN, DeviceKind::PEN));
+        let mut apply = |report: PenReport| {
+            input.apply(
+                &event(PEN, report.to_bytes()),
+                Positions::Apply,
+                PointerKind::Absolute,
+            )
+        };
+        let hovering = PenReport {
+            flags: PenFlags::IN_RANGE,
+            x: 1000,
+            y: 2000,
+            tilt_x: 1500,
+            ..PenReport::default()
+        };
+        assert_eq!(apply(hovering), [InputAction::Pen(hovering)]);
+        assert!(apply(hovering).is_empty());
+        let touching = PenReport {
+            flags: PenFlags(PenFlags::IN_RANGE.0 | PenFlags::TIP_SWITCH.0),
+            pressure: 30_000,
+            ..hovering
+        };
+        assert_eq!(apply(touching), [InputAction::Pen(touching)]);
+        assert!(input.is_holding());
+        assert_eq!(
+            input.release_all(),
+            [InputAction::Pen(PenReport {
+                flags: PenFlags::default(),
+                pressure: 0,
+                ..touching
+            })]
+        );
+        assert!(!input.is_holding());
+        assert!(input.release_all().is_empty());
+        input.apply(
+            &event(PEN, hovering.to_bytes()),
+            Positions::Apply,
+            PointerKind::Absolute,
+        );
+        assert!(!input.is_holding());
     }
 }

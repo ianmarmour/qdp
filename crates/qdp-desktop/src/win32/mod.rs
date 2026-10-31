@@ -1,5 +1,5 @@
 //! Windows desktop integration: DXGI Desktop Duplication for the screen, and
-//! `SendInput` and `InjectTouchInput` for input.
+//! `SendInput`, `InjectTouchInput` and a synthetic pen for input.
 //!
 //! Both are COM or C interfaces, so this module uses `unsafe`: each block
 //! states the contract it relies on, from Microsoft's documentation.
@@ -10,6 +10,7 @@ mod capture;
 mod image;
 mod input;
 mod keycodes;
+mod pen;
 mod touch;
 
 pub use capture::DesktopDuplication;

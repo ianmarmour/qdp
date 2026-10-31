@@ -5,8 +5,8 @@
 //!
 //! Three devices are created: a keyboard, a relative mouse, and an absolute
 //! pointer covering the desktop, as virtual machines' tablets do, and, when
-//! the client uses them, a touchscreen covering the desktop and a gamepad for
-//! each one it attaches. Creating them needs write access
+//! the client uses them, a touchscreen and a pen tablet covering the desktop
+//! and a gamepad for each one it attaches. Creating them needs write access
 //! to `/dev/uinput`.
 
 use std::collections::HashMap;
@@ -17,11 +17,12 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::time::Instant;
 
-use qdp::message::{DeviceId, GamepadOutput, GamepadReport, KeyboardLeds};
+use qdp::message::{DeviceId, GamepadOutput, GamepadReport, KeyboardLeds, PenReport};
 use qdp_runtime::{InputAction, InputInjector, PointerButton, TouchPoint};
 
 use super::gamepad::VirtualGamepad;
 use super::keycodes::{all_keys, consumer_key, keyboard_key};
+use super::pen::VirtualPen;
 use super::touchscreen::VirtualTouchscreen;
 
 /// The uinput device node.
@@ -98,6 +99,13 @@ pub(super) const ABS_Y: u16 = 0x01;
 
 /// `BUS_VIRTUAL`.
 const BUS_VIRTUAL: u16 = 0x06;
+
+/// `UI_SET_PROPBIT`.
+pub(super) const UI_SET_PROPBIT: libc::Ioctl =
+    uinput_request(IOC_WRITE, 110, size_of::<libc::c_int>());
+
+/// `INPUT_PROP_DIRECT`: the device is a screen, used where it shows.
+pub(super) const INPUT_PROP_DIRECT: u16 = 0x01;
 
 /// The `_IOC_WRITE` direction of an ioctl request: user space passes data.
 pub(super) const IOC_WRITE: u32 = 1;
@@ -289,7 +297,8 @@ impl Translator {
             InputAction::Text(_)
             | InputAction::Gamepad { .. }
             | InputAction::GamepadRemoved(_)
-            | InputAction::Touch(_) => {
+            | InputAction::Touch(_)
+            | InputAction::Pen(_) => {
                 return None;
             }
         };
@@ -341,6 +350,44 @@ impl<'a> Identity<'a> {
     }
 }
 
+/// The values an absolute axis takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct AxisRange {
+    /// The smallest value.
+    pub(super) minimum: i32,
+    /// The largest value.
+    pub(super) maximum: i32,
+    /// The noise the kernel filters out of the values.
+    pub(super) fuzz: i32,
+    /// The dead zone around the centre that applications ignore.
+    pub(super) flat: i32,
+    /// The units per millimetre, or per radian for angles; 0 if unknown.
+    pub(super) resolution: i32,
+}
+
+impl AxisRange {
+    /// Returns an axis from `minimum` to `maximum`, without noise, dead zone
+    /// or resolution.
+    pub(super) const fn new(minimum: i32, maximum: i32) -> Self {
+        Self {
+            minimum,
+            maximum,
+            fuzz: 0,
+            flat: 0,
+            resolution: 0,
+        }
+    }
+
+    /// Returns an axis covering `pixels` of the desktop in 1/256 pixel.
+    pub(super) fn desktop(pixels: u32) -> Self {
+        let maximum = i32::try_from(pixels.max(1))
+            .unwrap_or(i32::MAX / SUBUNITS)
+            .saturating_mul(SUBUNITS)
+            - 1;
+        Self::new(0, maximum)
+    }
+}
+
 /// One virtual device.
 #[derive(Debug)]
 pub(super) struct VirtualDevice {
@@ -370,22 +417,16 @@ impl VirtualDevice {
     }
 
     /// Sets up an absolute axis on a file whose capabilities are being set.
-    pub(super) fn set_axis(
-        file: &File,
-        axis: u16,
-        minimum: i32,
-        maximum: i32,
-        fuzz: i32,
-        flat: i32,
-    ) -> io::Result<()> {
+    pub(super) fn set_axis(file: &File, axis: u16, range: AxisRange) -> io::Result<()> {
         Self::set_bit(file, UI_SET_ABSBIT, axis)?;
         // SAFETY: all zero bits is a valid `uinput_abs_setup`.
         let mut setup: libc::uinput_abs_setup = unsafe { std::mem::zeroed() };
         setup.code = axis;
-        setup.absinfo.minimum = minimum;
-        setup.absinfo.maximum = maximum;
-        setup.absinfo.fuzz = fuzz;
-        setup.absinfo.flat = flat;
+        setup.absinfo.minimum = range.minimum;
+        setup.absinfo.maximum = range.maximum;
+        setup.absinfo.fuzz = range.fuzz;
+        setup.absinfo.flat = range.flat;
+        setup.absinfo.resolution = range.resolution;
         // SAFETY: `setup` is a valid `uinput_abs_setup`, which the call reads.
         let result = unsafe { libc::ioctl(file.as_raw_fd(), UI_ABS_SETUP, &setup) };
         if result < 0 {
@@ -482,6 +523,8 @@ pub struct UinputInjector {
     gamepads: HashMap<DeviceId, VirtualGamepad>,
     /// The touchscreen, created on the first touch.
     touchscreen: Option<VirtualTouchscreen>,
+    /// The pen tablet, created on the pen's first report.
+    pen: Option<VirtualPen>,
     /// The desktop's size in pixels, which the touchscreen covers.
     desktop_size: (u32, u32),
 }
@@ -525,11 +568,7 @@ impl UinputInjector {
             }
             VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_ABS)?;
             for (axis, pixels) in [(ABS_X, width), (ABS_Y, height)] {
-                let maximum = i32::try_from(pixels.max(1))
-                    .unwrap_or(i32::MAX / SUBUNITS)
-                    .saturating_mul(SUBUNITS)
-                    - 1;
-                VirtualDevice::set_axis(&file, axis, 0, maximum, 0, 0)?;
+                VirtualDevice::set_axis(&file, axis, AxisRange::desktop(pixels))?;
             }
             VirtualDevice::create(file, Identity::virtual_device("QDP pointer"))?
         };
@@ -541,6 +580,7 @@ impl UinputInjector {
             leds: KeyboardLeds::default(),
             gamepads: HashMap::new(),
             touchscreen: None,
+            pen: None,
             desktop_size: (width, height),
         })
     }
@@ -555,6 +595,15 @@ impl UinputInjector {
             )?),
         };
         touchscreen.touch(points)
+    }
+
+    /// Sets the pen's state, creating the pen tablet on its first report.
+    fn set_pen(&mut self, report: &PenReport) -> io::Result<()> {
+        let pen = match &mut self.pen {
+            Some(pen) => pen,
+            empty => empty.insert(VirtualPen::new(self.desktop_size.0, self.desktop_size.1)?),
+        };
+        pen.set(report)
     }
 
     /// Sets a gamepad's controls, creating it on its first report.
@@ -598,6 +647,9 @@ impl InputInjector for UinputInjector {
             InputAction::Touch(points) => {
                 return self.touch(points).map_err(|error| error.to_string());
             }
+            InputAction::Pen(report) => {
+                return self.set_pen(report).map_err(|error| error.to_string());
+            }
             _ => {}
         }
         let Some((device, events)) = self.translator.events(action) else {
@@ -624,6 +676,10 @@ impl InputInjector for UinputInjector {
     }
 
     fn supports_touch(&self) -> bool {
+        true
+    }
+
+    fn supports_pen(&self) -> bool {
         true
     }
 

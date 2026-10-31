@@ -11,7 +11,7 @@ use std::time::Duration;
 use qdp::auth::scram::ScramCredentials;
 use qdp::message::{
     CursorImage, DeviceFeatures, DeviceId, GamepadButtons, GamepadOutput, GamepadReport,
-    KeyboardInfo, LayoutPlatform, PointerKind, PointerMode,
+    KeyboardInfo, LayoutPlatform, PenFlags, PenReport, PointerKind, PointerMode,
 };
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
@@ -20,8 +20,8 @@ use qdp_runtime::{
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
     DeviceFeedback, DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAudio,
     HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput,
-    Playout, PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
-    TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
+    PenInput, Playout, PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
+    TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -146,8 +146,37 @@ fn test_input() -> Vec<UserInput> {
         touch(TouchPhase::Down, 30.0),
         touch(TouchPhase::Move, 31.0),
         touch(TouchPhase::Up, 31.0),
+        pen(PenFlags::IN_RANGE),
+        pen(PenFlags(PenFlags::IN_RANGE.0 | PenFlags::TIP_SWITCH.0)),
         UserInput::Text("hé".to_owned()),
     ]
+}
+
+/// Returns the input test's pen at (50, 60) with `flags`, tilted 12.5
+/// degrees right and pressing a quarter.
+fn pen(flags: PenFlags) -> UserInput {
+    UserInput::Pen(PenInput {
+        x: 50.0,
+        y: 60.0,
+        flags,
+        pressure: 0.25,
+        tilt_x: 12.5,
+        tilt_y: 0.0,
+        twist: 0.0,
+    })
+}
+
+/// Returns the state the host gives its pen for [`pen`] with `flags`.
+fn pen_state(flags: PenFlags) -> InputAction {
+    InputAction::Pen(PenReport {
+        flags,
+        x: 50 * 256,
+        y: 60 * 256,
+        pressure: 16_383,
+        tilt_x: 1250,
+        tilt_y: 0,
+        twist: 0,
+    })
 }
 
 /// The finger the input test touches with.
@@ -195,7 +224,20 @@ fn expected_actions() -> Vec<InputAction> {
         touch_frame(TouchPhase::Down, 30),
         touch_frame(TouchPhase::Move, 31),
         touch_frame(TouchPhase::Up, 31),
+        pen_state(PenFlags::IN_RANGE),
+        pen_state(PenFlags(PenFlags::IN_RANGE.0 | PenFlags::TIP_SWITCH.0)),
         InputAction::Text("hé".to_owned()),
+        // The session ends with the pen still touching, so the host takes it
+        // out of range.
+        InputAction::Pen(PenReport {
+            flags: PenFlags::default(),
+            x: 50 * 256,
+            y: 60 * 256,
+            pressure: 0,
+            tilt_x: 1250,
+            tilt_y: 0,
+            twist: 0,
+        }),
     ]
 }
 
@@ -222,6 +264,10 @@ impl InputInjector for Recorder {
     }
 
     fn supports_touch(&self) -> bool {
+        true
+    }
+
+    fn supports_pen(&self) -> bool {
         true
     }
 
