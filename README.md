@@ -127,7 +127,10 @@ Log out and in again for the group change to apply. Without access the host
 logs a warning and ignores input. Touches on the client's window reach Linux
 and Windows hosts as a touchscreen, which macOS hosts decline. On Windows
 clients a pen's pressure, tilt, rotation, eraser and barrel button reach every
-host as a pen; on other clients a pen moves the pointer. The client also
+host as a pen; on other clients a pen moves the pointer. With `qdp connect
+--touchpad`, a Linux client in the `input` group sends its touchpad's raw
+fingers instead, so that a Linux host's own gestures apply; the touchpad then
+works only on the host while the window has focus. The client also
 sends the gamepads connected to it while its window has focus, and plays the
 rumble the host's games set on them. A Linux host presents each as a virtual Xbox 360
 controller; hosts on other systems decline them. A Linux client can also pass

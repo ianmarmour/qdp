@@ -63,7 +63,7 @@ pub(super) const UI_SET_ABSBIT: libc::Ioctl = 0x4004_5567;
 const UI_SET_LEDBIT: libc::Ioctl = 0x4004_5569;
 
 /// `EV_SYN`: the end of a group of events.
-const EV_SYN: u16 = 0x00;
+pub(super) const EV_SYN: u16 = 0x00;
 
 /// `EV_KEY`: keys and buttons.
 pub(super) const EV_KEY: u16 = 0x01;
@@ -78,7 +78,7 @@ pub(super) const EV_ABS: u16 = 0x03;
 const EV_LED: u16 = 0x11;
 
 /// `SYN_REPORT`.
-const SYN_REPORT: u16 = 0;
+pub(super) const SYN_REPORT: u16 = 0;
 
 /// `REL_X`.
 const REL_X: u16 = 0x00;
@@ -187,7 +187,7 @@ impl Event {
     }
 
     /// Returns the event a `struct input_event` holds, ignoring its timestamp.
-    fn from_bytes(bytes: &[u8]) -> Self {
+    pub(super) fn from_bytes(bytes: &[u8]) -> Self {
         let fields = &bytes[bytes.len() - 8..];
         Self {
             kind: u16::from_ne_bytes([fields[0], fields[1]]),

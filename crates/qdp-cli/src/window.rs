@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use qdp::message::{CursorImage, PointerKind, PointerMode};
 use qdp_codec::Yuv420Frame;
-use qdp_desktop::{DeviceSelector, PassthroughCapture};
+use qdp_desktop::{DeviceSelector, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
     CursorWarp, FrameInfo, FrameSink, InputHandle, PenInput, PointerButton, SinkControl,
     TouchPhase, UserInput, WarpKind,
@@ -33,6 +33,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
+use crate::args::TouchpadMode;
 use crate::color::{Placement, RgbFrame, scale_into, yuv420_to_rgb};
 use crate::cursor::ScaledCursor;
 use crate::keymap::{HidKey, hid_key};
@@ -235,6 +236,8 @@ pub struct WindowApp {
     gamepads: Option<qdp_desktop::GamepadCapture>,
     /// The devices the user chose to pass through, if any.
     passthrough: Option<PassthroughCapture>,
+    /// The touchpad, if its raw contacts are sent.
+    touchpad: Option<TouchpadCapture>,
 }
 
 impl WindowApp {
@@ -246,6 +249,7 @@ impl WindowApp {
         input: InputHandle,
         proxy: EventLoopProxy<WindowMessage>,
         passthrough: &[DeviceSelector],
+        touchpad: TouchpadMode,
     ) -> Self {
         Self {
             title,
@@ -272,6 +276,12 @@ impl WindowApp {
                 .ok(),
             passthrough: (!passthrough.is_empty())
                 .then(|| PassthroughCapture::start(&input, passthrough)),
+            touchpad: match touchpad {
+                TouchpadMode::Pointer => None,
+                TouchpadMode::Raw => TouchpadCapture::start(&input)
+                    .inspect_err(|error| warn!(error, "the touchpad's contacts are not sent"))
+                    .ok(),
+            },
             input,
         }
     }
@@ -746,6 +756,9 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 }
                 if let Some(passthrough) = &self.passthrough {
                     passthrough.set_focused(focused);
+                }
+                if let Some(touchpad) = &self.touchpad {
+                    touchpad.set_focused(focused);
                 }
                 if !focused {
                     self.release_pointer();

@@ -57,6 +57,9 @@ Connect options:
                        not at all (default both)
   --audio on|off       Play the host's sound (default on)
   --microphone         Send this machine's microphone to the host
+  --touchpad           Send the touchpad's fingers for the host's own gestures,
+                       rather than moving the pointer (Linux clients; needs
+                       the input group)
   --passthrough ID     Pass the HID device VENDOR:PRODUCT, in hexadecimal as
                        lsusb shows it, through to the host as it is
                        (repeatable; Linux clients)
@@ -148,6 +151,16 @@ pub struct ServeArgs {
     pub passthrough: PassthroughPolicy,
 }
 
+/// What the client's touchpad does (Section 8.4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TouchpadMode {
+    /// The client's platform turns it into pointer movement and scrolling,
+    /// with the user's own settings.
+    Pointer,
+    /// Its raw contacts go to the host, which recognises the gestures.
+    Raw,
+}
+
 /// Whether a session carries sound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Audio {
@@ -196,6 +209,8 @@ pub struct ConnectArgs {
     pub microphone: Microphone,
     /// The HID devices the user chose to pass through.
     pub passthrough: Vec<DeviceSelector>,
+    /// What the touchpad does.
+    pub touchpad: TouchpadMode,
 }
 
 /// An error in the command line.
@@ -435,6 +450,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         audio: Audio::On,
         microphone: Microphone::Off,
         passthrough: Vec::new(),
+        touchpad: TouchpadMode::Pointer,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -454,6 +470,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             }
             "--audio" => connect.audio = parse_audio(&value("--audio", &mut arguments)?)?,
             "--microphone" => connect.microphone = Microphone::On,
+            "--touchpad" => connect.touchpad = TouchpadMode::Raw,
             "--passthrough" => {
                 let selector = value("--passthrough", &mut arguments)?;
                 connect.passthrough.push(selector.parse().map_err(error)?);
@@ -565,6 +582,14 @@ mod tests {
         assert_eq!(connect.clipboard, None);
         assert_eq!(connect.microphone, Microphone::Off);
         assert!(connect.passthrough.is_empty());
+        assert_eq!(connect.touchpad, TouchpadMode::Pointer);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --touchpad"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.touchpad, TouchpadMode::Raw);
         let Command::Connect(connect) = parse_line(&format!(
             "connect 192.0.2.7 --pin {pin} --token t --passthrough 054c:09cc --passthrough 057e:2009"
         ))
