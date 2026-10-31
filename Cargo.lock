@@ -776,6 +776,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "qdp-runtime"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "qdp",
+ "qdp-codec",
+ "qdp-quic",
+ "quinn",
+ "ring",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

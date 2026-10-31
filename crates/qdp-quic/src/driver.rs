@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use bytes::Bytes;
+
 use qdp::message::ClientHello;
 use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, ClientSession, HostConfig, HostEvent, HostSession, SessionError};
@@ -92,6 +94,18 @@ impl DrivenSession for ClientSession {
     }
 }
 
+/// Something that needs the application's attention, from
+/// [`SessionDriver::next_input`].
+#[derive(Debug)]
+pub enum DriverInput<E> {
+    /// An event from the session state machine.
+    Event(E),
+    /// A datagram from the peer.
+    Datagram(Bytes),
+    /// The deadline the application passed has been reached.
+    Deadline,
+}
+
 /// Runs a session state machine over a connection: it writes what the session
 /// queues to the control stream, feeds it what arrives, runs its timers, and
 /// closes the connection with the session's error code when the session ends.
@@ -172,28 +186,84 @@ impl<S: DrivenSession> SessionDriver<S> {
                 }
             };
             tokio::select! {
-                read = self.connection.read_control() => {
-                    match read {
-                        Ok(chunk) => {
-                            // An error also records the close reason, which the next
-                            // flush acts on.
-                            let _ = self.session.handle_control_data(&chunk);
-                        }
-                        Err(TransportError::ControlStreamClosed) => {
-                            let error = SessionError::new(
-                                ErrorCode::CLOSED_CRITICAL_STREAM,
-                                "the control stream was closed",
-                            );
-                            self.connection.close(error.code, &error.reason);
-                            return Err(TransportError::Session(error));
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
+                read = self.connection.read_control() => self.handle_control_read(read)?,
                 () = sleep => {
                     let _ = self.session.handle_timeout(Instant::now());
                 }
             }
+        }
+    }
+
+    /// Runs the session until it has an event, a datagram arrives, or `deadline`
+    /// passes, for applications that handle media and the control stream in one
+    /// loop.
+    ///
+    /// Waiting datagrams and control data are taken before a deadline that has
+    /// passed, so a busy application still reads its input; the application
+    /// should therefore check its own deadlines after every call, whatever it
+    /// returns.
+    pub async fn next_input(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<DriverInput<S::Event>, TransportError> {
+        loop {
+            self.flush().await?;
+            if let Some(event) = self.session.poll_event() {
+                return Ok(DriverInput::Event(event));
+            }
+            let session_deadline = self.session.poll_timeout();
+            let wake = match (session_deadline, deadline) {
+                (Some(session), Some(application)) => Some(session.min(application)),
+                (session, application) => session.or(application),
+            };
+            let sleep = async {
+                match wake {
+                    Some(wake) => tokio::time::sleep_until(wake.into()).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let quic = self.connection.quic().clone();
+            tokio::select! {
+                biased;
+                datagram = quic.read_datagram() => {
+                    return Ok(DriverInput::Datagram(datagram?));
+                }
+                read = self.connection.read_control() => self.handle_control_read(read)?,
+                () = sleep => {
+                    let now = Instant::now();
+                    if session_deadline.is_some_and(|session| now >= session) {
+                        let _ = self.session.handle_timeout(now);
+                    }
+                    if deadline.is_some_and(|deadline| now >= deadline) {
+                        return Ok(DriverInput::Deadline);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Feeds a control stream read to the session, closing the connection if the
+    /// stream ended.
+    fn handle_control_read(
+        &mut self,
+        read: Result<Bytes, TransportError>,
+    ) -> Result<(), TransportError> {
+        match read {
+            Ok(chunk) => {
+                // An error also records the close reason, which the next flush acts
+                // on.
+                let _ = self.session.handle_control_data(&chunk);
+                Ok(())
+            }
+            Err(TransportError::ControlStreamClosed) => {
+                let error = SessionError::new(
+                    ErrorCode::CLOSED_CRITICAL_STREAM,
+                    "the control stream was closed",
+                );
+                self.connection.close(error.code, &error.reason);
+                Err(TransportError::Session(error))
+            }
+            Err(error) => Err(error),
         }
     }
 

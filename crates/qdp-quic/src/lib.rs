@@ -26,7 +26,7 @@ use thiserror::Error;
 
 pub use config::{HostVerification, client_config, host_config};
 pub use connection::QdpConnection;
-pub use driver::{ClientDriver, DrivenSession, HostDriver, SessionDriver};
+pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDriver};
 pub use endpoint::{ClientEndpoint, HostEndpoint};
 pub use identity::{HostIdentity, KeyPin};
 pub use verify::PinnedKeyVerifier;

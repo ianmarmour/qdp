@@ -480,11 +480,7 @@ impl VideoReceiver {
     /// `KEY_ONLY` states every non-empty result includes a `LOSS` record.
     pub fn poll_feedback(&mut self, now: Instant) -> Vec<FeedbackRecord> {
         let mut records = std::mem::take(&mut self.pending_records);
-        let decoded_due = self.decoded_changed
-            || self
-                .decoded_sent_at
-                .is_none_or(|sent_at| now >= sent_at + self.decoded_interval(now));
-        if decoded_due && self.last_decoded != FrameNumber::NONE {
+        if self.decoded_due_at().is_some_and(|due| now >= due) {
             records.push(FeedbackRecord::Decoded(DecodedRecord {
                 stream_id: self.stream_id,
                 last_decoded_frame: self.last_decoded,
@@ -515,24 +511,33 @@ impl VideoReceiver {
                 |sent_at| sent_at + LOSS_FEEDBACK_INTERVAL,
             )
         });
-        let decoded = (self.last_decoded != FrameNumber::NONE).then(|| {
-            self.decoded_sent_at.map_or(self.clock.epoch(), |sent_at| {
-                sent_at + self.decoded_interval(sent_at)
-            })
-        });
-        loss.into_iter().chain(decoded).min()
+        loss.into_iter().chain(self.decoded_due_at()).min()
     }
 
-    /// Returns how often `DECODED` is sent: more often while frames arrive.
-    fn decoded_interval(&self, now: Instant) -> Duration {
-        let arriving = self
-            .last_fragment_at
-            .is_some_and(|at| now.saturating_duration_since(at) < DECODED_INTERVAL_ACTIVE);
-        if arriving {
+    /// Returns when the next `DECODED` record is due, if the stream has decoded a
+    /// frame: at once after a new frame is decoded, 100 ms after the last one if
+    /// fragments have arrived since, and one second after it otherwise
+    /// (Section 6.7).
+    ///
+    /// [`VideoReceiver::poll_feedback`] and [`VideoReceiver::poll_timeout`] both
+    /// use this, so that a deadline that has passed is always acted on.
+    fn decoded_due_at(&self) -> Option<Instant> {
+        if self.last_decoded == FrameNumber::NONE {
+            return None;
+        }
+        let Some(sent_at) = self.decoded_sent_at else {
+            return Some(self.clock.epoch());
+        };
+        if self.decoded_changed {
+            return Some(sent_at);
+        }
+        let arriving = self.last_fragment_at.is_some_and(|at| at > sent_at);
+        let interval = if arriving {
             DECODED_INTERVAL_ACTIVE
         } else {
             DECODED_INTERVAL_IDLE
-        }
+        };
+        Some(sent_at + interval)
     }
 
     /// Returns whether `frame` can be decoded at once in the current state,
@@ -937,6 +942,27 @@ mod tests {
         harness.receiver.handle_timeout(RTT, harness.now);
         let deadline = harness.receiver.poll_timeout(RTT).unwrap();
         assert!(deadline > harness.now);
+    }
+
+    /// Once feedback has been polled, the next feedback deadline is in the future,
+    /// whether or not frames are still arriving.
+    #[test]
+    fn feedback_deadline_moves_forward() {
+        let mut harness = Harness::new();
+        let key = harness.send(FrameKind::Key, 100);
+        harness.deliver(&key);
+        harness.decode_all();
+        for step_ms in [0u64, 50, 150, 1200, 2500] {
+            harness.now += Duration::from_millis(step_ms);
+            if step_ms == 50 {
+                let delta = harness.send(FrameKind::Delta, 100);
+                harness.deliver(&delta);
+                harness.decode_all();
+            }
+            harness.feedback();
+            let deadline = harness.receiver.poll_timeout(RTT).unwrap();
+            assert!(deadline > harness.now, "after {step_ms} ms");
+        }
     }
 
     /// Missing ranges describe gaps and an open tail.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/qdp", "crates/qdp-codec", "crates/qdp-quic"]
+members = ["crates/qdp", "crates/qdp-codec", "crates/qdp-quic", "crates/qdp-runtime"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,8 @@ repository = "https://github.com/ianmarmour/qdp"
 bytes = { version = "1.10", default-features = false, features = ["std"] }
 libc = { version = "0.2.172", default-features = false }
 qdp = { path = "crates/qdp" }
+qdp-codec = { path = "crates/qdp-codec" }
+qdp-quic = { path = "crates/qdp-quic" }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rav1d = { version = "1.1.0", default-features = false, features = ["asm", "bitdepth_8", "bitdepth_16"] }
 rav1e = { version = "0.8.1", default-features = false, features = ["asm", "threading"] }
@@ -30,6 +32,27 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 missing_docs_in_private_items = "warn"
+
+# The codecs are far too slow unoptimized, even for development and tests, so
+# they are optimized in every profile. Most of rav1e is generic over the pixel
+# type and is compiled where qdp-codec instantiates it, so qdp-codec is
+# optimized too; the other QDP crates stay quick to build.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.qdp-codec]
+opt-level = 3
+
+# rav1d checks its internal memory accesses at run time when debug assertions
+# are on, which makes decoding about a thousand times slower; the codecs are
+# tested upstream, so these checks are off for them.
+[profile.dev.package.rav1d]
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.rav1e]
+debug-assertions = false
+overflow-checks = false
 
 # rav1e comes from a fork carrying one patch: it accepts an RDO lookahead of
 # zero frames in low-latency mode, so each frame is encoded as soon as it is
