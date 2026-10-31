@@ -77,3 +77,30 @@ impl WarpId {
 /// A `HID_FEATURE_REQUEST`, numbered from 1 (Section 8.8.3).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FeatureRequestId(pub VarInt);
+
+/// A cached cursor image slot chosen by the host, from 1 (Section 9.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CursorId(pub VarInt);
+
+impl CursorId {
+    /// The hidden cursor.
+    pub const HIDDEN: Self = Self(VarInt::ZERO);
+}
+
+/// The serial of a cursor image, numbered from 1 across all Cursor IDs
+/// (Section 9.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageSerial(pub VarInt);
+
+/// A `CLIPBOARD_OFFER`, numbered from 1 by its sender (Section 10.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OfferId(pub VarInt);
+
+impl OfferId {
+    /// No offer received yet.
+    pub const NONE: Self = Self(VarInt::ZERO);
+}
+
+/// A `CLIPBOARD_REQUEST`, numbered from 1 by its sender (Section 10.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClipboardRequestId(pub VarInt);
