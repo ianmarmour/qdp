@@ -134,8 +134,8 @@ limit:
 - The host SHOULD also lower its rate while a large share of its packets is lost.
   A congestion controller that does not treat loss as congestion, as BBR does not,
   can leave the window wide while a wireless link loses much of what is sent, and
-  each loss costs a recovery frame larger than the frames it replaces. Where the
-  encoder's quality can drop no further, the host can lower the frame rate.
+  each loss costs a recovery frame larger than the frames it replaces. Under
+  heavy loss, the host can lower the frame rate as well.
 
 ### 5.5.2 Frame budgets (non-normative)
 
