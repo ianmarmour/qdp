@@ -5,24 +5,25 @@ use std::time::{Duration, Instant};
 
 use qdp::input::InputReceiver;
 use qdp::message::{
-    AudioConfig, AudioConfigId, Av1Profiles, BlockGrid, BlockSet, Capability, Chroma,
-    ClientMonitorId, ControlMessage, CursorId, CursorSet, Datagram, DatagramPayload, DeviceAttach,
-    DeviceId, DeviceKind, DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId,
-    DisplayRequestId, FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags,
-    ImageSerial, InputClasses, MinorVersion, MonitorId, NO_LEVEL_LIMIT, PointerKind, PointerMode,
-    StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoLayer, VideoStreamConfig,
+    AudioConfig, AudioConfigId, Av1Profiles, BlockGrid, Capability, Chroma, ClientMonitorId,
+    ControlMessage, CursorId, CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId,
+    DeviceKind, DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequestId,
+    FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags, ImageSerial,
+    InputClasses, MinorVersion, MonitorId, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamId,
+    VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoLayer, VideoStreamConfig,
     VideoStreamFlags,
 };
 use qdp::session::{HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, VideoSender};
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{Av1Encoder, EncoderSettings, KeyFrameRequest, Yuv420Frame};
+use qdp_codec::{Av1Encoder, EncoderSettings, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, TransportError};
 use tracing::{debug, info, warn};
 
 use crate::auth::HostAuthExchange;
-use crate::media::{FrameSource, changed_blocks};
+use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
+use crate::media::FrameSource;
 use crate::{HostAuthenticator, RuntimeError, is_normal_close};
 
 /// The Stream ID of the motion layer of the host's one monitor.
@@ -127,23 +128,21 @@ fn varint(value: usize) -> VarInt {
 }
 
 /// One host session in the active phase.
-struct ActiveHost<'a> {
+struct ActiveHost {
     /// The connection and session.
     driver: HostDriver,
-    /// The capture source.
-    source: &'a mut dyn FrameSource,
-    /// The encoder.
-    encoder: Av1Encoder,
+    /// Captures and encodes frames on its own thread.
+    encoder: EncoderThread,
+    /// Whether a frame has been requested from the encoder and not yet returned.
+    encoding: bool,
+    /// The number of frames requested from the encoder so far.
+    frames_requested: u64,
     /// The video stream's sender.
     sender: VideoSender,
     /// The input reports' receiver.
     input: InputReceiver,
     /// The host's session clock.
     clock: SessionClock,
-    /// The monitor's composition grid.
-    grid: BlockGrid,
-    /// The previous frame, for finding changed blocks.
-    previous: Option<Yuv420Frame>,
     /// The devices the host accepted.
     devices: BTreeSet<DeviceId>,
     /// The Config ID of the last `DISPLAY_CONFIG`.
@@ -155,11 +154,12 @@ struct ActiveHost<'a> {
 }
 
 /// Runs the host's side of one session on an accepted connection until the
-/// client disconnects, streaming frames from `source`.
+/// client disconnects, streaming frames from `source`, which is captured and
+/// encoded on a thread of its own.
 pub async fn serve(
     connection: QdpConnection,
     options: &HostOptions,
-    source: &mut dyn FrameSource,
+    source: Box<dyn FrameSource>,
 ) -> Result<HostSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
     let config = HostConfig {
@@ -236,15 +236,15 @@ pub async fn serve(
         quantizer: options.encoder.quantizer,
         threads: options.encoder.threads,
     })?;
+    let grid = BlockGrid::for_monitor(width as u32, height as u32);
     let mut active = ActiveHost {
         driver,
-        source,
-        encoder,
+        encoder: EncoderThread::spawn(source, encoder, grid)?,
+        encoding: false,
+        frames_requested: 0,
         sender: VideoSender::new(MOTION_STREAM_ID),
         input: InputReceiver::new(),
         clock: SessionClock::new(Instant::now()),
-        grid: BlockGrid::for_monitor(width as u32, height as u32),
-        previous: None,
         devices,
         display_config_id: 1,
         display_config,
@@ -315,29 +315,37 @@ fn display_config(
     }
 }
 
-impl ActiveHost<'_> {
+impl ActiveHost {
     /// Streams until the client disconnects.
     async fn run(&mut self, frame_interval: Duration) -> Result<HostSummary, RuntimeError> {
         let mut next_frame_at = Instant::now();
         loop {
             let smoothed_rtt = self.driver.connection().smoothed_rtt();
             let deadline = [
-                Some(next_frame_at),
+                (!self.encoding).then_some(next_frame_at),
                 self.sender.poll_timeout(smoothed_rtt),
                 self.input.poll_timeout(smoothed_rtt),
             ]
             .into_iter()
             .flatten()
             .min();
-            match self.driver.next_input(deadline).await {
+            let input = self
+                .driver
+                .next_input(deadline, Some(self.encoder.ready()))
+                .await;
+            match input {
                 Ok(DriverInput::Event(event)) => self.handle_event(event)?,
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(&datagram)?,
-                Ok(DriverInput::Deadline) => {}
+                Ok(DriverInput::Deadline | DriverInput::Wake) => {}
                 Err(error) if is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
             }
 
             let now = Instant::now();
+            while let Some(result) = self.encoder.try_result() {
+                self.encoding = false;
+                self.send_encoded(result?, now)?;
+            }
             for datagram in self.sender.handle_timeout(smoothed_rtt, now) {
                 self.summary.retransmissions += 1;
                 self.send(datagram)?;
@@ -347,8 +355,8 @@ impl ActiveHost<'_> {
             if let Some(ack) = self.input.poll_ack(now) {
                 self.send(ack.to_bytes())?;
             }
-            if now >= next_frame_at {
-                self.send_frame(now)?;
+            if !self.encoding && now >= next_frame_at {
+                self.request_frame()?;
                 next_frame_at += frame_interval;
                 if next_frame_at < now {
                     // Encoding fell behind: skip ahead rather than send a burst.
@@ -370,48 +378,49 @@ impl ActiveHost<'_> {
         }
     }
 
-    /// Captures, encodes and sends one frame.
-    fn send_frame(&mut self, now: Instant) -> Result<(), RuntimeError> {
-        let frame = self.source.capture()?;
-        let recovery = self.sender.recovery_needed();
-        let request = if self.previous.is_none() || recovery.is_some() {
+    /// Asks the encoder thread for the next frame: a key frame for the first one
+    /// and whenever the client needs to recover.
+    fn request_frame(&mut self) -> Result<(), RuntimeError> {
+        let recovery = self.sender.recovery_needed().is_some();
+        let request = if self.frames_requested == 0 || recovery {
             KeyFrameRequest::Force
         } else {
             KeyFrameRequest::Auto
         };
-        for encoded in self.encoder.encode(&frame, request)? {
-            let kind = match (encoded.is_key_frame, recovery.is_some()) {
-                (true, true) => FrameKind::KeyRecovery,
-                (true, false) => FrameKind::Key,
-                (false, _) => FrameKind::Delta,
-            };
-            let blocks = match (&self.previous, encoded.is_key_frame) {
-                (Some(previous), false) => changed_blocks(previous, &frame, self.grid),
-                _ => BlockSet::full(self.grid.len()),
-            };
-            let header = FrameHeader {
-                capture_timestamp: self.clock.timestamp(now),
-                recovery_base: None,
-                base_frame_number: None,
-                blocks,
-            };
-            let max_datagram_size = self.driver.connection().max_datagram_size();
-            let sent = self.sender.send_frame(
-                header,
-                &encoded.temporal_unit,
-                kind,
-                max_datagram_size,
-                now,
-            )?;
-            self.summary.frames_sent += 1;
-            if encoded.is_key_frame {
-                self.summary.key_frames_sent += 1;
-            }
-            for datagram in sent.datagrams {
-                self.send(datagram)?;
-            }
+        self.encoder.request(EncodeJob { request, recovery })?;
+        self.encoding = true;
+        self.frames_requested += 1;
+        Ok(())
+    }
+
+    /// Fragments and sends one encoded frame.
+    fn send_encoded(&mut self, output: EncodedOutput, now: Instant) -> Result<(), RuntimeError> {
+        let kind = match (output.frame.is_key_frame, output.job.recovery) {
+            (true, true) => FrameKind::KeyRecovery,
+            (true, false) => FrameKind::Key,
+            (false, _) => FrameKind::Delta,
+        };
+        let header = FrameHeader {
+            capture_timestamp: self.clock.timestamp(output.captured_at),
+            recovery_base: None,
+            base_frame_number: None,
+            blocks: output.blocks,
+        };
+        let max_datagram_size = self.driver.connection().max_datagram_size();
+        let sent = self.sender.send_frame(
+            header,
+            &output.frame.temporal_unit,
+            kind,
+            max_datagram_size,
+            now,
+        )?;
+        self.summary.frames_sent += 1;
+        if output.frame.is_key_frame {
+            self.summary.key_frames_sent += 1;
         }
-        self.previous = Some(frame);
+        for datagram in sent.datagrams {
+            self.send(datagram)?;
+        }
         Ok(())
     }
 

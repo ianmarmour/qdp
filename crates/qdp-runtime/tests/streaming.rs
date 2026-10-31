@@ -91,8 +91,12 @@ fn start_host(
     };
     let task = tokio::spawn(async move {
         let connection = endpoint.accept().await.expect("a client")?;
-        let mut source = TestPattern::new(WIDTH, HEIGHT);
-        serve(connection, &options, &mut source).await
+        serve(
+            connection,
+            &options,
+            Box::new(TestPattern::new(WIDTH, HEIGHT)),
+        )
+        .await
     });
     (address, pin, task)
 }

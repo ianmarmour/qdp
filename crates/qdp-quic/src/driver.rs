@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use bytes::Bytes;
+use tokio::sync::Notify;
 
 use qdp::message::ClientHello;
 use qdp::registry::ErrorCode;
@@ -104,6 +105,9 @@ pub enum DriverInput<E> {
     Datagram(Bytes),
     /// The deadline the application passed has been reached.
     Deadline,
+    /// The application's wake-up signal was notified, for example by a worker
+    /// thread with a result.
+    Wake,
 }
 
 /// Runs a session state machine over a connection: it writes what the session
@@ -194,9 +198,9 @@ impl<S: DrivenSession> SessionDriver<S> {
         }
     }
 
-    /// Runs the session until it has an event, a datagram arrives, or `deadline`
-    /// passes, for applications that handle media and the control stream in one
-    /// loop.
+    /// Runs the session until it has an event, a datagram arrives, `deadline`
+    /// passes, or `wake` is notified, for applications that handle media and the
+    /// control stream in one loop.
     ///
     /// Waiting datagrams and control data are taken before a deadline that has
     /// passed, so a busy application still reads its input; the application
@@ -205,6 +209,7 @@ impl<S: DrivenSession> SessionDriver<S> {
     pub async fn next_input(
         &mut self,
         deadline: Option<Instant>,
+        wake: Option<&Notify>,
     ) -> Result<DriverInput<S::Event>, TransportError> {
         loop {
             self.flush().await?;
@@ -212,13 +217,19 @@ impl<S: DrivenSession> SessionDriver<S> {
                 return Ok(DriverInput::Event(event));
             }
             let session_deadline = self.session.poll_timeout();
-            let wake = match (session_deadline, deadline) {
+            let wake_at = match (session_deadline, deadline) {
                 (Some(session), Some(application)) => Some(session.min(application)),
                 (session, application) => session.or(application),
             };
             let sleep = async {
+                match wake_at {
+                    Some(wake_at) => tokio::time::sleep_until(wake_at.into()).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let woken = async {
                 match wake {
-                    Some(wake) => tokio::time::sleep_until(wake.into()).await,
+                    Some(wake) => wake.notified().await,
                     None => std::future::pending().await,
                 }
             };
@@ -229,6 +240,7 @@ impl<S: DrivenSession> SessionDriver<S> {
                     return Ok(DriverInput::Datagram(datagram?));
                 }
                 read = self.connection.read_control() => self.handle_control_read(read)?,
+                () = woken => return Ok(DriverInput::Wake),
                 () = sleep => {
                     let now = Instant::now();
                     if session_deadline.is_some_and(|session| now >= session) {
