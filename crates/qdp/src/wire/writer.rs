@@ -122,6 +122,11 @@ impl Writer {
         self.write_varint(length);
     }
 
+    /// Appends the count of a list of entries.
+    pub fn write_count(&mut self, count: usize) {
+        self.write_length(count);
+    }
+
     /// Appends an Octets field: the length of `bytes` followed by the bytes
     /// (Section 1.5.4).
     pub fn write_octets(&mut self, bytes: &[u8]) {

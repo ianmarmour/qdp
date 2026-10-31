@@ -5,6 +5,8 @@
 //! remaining bits hold the value in network byte order. Signed values are mapped to
 //! unsigned ones with zigzag encoding before they are encoded.
 
+use std::ops::{BitAnd, BitOr};
+
 use thiserror::Error;
 
 /// The largest value a one-byte encoding can hold.
@@ -76,6 +78,26 @@ impl VarInt {
     /// Returns the length of the encoding that starts with `first_byte`.
     pub const fn encoded_len_from_first_byte(first_byte: u8) -> usize {
         1 << (first_byte >> LENGTH_PREFIX_SHIFT)
+    }
+}
+
+/// Bitwise AND of two values, for flag masks sent as variable-length integers. The
+/// result never exceeds either operand, so it is always in range.
+impl BitAnd for VarInt {
+    type Output = Self;
+
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+
+/// Bitwise OR of two values, for flag masks sent as variable-length integers. Both
+/// operands are below 2^62, so the result is too.
+impl BitOr for VarInt {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 
@@ -250,6 +272,16 @@ mod tests {
         assert_eq!(VarInt::new(MAX_EIGHT_BYTES + 1), Err(VarIntOutOfRange));
         assert_eq!(VarInt::try_from(u64::MAX), Err(VarIntOutOfRange));
         assert_eq!(VarInt::new(MAX_EIGHT_BYTES), Ok(VarInt::MAX));
+    }
+
+    /// Bitwise operators combine flag masks.
+    #[test]
+    fn bitwise_operators() {
+        let a = VarInt::from_u32(0b0110);
+        let b = VarInt::from_u32(0b0011);
+        assert_eq!((a & b).into_inner(), 0b0010);
+        assert_eq!((a | b).into_inner(), 0b0111);
+        assert_eq!(VarInt::MAX | VarInt::MAX, VarInt::MAX);
     }
 
     /// The zigzag mapping matches the examples of Section 1.5.2.
