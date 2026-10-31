@@ -79,7 +79,7 @@ impl SystemCursor {
             let y = location.y - self.bounds.origin.y;
             let inside = (0.0..self.bounds.size.width).contains(&x)
                 && (0.0..self.bounds.size.height).contains(&y);
-            inside.then(|| ((x * self.scale.0) as i32, (y * self.scale.1) as i32))
+            inside.then_some(((x * self.scale.0) as i32, (y * self.scale.1) as i32))
         });
         CursorState {
             position: position.map_or(PointerPosition::Hidden, |(x, y)| PointerPosition::At(x, y)),
@@ -148,11 +148,10 @@ fn straighten(pixels: &mut [u8]) {
     for pixel in pixels.chunks_exact_mut(RGBA_PIXEL) {
         let alpha = u32::from(pixel[3]);
         for channel in &mut pixel[..3] {
-            *channel = if alpha == 0 {
-                0
-            } else {
-                (u32::from(*channel) * CHANNEL_MAX / alpha).min(CHANNEL_MAX) as u8
-            };
+            // A fully transparent pixel has no colour.
+            *channel = (u32::from(*channel) * CHANNEL_MAX)
+                .checked_div(alpha)
+                .map_or(0, |straight| straight.min(CHANNEL_MAX) as u8);
         }
     }
 }
