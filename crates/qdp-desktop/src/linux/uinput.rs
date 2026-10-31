@@ -4,17 +4,22 @@
 //! server, without the compositor's cooperation.
 //!
 //! Three devices are created: a keyboard, a relative mouse, and an absolute
-//! pointer covering the desktop, as virtual machines' tablets do. Creating
-//! them needs write access to `/dev/uinput`.
+//! pointer covering the desktop, as virtual machines' tablets do, and a
+//! gamepad for each one the client attaches. Creating them needs write access
+//! to `/dev/uinput`.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::time::Instant;
 
-use qdp::message::KeyboardLeds;
+use qdp::message::{DeviceId, GamepadOutput, GamepadReport, KeyboardLeds};
 use qdp_runtime::{InputAction, InputInjector, PointerButton};
 
+use super::gamepad::VirtualGamepad;
 use super::keycodes::{all_keys, consumer_key, keyboard_key};
 
 /// The uinput device node.
@@ -33,16 +38,16 @@ const UI_DEV_SETUP: libc::Ioctl = 0x405c_5503;
 const UI_ABS_SETUP: libc::Ioctl = 0x401c_5504;
 
 /// `UI_SET_EVBIT`.
-const UI_SET_EVBIT: libc::Ioctl = 0x4004_5564;
+pub(super) const UI_SET_EVBIT: libc::Ioctl = 0x4004_5564;
 
 /// `UI_SET_KEYBIT`.
-const UI_SET_KEYBIT: libc::Ioctl = 0x4004_5565;
+pub(super) const UI_SET_KEYBIT: libc::Ioctl = 0x4004_5565;
 
 /// `UI_SET_RELBIT`.
 const UI_SET_RELBIT: libc::Ioctl = 0x4004_5566;
 
 /// `UI_SET_ABSBIT`.
-const UI_SET_ABSBIT: libc::Ioctl = 0x4004_5567;
+pub(super) const UI_SET_ABSBIT: libc::Ioctl = 0x4004_5567;
 
 /// `UI_SET_LEDBIT`.
 const UI_SET_LEDBIT: libc::Ioctl = 0x4004_5569;
@@ -51,13 +56,13 @@ const UI_SET_LEDBIT: libc::Ioctl = 0x4004_5569;
 const EV_SYN: u16 = 0x00;
 
 /// `EV_KEY`: keys and buttons.
-const EV_KEY: u16 = 0x01;
+pub(super) const EV_KEY: u16 = 0x01;
 
 /// `EV_REL`: relative axes.
 const EV_REL: u16 = 0x02;
 
 /// `EV_ABS`: absolute axes.
-const EV_ABS: u16 = 0x03;
+pub(super) const EV_ABS: u16 = 0x03;
 
 /// `EV_LED`: LEDs, which the compositor sets on keyboards.
 const EV_LED: u16 = 0x11;
@@ -84,13 +89,29 @@ const REL_WHEEL_HI_RES: u16 = 0x0b;
 const REL_HWHEEL_HI_RES: u16 = 0x0c;
 
 /// `ABS_X`.
-const ABS_X: u16 = 0x00;
+pub(super) const ABS_X: u16 = 0x00;
 
 /// `ABS_Y`.
-const ABS_Y: u16 = 0x01;
+pub(super) const ABS_Y: u16 = 0x01;
 
 /// `BUS_VIRTUAL`.
 const BUS_VIRTUAL: u16 = 0x06;
+
+/// The `_IOC_WRITE` direction of an ioctl request: user space passes data.
+pub(super) const IOC_WRITE: u32 = 1;
+
+/// The `_IOC_READ` direction of an ioctl request: the kernel returns data.
+pub(super) const IOC_READ: u32 = 2;
+
+/// The type of uinput's ioctl requests.
+const UINPUT_IOCTL_TYPE: u8 = b'U';
+
+/// Returns the uinput ioctl request `number`, passing `size` bytes in
+/// `direction`, as `_IOC` builds it.
+pub(super) const fn uinput_request(direction: u32, number: u8, size: usize) -> libc::Ioctl {
+    (direction << 30 | (size as u32) << 16 | (UINPUT_IOCTL_TYPE as u32) << 8 | number as u32)
+        as libc::Ioctl
+}
 
 /// The LEDs the keyboard reports, as `(LED code, QDP LED bit)`.
 const LEDS: [(u16, u8); 5] = [
@@ -100,6 +121,9 @@ const LEDS: [(u16, u8); 5] = [
     (0x03, 0x08), // LED_COMPOSE: Compose
     (0x04, 0x10), // LED_KANA: Kana
 ];
+
+/// The events read from a device at once.
+const EVENTS_PER_READ: usize = 16;
 
 /// Scroll units per detent: high-resolution wheel events are in 1/120 detent,
 /// as QDP's scroll units are.
@@ -141,8 +165,18 @@ pub(super) struct Event {
 
 impl Event {
     /// Returns an event.
-    const fn new(kind: u16, code: u16, value: i32) -> Self {
+    pub(super) const fn new(kind: u16, code: u16, value: i32) -> Self {
         Self { kind, code, value }
+    }
+
+    /// Returns the event a `struct input_event` holds, ignoring its timestamp.
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let fields = &bytes[bytes.len() - 8..];
+        Self {
+            kind: u16::from_ne_bytes([fields[0], fields[1]]),
+            code: u16::from_ne_bytes([fields[2], fields[3]]),
+            value: i32::from_ne_bytes([fields[4], fields[5], fields[6], fields[7]]),
+        }
     }
 
     /// Returns the event as a `struct input_event`, with a zero timestamp,
@@ -249,7 +283,10 @@ impl Translator {
                 }
                 (Device::Pointer, events)
             }
-            InputAction::Text(_) => return None,
+            // Gamepads are devices of their own, and text has no events.
+            InputAction::Text(_) | InputAction::Gamepad { .. } | InputAction::GamepadRemoved(_) => {
+                return None;
+            }
         };
         Some(events)
     }
@@ -267,16 +304,48 @@ impl Translator {
     }
 }
 
+/// How a virtual device presents itself to the host's applications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Identity<'a> {
+    /// Its name.
+    pub(super) name: &'a str,
+    /// The bus it claims to be on.
+    pub(super) bus: u16,
+    /// Its USB vendor ID.
+    pub(super) vendor: u16,
+    /// Its USB product ID.
+    pub(super) product: u16,
+    /// Its version.
+    pub(super) version: u16,
+    /// The force feedback effects it holds at once.
+    pub(super) effects: u32,
+}
+
+impl<'a> Identity<'a> {
+    /// Returns the identity of a virtual device named `name`, without force
+    /// feedback.
+    const fn virtual_device(name: &'a str) -> Self {
+        Self {
+            name,
+            bus: BUS_VIRTUAL,
+            vendor: 0,
+            product: 0,
+            version: 0,
+            effects: 0,
+        }
+    }
+}
+
 /// One virtual device.
 #[derive(Debug)]
-struct VirtualDevice {
+pub(super) struct VirtualDevice {
     /// The device's uinput file; closing it removes the device.
     file: File,
 }
 
 impl VirtualDevice {
     /// Opens `/dev/uinput` for a new device.
-    fn open() -> io::Result<File> {
+    pub(super) fn open() -> io::Result<File> {
         OpenOptions::new()
             .read(true)
             .write(true)
@@ -285,7 +354,7 @@ impl VirtualDevice {
     }
 
     /// Calls a uinput ioctl that takes an integer.
-    fn set_bit(file: &File, request: libc::Ioctl, bit: u16) -> io::Result<()> {
+    pub(super) fn set_bit(file: &File, request: libc::Ioctl, bit: u16) -> io::Result<()> {
         // SAFETY: the request takes an int by value, and the descriptor is open.
         let result = unsafe { libc::ioctl(file.as_raw_fd(), request, libc::c_int::from(bit)) };
         if result < 0 {
@@ -295,15 +364,45 @@ impl VirtualDevice {
         }
     }
 
-    /// Creates the device named `name` on a file whose capabilities are set.
-    fn create(file: File, name: &str) -> io::Result<Self> {
+    /// Sets up an absolute axis on a file whose capabilities are being set.
+    pub(super) fn set_axis(
+        file: &File,
+        axis: u16,
+        minimum: i32,
+        maximum: i32,
+        fuzz: i32,
+        flat: i32,
+    ) -> io::Result<()> {
+        Self::set_bit(file, UI_SET_ABSBIT, axis)?;
+        // SAFETY: all zero bits is a valid `uinput_abs_setup`.
+        let mut setup: libc::uinput_abs_setup = unsafe { std::mem::zeroed() };
+        setup.code = axis;
+        setup.absinfo.minimum = minimum;
+        setup.absinfo.maximum = maximum;
+        setup.absinfo.fuzz = fuzz;
+        setup.absinfo.flat = flat;
+        // SAFETY: `setup` is a valid `uinput_abs_setup`, which the call reads.
+        let result = unsafe { libc::ioctl(file.as_raw_fd(), UI_ABS_SETUP, &setup) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Creates the device on a file whose capabilities are set.
+    pub(super) fn create(file: File, identity: Identity<'_>) -> io::Result<Self> {
         // SAFETY: all zero bits is a valid `uinput_setup`.
         let mut setup: libc::uinput_setup = unsafe { std::mem::zeroed() };
-        setup.id.bustype = BUS_VIRTUAL;
+        setup.id.bustype = identity.bus;
+        setup.id.vendor = identity.vendor;
+        setup.id.product = identity.product;
+        setup.id.version = identity.version;
+        setup.ff_effects_max = identity.effects;
         for (slot, byte) in setup
             .name
             .iter_mut()
-            .zip(name.bytes().take(libc::UINPUT_MAX_NAME_SIZE - 1))
+            .zip(identity.name.bytes().take(libc::UINPUT_MAX_NAME_SIZE - 1))
         {
             *slot = byte as libc::c_char;
         }
@@ -321,12 +420,36 @@ impl VirtualDevice {
     }
 
     /// Writes events followed by a `SYN_REPORT`, so they apply together.
-    fn emit(&mut self, events: &[Event]) -> io::Result<()> {
+    pub(super) fn emit(&mut self, events: &[Event]) -> io::Result<()> {
         let mut bytes = Vec::new();
         for event in events.iter().chain([&Event::new(EV_SYN, SYN_REPORT, 0)]) {
             bytes.extend(event.to_bytes());
         }
         self.file.write_all(&bytes)
+    }
+
+    /// Returns the events the host wrote to the device since the last call,
+    /// such as LED changes and force feedback requests.
+    pub(super) fn read_events(&mut self) -> Vec<Event> {
+        let event_length = size_of::<libc::input_event>();
+        let mut buffer = vec![0; event_length * EVENTS_PER_READ];
+        let mut events = Vec::new();
+        while let Ok(read) = self.file.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            events.extend(
+                buffer[..read]
+                    .chunks_exact(event_length)
+                    .map(Event::from_bytes),
+            );
+        }
+        events
+    }
+
+    /// Returns the device's file descriptor, for its ioctls.
+    pub(super) fn raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
 }
 
@@ -350,6 +473,8 @@ pub struct UinputInjector {
     translator: Translator,
     /// The keyboard LEDs the compositor last set.
     leds: KeyboardLeds,
+    /// The client's gamepads, created on their first report.
+    gamepads: HashMap<DeviceId, VirtualGamepad>,
 }
 
 impl UinputInjector {
@@ -366,7 +491,7 @@ impl UinputInjector {
             for (code, _) in LEDS {
                 VirtualDevice::set_bit(&file, UI_SET_LEDBIT, code)?;
             }
-            VirtualDevice::create(file, "QDP keyboard")?
+            VirtualDevice::create(file, Identity::virtual_device("QDP keyboard"))?
         };
         let mouse = {
             let file = VirtualDevice::open()?;
@@ -377,7 +502,7 @@ impl UinputInjector {
             VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_REL)?;
             VirtualDevice::set_bit(&file, UI_SET_RELBIT, REL_X)?;
             VirtualDevice::set_bit(&file, UI_SET_RELBIT, REL_Y)?;
-            VirtualDevice::create(file, "QDP mouse")?
+            VirtualDevice::create(file, Identity::virtual_device("QDP mouse"))?
         };
         let pointer = {
             let file = VirtualDevice::open()?;
@@ -391,23 +516,13 @@ impl UinputInjector {
             }
             VirtualDevice::set_bit(&file, UI_SET_EVBIT, EV_ABS)?;
             for (axis, pixels) in [(ABS_X, width), (ABS_Y, height)] {
-                VirtualDevice::set_bit(&file, UI_SET_ABSBIT, axis)?;
                 let maximum = i32::try_from(pixels.max(1))
                     .unwrap_or(i32::MAX / SUBUNITS)
                     .saturating_mul(SUBUNITS)
                     - 1;
-                // SAFETY: all zero bits is a valid `uinput_abs_setup`.
-                let mut setup: libc::uinput_abs_setup = unsafe { std::mem::zeroed() };
-                setup.code = axis;
-                setup.absinfo.maximum = maximum;
-                // SAFETY: `setup` is a valid `uinput_abs_setup`, which the call
-                // reads.
-                let result = unsafe { libc::ioctl(file.as_raw_fd(), UI_ABS_SETUP, &setup) };
-                if result < 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                VirtualDevice::set_axis(&file, axis, 0, maximum, 0, 0)?;
             }
-            VirtualDevice::create(file, "QDP pointer")?
+            VirtualDevice::create(file, Identity::virtual_device("QDP pointer"))?
         };
         Ok(Self {
             keyboard,
@@ -415,31 +530,30 @@ impl UinputInjector {
             pointer,
             translator: Translator::default(),
             leds: KeyboardLeds::default(),
+            gamepads: HashMap::new(),
         })
+    }
+
+    /// Sets a gamepad's controls, creating it on its first report.
+    fn set_gamepad(&mut self, device_id: DeviceId, report: &GamepadReport) -> io::Result<()> {
+        let gamepad = match self.gamepads.entry(device_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(VirtualGamepad::new()?),
+        };
+        gamepad.set(report)
     }
 
     /// Reads the LED events the compositor wrote to the keyboard.
     fn read_leds(&mut self) {
-        let event_length = size_of::<libc::input_event>();
-        let mut buffer = vec![0; event_length * 16];
-        while let Ok(read) = self.keyboard.file.read(&mut buffer) {
-            if read == 0 {
-                break;
+        for event in self.keyboard.read_events() {
+            if event.kind != EV_LED {
+                continue;
             }
-            for event in buffer[..read].chunks_exact(event_length) {
-                let fields = &event[event_length - 8..];
-                let kind = u16::from_ne_bytes([fields[0], fields[1]]);
-                let code = u16::from_ne_bytes([fields[2], fields[3]]);
-                let value = i32::from_ne_bytes([fields[4], fields[5], fields[6], fields[7]]);
-                if kind != EV_LED {
-                    continue;
-                }
-                if let Some(&(_, bit)) = LEDS.iter().find(|(led, _)| *led == code) {
-                    if value != 0 {
-                        self.leds.0 |= bit;
-                    } else {
-                        self.leds.0 &= !bit;
-                    }
+            if let Some(&(_, bit)) = LEDS.iter().find(|(led, _)| *led == event.code) {
+                if event.value != 0 {
+                    self.leds.0 |= bit;
+                } else {
+                    self.leds.0 &= !bit;
                 }
             }
         }
@@ -448,6 +562,18 @@ impl UinputInjector {
 
 impl InputInjector for UinputInjector {
     fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        match action {
+            InputAction::Gamepad { device_id, report } => {
+                return self
+                    .set_gamepad(*device_id, report)
+                    .map_err(|error| error.to_string());
+            }
+            InputAction::GamepadRemoved(device_id) => {
+                self.gamepads.remove(device_id);
+                return Ok(());
+            }
+            _ => {}
+        }
         let Some((device, events)) = self.translator.events(action) else {
             return Err("uinput has no event for this action".to_owned());
         };
@@ -469,6 +595,18 @@ impl InputInjector for UinputInjector {
     fn keyboard_leds(&mut self) -> KeyboardLeds {
         self.read_leds();
         self.leds
+    }
+
+    fn supports_gamepads(&self) -> bool {
+        true
+    }
+
+    fn gamepad_outputs(&mut self) -> Vec<(DeviceId, GamepadOutput)> {
+        let now = Instant::now();
+        self.gamepads
+            .iter_mut()
+            .filter_map(|(&device_id, gamepad)| Some((device_id, gamepad.output(now)?)))
+            .collect()
     }
 }
 

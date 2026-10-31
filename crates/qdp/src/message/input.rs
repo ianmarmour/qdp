@@ -1,8 +1,8 @@
 //! Input device messages and datagrams (Section 8).
 
 use crate::message::{
-    DatagramPayload, DeviceId, DisplayConfigId, FeatureRequestId, InputSequence, MAX_NAME_LENGTH,
-    MessagePayload, Timestamp, WarpId,
+    DatagramPayload, DeviceId, DisplayConfigId, FeatureRequestId, InputClasses, InputSequence,
+    MAX_NAME_LENGTH, MessagePayload, Timestamp, WarpId,
 };
 use crate::registry::{DatagramType, MessageType};
 use crate::wire::{Reader, SignedVarInt, VarInt, WireError, Writer};
@@ -39,6 +39,23 @@ impl DeviceKind {
     pub const TEXT: Self = Self(VarInt::from_u32(0x08));
     /// A passthrough HID device.
     pub const PASSTHROUGH: Self = Self(VarInt::from_u32(0x10));
+
+    /// Returns the input class a session must negotiate to use devices of
+    /// this kind (Section 4.6.5), or `None` for an unknown kind.
+    pub fn input_class(self) -> Option<InputClasses> {
+        Some(match self {
+            Self::KEYBOARD => InputClasses::KEYBOARD,
+            Self::POINTER => InputClasses::POINTER,
+            Self::MOUSE => InputClasses::MOUSE,
+            Self::TOUCHSCREEN => InputClasses::TOUCHSCREEN,
+            Self::PEN => InputClasses::PEN,
+            Self::TOUCHPAD => InputClasses::TOUCHPAD,
+            Self::GAMEPAD => InputClasses::GAMEPAD,
+            Self::TEXT => InputClasses::TEXT,
+            Self::PASSTHROUGH => InputClasses::PASSTHROUGH,
+            _ => return None,
+        })
+    }
 }
 
 /// The kind-specific features of an input device (Section 8.2.1).
@@ -706,6 +723,21 @@ mod tests {
     /// Returns a device ID.
     fn device(id: u32) -> DeviceId {
         DeviceId(VarInt::from_u32(id))
+    }
+
+    /// Every known device kind belongs to the input class of the same name,
+    /// and unknown kinds to none.
+    #[test]
+    fn device_kind_classes() {
+        assert_eq!(
+            DeviceKind::GAMEPAD.input_class(),
+            Some(InputClasses::GAMEPAD)
+        );
+        assert_eq!(
+            DeviceKind::PASSTHROUGH.input_class(),
+            Some(InputClasses::PASSTHROUGH)
+        );
+        assert_eq!(DeviceKind(VarInt::from_u32(0x09)).input_class(), None);
     }
 
     /// Device attachments of every shape round-trip.

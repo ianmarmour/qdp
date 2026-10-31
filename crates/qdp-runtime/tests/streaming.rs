@@ -9,16 +9,19 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use qdp::auth::scram::ScramCredentials;
-use qdp::message::{CursorImage, KeyboardInfo, LayoutPlatform, PointerKind, PointerMode};
+use qdp::message::{
+    CursorImage, DeviceFeatures, DeviceId, GamepadButtons, GamepadOutput, GamepadReport,
+    KeyboardInfo, LayoutPlatform, PointerKind, PointerMode,
+};
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
     ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
-    DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAudio, HostAuthenticator,
-    HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput, Playout,
-    PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, UserInput,
-    WarpKind, input_channel, run, serve,
+    DeviceFeedback, DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAudio,
+    HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput,
+    Playout, PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
+    UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -954,4 +957,169 @@ async fn relative_mode_moves_the_mouse() {
         }),
         "{actions:?}"
     );
+}
+
+/// The rumble the host's applications set on every gamepad they hear from.
+const RUMBLE: GamepadOutput = GamepadOutput {
+    low_frequency_rumble: 30_000,
+    high_frequency_rumble: 10_000,
+    left_trigger_rumble: 0,
+    right_trigger_rumble: 0,
+    led_red: 0,
+    led_green: 0,
+    led_blue: 0,
+};
+
+/// An injector that records actions and presents gamepads, which the host's
+/// applications rumble once they hear from them.
+#[derive(Debug, Clone, Default)]
+struct RumblingGamepads {
+    /// The actions performed.
+    recorder: Recorder,
+    /// The rumble not yet reported to the host.
+    outputs: Vec<(DeviceId, GamepadOutput)>,
+}
+
+impl InputInjector for RumblingGamepads {
+    fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        if let InputAction::Gamepad { device_id, .. } = action {
+            self.outputs.push((*device_id, RUMBLE));
+        }
+        self.recorder.inject(action)
+    }
+
+    fn description(&self) -> &str {
+        "rumbling gamepads"
+    }
+
+    fn supports_gamepads(&self) -> bool {
+        true
+    }
+
+    fn gamepad_outputs(&mut self) -> Vec<(DeviceId, GamepadOutput)> {
+        std::mem::take(&mut self.outputs)
+    }
+}
+
+/// The report the test's gamepad sends: A held, the left stick pushed up and
+/// the right trigger fully pressed.
+const GAMEPAD_STATE: GamepadReport = GamepadReport {
+    buttons: GamepadButtons(1),
+    left_trigger: 0,
+    right_trigger: u16::MAX,
+    left_stick_x: 0,
+    left_stick_y: -20_000,
+    right_stick_x: 0,
+    right_stick_y: 0,
+    gyro: [0; 3],
+    accel: [0; 3],
+};
+
+/// Connects a gamepad, moves it, and streams until its rumble comes back.
+struct GamepadWatcher {
+    /// Where the input goes.
+    input: InputHandle,
+    /// The rumble the client was asked to play.
+    feedback: Vec<DeviceFeedback>,
+    /// The frames presented.
+    frames: usize,
+}
+
+impl FrameSink for GamepadWatcher {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        if self.frames == INPUT_FRAME {
+            assert!(self.input.send(UserInput::GamepadConnected {
+                slot: 0,
+                features: DeviceFeatures::GAMEPAD_RUMBLE,
+                name: "Test pad".to_owned(),
+            }));
+            assert!(self.input.send(UserInput::Gamepad {
+                slot: 0,
+                report: GAMEPAD_STATE,
+            }));
+        }
+        self.feedback
+            .extend(std::iter::from_fn(|| self.input.try_feedback()));
+        if !self.feedback.is_empty() || self.frames >= CLIPBOARD_FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+}
+
+/// A gamepad connected on the client appears on the host, and the rumble the
+/// host's applications set comes back to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gamepad_rumbles() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let injector = RumblingGamepads::default();
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(injector.clone()),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let (handle, queue) = input_channel();
+    let mut watcher = GamepadWatcher {
+        input: handle,
+        feedback: Vec::new(),
+        frames: 0,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut watcher,
+            Some(queue),
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("the session finishes in time")
+    .unwrap();
+    endpoint.wait_idle().await;
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        watcher.feedback,
+        [DeviceFeedback::Gamepad {
+            slot: 0,
+            output: RUMBLE
+        }]
+    );
+    let actions = injector.recorder.0.lock().unwrap().clone();
+    let mut held = GAMEPAD_STATE;
+    // The client sets the trigger's button from its value.
+    held.buttons.0 |= 1 << 7;
+    let [
+        InputAction::Gamepad { device_id, report },
+        InputAction::Gamepad {
+            report: rest,
+            device_id: rest_id,
+        },
+    ] = actions.as_slice()
+    else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(*report, held);
+    assert_eq!((*rest, rest_id), (GamepadReport::default(), device_id));
 }

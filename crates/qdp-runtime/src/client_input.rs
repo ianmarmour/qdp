@@ -2,12 +2,15 @@
 //! turned into standard device reports (Section 8.4) for the input sender,
 //! which delivers them reliably (Section 8.6).
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use qdp::input::{DeviceRest, ReportKind};
 use qdp::message::{
-    DeviceId, KeyboardReport, MouseReport, PointerButtons, PointerKind, PointerReport, TextReport,
+    DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, GamepadButtons, GamepadOutput,
+    GamepadReport, KeyboardReport, MouseReport, PointerButtons, PointerKind, PointerReport,
+    TextReport,
 };
 use qdp::wire::VarInt;
 use tokio::sync::Notify;
@@ -81,21 +84,61 @@ pub enum UserInput {
     },
     /// Text was committed without key presses, as by an input method.
     Text(String),
+    /// A gamepad was connected; `slot` names it in later input.
+    GamepadConnected {
+        /// The gamepad's number, unique while it is connected.
+        slot: u32,
+        /// What it can do, such as rumble.
+        features: DeviceFeatures,
+        /// Its name.
+        name: String,
+    },
+    /// A gamepad was disconnected.
+    GamepadDisconnected {
+        /// The gamepad's number.
+        slot: u32,
+    },
+    /// A gamepad's controls changed.
+    Gamepad {
+        /// The gamepad's number.
+        slot: u32,
+        /// Its complete state.
+        report: GamepadReport,
+    },
     /// Everything held is released, as when the window loses focus.
     ReleaseAll,
+}
+
+/// What the session sends back to the user's devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceFeedback {
+    /// A gamepad's rumble and LED, from the host's applications (Section
+    /// 8.4.7).
+    Gamepad {
+        /// The gamepad's number.
+        slot: u32,
+        /// The output to apply.
+        output: GamepadOutput,
+    },
 }
 
 /// Returns a handle for the user interface to send input with and the queue
 /// the session reads it from.
 pub fn input_channel() -> (InputHandle, InputQueue) {
     let (sender, receiver) = mpsc::channel();
+    let (feedback_sender, feedback) = mpsc::channel();
     let wake = Arc::new(Notify::new());
     (
         InputHandle {
             sender,
             wake: Arc::clone(&wake),
+            feedback: Arc::new(Mutex::new(feedback)),
         },
-        InputQueue { receiver, wake },
+        InputQueue {
+            receiver,
+            wake,
+            feedback: feedback_sender,
+        },
     )
 }
 
@@ -106,6 +149,8 @@ pub struct InputHandle {
     sender: Sender<UserInput>,
     /// Wakes the session.
     wake: Arc<Notify>,
+    /// What the session sends back to the devices.
+    feedback: Arc<Mutex<Receiver<DeviceFeedback>>>,
 }
 
 impl InputHandle {
@@ -114,6 +159,11 @@ impl InputHandle {
         let sent = self.sender.send(input).is_ok();
         self.wake.notify_one();
         sent
+    }
+
+    /// Returns the next feedback for the user's devices, if any is waiting.
+    pub fn try_feedback(&self) -> Option<DeviceFeedback> {
+        self.feedback.lock().ok()?.try_recv().ok()
     }
 }
 
@@ -124,9 +174,16 @@ pub struct InputQueue {
     receiver: Receiver<UserInput>,
     /// Notified when input arrives.
     wake: Arc<Notify>,
+    /// Sends feedback to the devices.
+    feedback: Sender<DeviceFeedback>,
 }
 
 impl InputQueue {
+    /// Sends feedback to the user's devices.
+    pub(crate) fn send_feedback(&self, feedback: DeviceFeedback) {
+        let _ = self.feedback.send(feedback);
+    }
+
     /// Returns the next input waiting, if any.
     pub(crate) fn try_next(&self) -> Option<UserInput> {
         // An empty queue and a closed one both mean nothing is waiting.
@@ -167,6 +224,10 @@ pub(crate) struct ClientDevices {
     pointer_mode: PointerKind,
     /// The monitor's top-left corner on the host's desktop, in pixels.
     monitor_origin: (i32, i32),
+    /// The connected gamepads, by slot: their Device IDs and states.
+    gamepads: HashMap<u32, (DeviceId, GamepadReport)>,
+    /// The Device ID of the last gamepad attached.
+    last_gamepad_id: u64,
 }
 
 impl Default for ClientDevices {
@@ -178,11 +239,102 @@ impl Default for ClientDevices {
             mouse_remainder: (0.0, 0.0),
             pointer_mode: PointerKind::Absolute,
             monitor_origin: (0, 0),
+            gamepads: HashMap::new(),
+            last_gamepad_id: FIRST_GAMEPAD_ID - 1,
         }
     }
 }
 
+/// The Device ID of the first gamepad; the standard devices use lower ones.
+const FIRST_GAMEPAD_ID: u64 = 16;
+
+/// The Standard Gamepad buttons the triggers set (Section 8.4.7).
+const TRIGGER_BUTTONS: [u32; 2] = [6, 7];
+
+/// The trigger value from which its button is held.
+const TRIGGER_HELD: u16 = 32_768;
+
 impl ClientDevices {
+    /// Starts tracking a connected gamepad, returning the `DEVICE_ATTACH`
+    /// that offers it to the host.
+    pub(crate) fn connect_gamepad(
+        &mut self,
+        slot: u32,
+        features: DeviceFeatures,
+        name: String,
+    ) -> DeviceAttach {
+        self.last_gamepad_id += 1;
+        let device_id = DeviceId(VarInt::new(self.last_gamepad_id).unwrap_or(VarInt::MAX));
+        self.gamepads
+            .insert(slot, (device_id, GamepadReport::default()));
+        DeviceAttach {
+            device_id,
+            kind: DeviceKind::GAMEPAD,
+            features,
+            name,
+            touchpad: None,
+            passthrough: None,
+        }
+    }
+
+    /// Stops tracking a gamepad, returning its Device ID to detach.
+    pub(crate) fn disconnect_gamepad(&mut self, slot: u32) -> Option<DeviceId> {
+        self.gamepads.remove(&slot).map(|(device_id, _)| device_id)
+    }
+
+    /// Returns the slot of a gamepad's Device ID.
+    pub(crate) fn gamepad_slot(&self, device_id: DeviceId) -> Option<u32> {
+        self.gamepads
+            .iter()
+            .find(|(_, (id, _))| *id == device_id)
+            .map(|(&slot, _)| slot)
+    }
+
+    /// Returns the report of a gamepad's current state if any of its
+    /// controls is away from rest: the reports made before the host accepted
+    /// the gamepad were not sent.
+    pub(crate) fn gamepad_state(&self, device_id: DeviceId) -> Option<PendingReport> {
+        let (_, report) = self.gamepads.values().find(|(id, _)| *id == device_id)?;
+        (*report != GamepadReport::default())
+            .then(|| Self::gamepad_report(device_id, &GamepadReport::default(), report))
+    }
+
+    /// Returns a gamepad's report, with its trigger buttons set exactly when
+    /// the triggers are pressed past half (Section 8.4.7).
+    fn gamepad_report(
+        device_id: DeviceId,
+        previous: &GamepadReport,
+        report: &GamepadReport,
+    ) -> PendingReport {
+        let kind = if report.buttons == previous.buttons {
+            ReportKind::Motion
+        } else {
+            ReportKind::Transition
+        };
+        PendingReport {
+            device_id,
+            data: report.to_bytes(),
+            kind,
+            rest: rest(*report != GamepadReport::default()),
+        }
+    }
+
+    /// Returns a report with the trigger buttons following the triggers.
+    fn with_trigger_buttons(mut report: GamepadReport) -> GamepadReport {
+        for (button, value) in TRIGGER_BUTTONS
+            .into_iter()
+            .zip([report.left_trigger, report.right_trigger])
+        {
+            let mask = GamepadButtons::button(button).0;
+            if value >= TRIGGER_HELD {
+                report.buttons.0 |= mask;
+            } else {
+                report.buttons.0 &= !mask;
+            }
+        }
+        report
+    }
+
     /// Switches to the mode `POINTER_MODE` announced (Section 8.9), returning
     /// the reports that move held buttons to the new mode's device: first the
     /// new device holding them, then the old one releasing them (Section 8.6,
@@ -330,7 +482,29 @@ impl ClientDevices {
                     self.mouse.buttons = PointerButtons::default();
                     reports.push(self.mouse_report(ReportKind::Transition));
                 }
+                for (device_id, state) in self.gamepads.values_mut() {
+                    if *state != GamepadReport::default() {
+                        let previous = std::mem::take(state);
+                        reports.push(Self::gamepad_report(*device_id, &previous, state));
+                    }
+                }
                 reports
+            }
+            UserInput::Gamepad { slot, report } => {
+                let Some((device_id, state)) = self.gamepads.get_mut(&slot) else {
+                    return Vec::new();
+                };
+                let report = Self::with_trigger_buttons(report);
+                if report == *state {
+                    return Vec::new();
+                }
+                let previous = std::mem::replace(state, report);
+                vec![Self::gamepad_report(*device_id, &previous, state)]
+            }
+            // Gamepads come and go through `DEVICE_ATTACH` and
+            // `DEVICE_DETACH`, not reports.
+            UserInput::GamepadConnected { .. } | UserInput::GamepadDisconnected { .. } => {
+                Vec::new()
             }
         }
     }
@@ -449,6 +623,49 @@ mod tests {
         let moved = devices.reports(UserInput::MouseMoved { dx: 1.0, dy: -0.5 });
         let report = MouseReport::decode(&moved[0].data).unwrap();
         assert_eq!((report.motion_x_total, report.motion_y_total), (256, -128));
+    }
+
+    /// Gamepads get their own Device IDs, report only changes, set the
+    /// trigger buttons from the triggers, and return to rest on release.
+    #[test]
+    fn gamepads() {
+        let mut devices = ClientDevices::default();
+        let attach = devices.connect_gamepad(3, DeviceFeatures::GAMEPAD_RUMBLE, "Pad".to_owned());
+        assert_eq!(attach.kind, DeviceKind::GAMEPAD);
+        assert_eq!(devices.gamepad_slot(attach.device_id), Some(3));
+        assert_eq!(devices.gamepad_state(attach.device_id), None);
+        let report = GamepadReport {
+            left_trigger: 40_000,
+            left_stick_y: -500,
+            ..GamepadReport::default()
+        };
+        let reports = devices.reports(UserInput::Gamepad { slot: 3, report });
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].device_id, attach.device_id);
+        assert_eq!(reports[0].kind, ReportKind::Transition);
+        let sent = GamepadReport::decode(&reports[0].data).unwrap();
+        assert!(sent.buttons.contains(GamepadButtons::button(6)));
+        assert_eq!(
+            devices
+                .gamepad_state(attach.device_id)
+                .map(|state| state.data),
+            Some(sent.to_bytes())
+        );
+        assert!(
+            devices
+                .reports(UserInput::Gamepad { slot: 3, report })
+                .is_empty()
+        );
+        assert!(
+            devices
+                .reports(UserInput::Gamepad { slot: 4, report })
+                .is_empty()
+        );
+        let released = devices.reports(UserInput::ReleaseAll);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].rest, DeviceRest::AtRest);
+        assert_eq!(devices.disconnect_gamepad(3), Some(attach.device_id));
+        assert_eq!(devices.gamepad_slot(attach.device_id), None);
     }
 
     /// Long text is split into several reports.

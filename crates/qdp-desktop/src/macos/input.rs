@@ -283,6 +283,10 @@ impl InputInjector for QuartzInjector {
                 Ok(())
             }
             InputAction::Text(text) => self.text(text),
+            // The host does not accept gamepads, so none are attached.
+            InputAction::Gamepad { .. } | InputAction::GamepadRemoved(_) => {
+                Err("Quartz events cannot present gamepads".to_owned())
+            }
         }
     }
 

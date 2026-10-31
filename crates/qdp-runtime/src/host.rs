@@ -5,12 +5,11 @@ use std::time::{Duration, Instant};
 use qdp::input::{InputEvent, InputReceiver};
 use qdp::message::{
     Av1Profiles, BlockGrid, Capability, Chroma, ClientMonitorId, ControlMessage, CursorId,
-    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId, DeviceKind, DeviceOutput,
-    DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequestId,
-    FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags, ImageSerial,
-    InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT, PointerKind,
-    PointerMode, StreamHeader, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags,
-    VideoLayer, VideoStreamConfig, VideoStreamFlags,
+    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId, DeviceStatus, DeviceStatusCode,
+    DisplayConfig, DisplayConfigId, DisplayRequestId, FeedbackRecord, FrameHeader, HostHello,
+    HostMonitor, HostMonitorFlags, ImageSerial, InputClasses, KeyboardOutput, MinorVersion,
+    MonitorId, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamHeader, StreamId, VideoCodec,
+    VideoCodecCapability, VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{HostConfig, HostEvent};
@@ -30,6 +29,7 @@ use crate::clipboard::{
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
 use crate::host_cursor::{CursorUpdate, HostCursor};
 use crate::host_input::{InputAction, InputInjector, Positions, StandardInput};
+use crate::host_output::{DeviceOutputs, OutputReport};
 use crate::media::{CursorState, FrameSource};
 use crate::send_stats::{SendStats, queue_delay};
 use crate::{HostAuthenticator, RuntimeError, is_normal_close};
@@ -107,10 +107,28 @@ pub struct HostSummary {
     pub input_reports: u64,
 }
 
-/// Returns the capabilities the host advertises, with clipboard sharing in
-/// `clipboard`'s directions if it shares one, and the audio its devices
-/// handle.
-fn capabilities(clipboard: Option<ClipboardDirections>, audio: &HostAudio) -> Vec<Capability> {
+/// Returns the input classes the host can inject with `injector`.
+fn input_classes(injector: &dyn InputInjector) -> InputClasses {
+    let mut classes = InputClasses::KEYBOARD
+        .union(InputClasses::POINTER)
+        .union(InputClasses::MOUSE);
+    if injector.supports_text() {
+        classes = classes.union(InputClasses::TEXT);
+    }
+    if injector.supports_gamepads() {
+        classes = classes.union(InputClasses::GAMEPAD);
+    }
+    classes
+}
+
+/// Returns the capabilities the host advertises: the input `classes` it
+/// injects, clipboard sharing in `clipboard`'s directions if it shares one,
+/// and the audio its devices handle.
+fn capabilities(
+    classes: InputClasses,
+    clipboard: Option<ClipboardDirections>,
+    audio: &HostAudio,
+) -> Vec<Capability> {
     let mut capabilities = vec![
         Capability::VideoCodec(VideoCodecCapability {
             codec: VideoCodec::AV1,
@@ -122,11 +140,7 @@ fn capabilities(clipboard: Option<ClipboardDirections>, audio: &HostAudio) -> Ve
             flags: VideoCodecFlags::default(),
             max_level: NO_LEVEL_LIMIT,
         }),
-        Capability::Input(
-            InputClasses::KEYBOARD
-                .union(InputClasses::POINTER)
-                .union(InputClasses::MOUSE),
-        ),
+        Capability::Input(classes),
     ];
     if let Some(directions) = clipboard {
         capabilities.push(clipboard::capability(directions));
@@ -169,8 +183,8 @@ struct ActiveHost {
     summary: HostSummary,
     /// The statistics logged every second.
     stats: SendStats,
-    /// The Output Sequence of the last keyboard output report.
-    output_sequence: u64,
+    /// The output reports sent for the devices.
+    outputs: DeviceOutputs,
     /// The cursor the client draws.
     cursor: HostCursor,
     /// Clipboard sharing, if the session negotiated it.
@@ -207,7 +221,7 @@ pub async fn serve(
             minor_version: MinorVersion::CURRENT,
             host_name: options.host_name.clone(),
             auth_methods: options.authenticator.methods(),
-            capabilities: capabilities(directions, &audio),
+            capabilities: capabilities(input_classes(&*injector), directions, &audio),
         },
         failure_reason: FAILURE_REASON.to_owned(),
     };
@@ -235,7 +249,7 @@ pub async fn serve(
                 driver.session().respond_auth(response, now)?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
-                answer_attach(&mut driver, &attach, &mut devices, &*injector)?;
+                answer_attach(&mut driver, &attach, &mut devices)?;
             }
             HostEvent::Message(ControlMessage::KeyboardInfo(keyboard)) => {
                 info!(
@@ -317,15 +331,13 @@ pub async fn serve(
         display_config_id: 1,
         display_config,
         summary: HostSummary::default(),
-        output_sequence: 0,
+        outputs: DeviceOutputs::default(),
         cursor: HostCursor::default(),
         clipboard,
         audio,
         pointer_mode: PointerKind::Absolute,
     };
-    for keyboard in active.devices.keyboards() {
-        active.send_keyboard_output(keyboard)?;
-    }
+    active.update_outputs(Instant::now())?;
     if let Some(link) = &mut active.clipboard {
         let outputs = link.start();
         active.apply_clipboard(outputs)?;
@@ -352,16 +364,20 @@ fn client_stream_policy(header: &StreamHeader, clipboard_limit: Option<usize>) -
 }
 
 /// Answers a `DEVICE_ATTACH`, accepting the standard devices this host
-/// supports, and returns whether the device was accepted. Text devices are
-/// accepted only if `injector` can type text.
+/// supports whose input class the session negotiated (Section 4.6.5), and
+/// returns whether the device was accepted.
 fn answer_attach(
     driver: &mut HostDriver,
     attach: &DeviceAttach,
     devices: &mut StandardInput,
-    injector: &dyn InputInjector,
 ) -> Result<bool, RuntimeError> {
-    let accepted = (attach.kind != DeviceKind::TEXT || injector.supports_text())
-        && devices.attach(attach.device_id, attach.kind);
+    let negotiated = attach.kind.input_class().is_some_and(|class| {
+        driver
+            .session()
+            .negotiated()
+            .is_some_and(|negotiated| negotiated.supports_input(class))
+    });
+    let accepted = negotiated && devices.attach(attach.device_id, attach.kind);
     let status = if accepted {
         DeviceStatusCode::Accepted
     } else {
@@ -427,6 +443,7 @@ impl ActiveHost {
                 self.input.poll_timeout(smoothed_rtt),
                 Some(self.stats.next_log_at()),
                 self.clipboard.as_ref().map(ClipboardLink::poll_timeout),
+                self.outputs.poll_timeout(),
             ]
             .into_iter()
             .flatten()
@@ -463,8 +480,12 @@ impl ActiveHost {
             if let Some(ack) = self.input.poll_ack(now) {
                 self.send(ack.to_bytes())?;
             }
+            if self.outputs.poll_timeout().is_some_and(|due| due <= now) {
+                self.update_outputs(now)?;
+            }
             if self.pending_since.is_none() && now >= next_frame_at {
                 self.follow_pointer_mode()?;
+                self.update_outputs(now)?;
                 if self.network_behind(frame_interval) {
                     self.stats.frame_skipped();
                 } else {
@@ -592,20 +613,35 @@ impl ActiveHost {
         Ok(())
     }
 
-    /// Sends a keyboard's output report: the host's LED state (Section 8.4.1).
-    fn send_keyboard_output(&mut self, device_id: DeviceId) -> Result<(), RuntimeError> {
-        self.output_sequence += 1;
-        let report = KeyboardOutput {
+    /// Sends the output reports that changed, the host's keyboard LEDs
+    /// (Section 8.4.1) and its applications' gamepad rumble and LEDs
+    /// (Section 8.4.7), and repeats those that are due (Section 8.8.1).
+    fn update_outputs(&mut self, now: Instant) -> Result<(), RuntimeError> {
+        let leds = OutputReport::Keyboard(KeyboardOutput {
             leds: self.injector.keyboard_leds(),
+        });
+        let mut changes: Vec<(DeviceId, OutputReport)> = self
+            .devices
+            .keyboards()
+            .into_iter()
+            .map(|keyboard| (keyboard, leds))
+            .collect();
+        changes.extend(
+            self.injector
+                .gamepad_outputs()
+                .into_iter()
+                .filter(|(device_id, _)| self.devices.contains(*device_id))
+                .map(|(device_id, output)| (device_id, OutputReport::Gamepad(output))),
+        );
+        let mut datagrams: Vec<Vec<u8>> = changes
+            .into_iter()
+            .filter_map(|(device_id, report)| self.outputs.update(device_id, report, now))
+            .collect();
+        datagrams.extend(self.outputs.repeats(now));
+        for datagram in datagrams {
+            self.send(datagram)?;
         }
-        .to_bytes();
-        let datagram = DeviceOutput {
-            device_id,
-            output_sequence: varint_u64(self.output_sequence),
-            data: &report,
-        }
-        .to_bytes();
-        self.send(datagram)
+        Ok(())
     }
 
     /// Returns whether the datagrams waiting to be sent would take longer than
@@ -701,19 +737,14 @@ impl ActiveHost {
                     .send(&ControlMessage::DisplayConfig(self.display_config.clone()))?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
-                let accepted = answer_attach(
-                    &mut self.driver,
-                    &attach,
-                    &mut self.devices,
-                    &*self.injector,
-                )?;
-                if accepted && attach.kind == DeviceKind::KEYBOARD {
-                    self.send_keyboard_output(attach.device_id)?;
+                if answer_attach(&mut self.driver, &attach, &mut self.devices)? {
+                    self.update_outputs(Instant::now())?;
                 }
             }
             HostEvent::Message(ControlMessage::DeviceDetach(detach)) => {
                 let actions = self.devices.detach(detach.device_id);
                 self.inject(&actions);
+                self.outputs.remove(detach.device_id);
             }
             HostEvent::Message(ControlMessage::KeyboardInfo(keyboard)) => {
                 info!(

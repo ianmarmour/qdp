@@ -239,6 +239,10 @@ impl Translator {
                     ]
                 })
                 .collect(),
+            // The host does not accept gamepads, so none are attached.
+            InputAction::Gamepad { .. } | InputAction::GamepadRemoved(_) => {
+                return Err("SendInput cannot present gamepads".to_owned());
+            }
         })
     }
 }
