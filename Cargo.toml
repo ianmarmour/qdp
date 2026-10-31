@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/qdp", "crates/qdp-quic"]
+members = ["crates/qdp", "crates/qdp-codec", "crates/qdp-quic"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,8 +11,11 @@ repository = "https://github.com/ianmarmour/qdp"
 
 [workspace.dependencies]
 bytes = { version = "1.10", default-features = false, features = ["std"] }
+libc = { version = "0.2.172", default-features = false }
 qdp = { path = "crates/qdp" }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rav1d = { version = "1.1.0", default-features = false, features = ["asm", "bitdepth_8", "bitdepth_16"] }
+rav1e = { version = "0.8.1", default-features = false, features = ["asm", "threading"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 ring = { version = "0.17.14", default-features = false }
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
@@ -23,7 +26,7 @@ unicode-normalization = { version = "0.1.24", default-features = false }
 
 [workspace.lints.rust]
 missing_docs = "warn"
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 missing_docs_in_private_items = "warn"

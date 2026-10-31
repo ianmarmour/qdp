@@ -1,0 +1,21 @@
+[package]
+name = "qdp-codec"
+description = "AV1 software encoding and decoding for the Quick Desktop Protocol (QDP), built on rav1e and rav1d"
+readme = "../../README.md"
+keywords = ["remote-desktop", "av1", "video"]
+categories = ["multimedia::video", "multimedia::encoding"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+qdp.workspace = true
+rav1d.workspace = true
+rav1e.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
