@@ -24,13 +24,32 @@ pub enum WireError {
         /// The largest Message Length the receiver accepted at that point.
         limit: u64,
     },
+
+    /// A field held more bytes or entries than the specification allows.
+    #[error("{field} exceeds its limit of {limit}")]
+    LimitExceeded {
+        /// The name of the field, as the specification writes it.
+        field: &'static str,
+        /// The largest length or count the field may have.
+        limit: u64,
+    },
+
+    /// A field held a value that the specification does not allow.
+    #[error("{field} holds a value that is not allowed")]
+    InvalidValue {
+        /// The name of the field, as the specification writes it.
+        field: &'static str,
+    },
 }
 
 impl WireError {
     /// Returns the error code with which the receiver closes the connection.
     pub const fn error_code(self) -> ErrorCode {
         match self {
-            Self::UnexpectedEnd | Self::InvalidUtf8 => ErrorCode::PROTOCOL_VIOLATION,
+            Self::UnexpectedEnd
+            | Self::InvalidUtf8
+            | Self::LimitExceeded { .. }
+            | Self::InvalidValue { .. } => ErrorCode::PROTOCOL_VIOLATION,
             Self::MessageTooLarge { .. } => ErrorCode::MESSAGE_TOO_LARGE,
         }
     }
@@ -56,5 +75,12 @@ mod tests {
             limit: 1,
         };
         assert_eq!(too_large.error_code(), ErrorCode::MESSAGE_TOO_LARGE);
+        let limit = WireError::LimitExceeded {
+            field: "Client Name",
+            limit: 255,
+        };
+        assert_eq!(limit.error_code(), ErrorCode::PROTOCOL_VIOLATION);
+        let invalid = WireError::InvalidValue { field: "Status" };
+        assert_eq!(invalid.error_code(), ErrorCode::PROTOCOL_VIOLATION);
     }
 }
