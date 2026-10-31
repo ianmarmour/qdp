@@ -1,0 +1,28 @@
+[package]
+name = "qdp-runtime"
+description = "Host and client media pipelines for the Quick Desktop Protocol (QDP)"
+readme = "../../README.md"
+keywords = ["remote-desktop", "game-streaming", "low-latency"]
+categories = ["network-programming", "multimedia::video"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytes.workspace = true
+qdp.workspace = true
+qdp-codec.workspace = true
+qdp-quic.workspace = true
+quinn.workspace = true
+ring.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

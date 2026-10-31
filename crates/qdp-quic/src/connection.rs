@@ -89,7 +89,7 @@ impl QdpConnection {
     }
 
     /// Reads the next chunk of the peer's control stream. A finished control
-    /// stream is an error (Section 3.5.1).
+    /// stream is an error (Section 3.5.1). Cancelling the read loses no data.
     pub(crate) async fn read_control(&mut self) -> Result<Bytes, TransportError> {
         match self
             .control_recv
