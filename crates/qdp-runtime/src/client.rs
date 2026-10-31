@@ -10,9 +10,9 @@ use qdp::message::{
     Av1Profiles, Capability, ClientHello, ClientMonitor, ClientMonitorFlags, ClientMonitorId,
     ControlMessage, CursorImage, Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId,
     DeviceKind, DeviceStatusCode, DisplayConfig, DisplayRequest, DisplayRequestId, FeedbackRecord,
-    InputClasses, KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader,
-    StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer,
-    WarpFlags,
+    InputClasses, KeyboardInfo, KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT,
+    StreamHeader, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback,
+    VideoLayer, WarpFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::ClientEvent;
@@ -88,6 +88,9 @@ pub struct ClientOptions {
     pub decoder_threads: u32,
     /// Whether to decode in hardware or software.
     pub decoder: CodecPreference,
+    /// The user's input language and keyboard layout, sent so that the host
+    /// can match them (Section 8.2.3).
+    pub keyboard_info: Option<KeyboardInfo>,
 }
 
 /// What happened during one session.
@@ -311,6 +314,9 @@ pub async fn run(
                         passthrough: None,
                     }))?;
                 }
+                if let Some(keyboard) = &options.keyboard_info {
+                    session.send(&ControlMessage::KeyboardInfo(keyboard.clone()))?;
+                }
                 if let Some(request) = &audio_request {
                     session.send(&ControlMessage::AudioRequest(*request))?;
                 }
@@ -457,7 +463,14 @@ impl ActiveClient<'_> {
                     self.input.remove_device(status.device_id);
                 }
             }
-            ControlMessage::PointerMode(mode) => self.devices.set_pointer_mode(mode.mode),
+            ControlMessage::PointerMode(mode) => {
+                let now = Instant::now();
+                for report in self.devices.set_pointer_mode(mode.mode) {
+                    self.input
+                        .push(report.device_id, report.data, report.kind, report.rest, now);
+                }
+                self.sink.set_pointer_mode(&mode);
+            }
             ControlMessage::AudioConfig(config) => {
                 let quic = self.driver.connection().quic().clone();
                 self.audio.configure(&config, &quic, self.clock)?;

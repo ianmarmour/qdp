@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use qdp::message::CursorImage;
+use qdp::message::{CursorImage, PointerKind, PointerMode};
 use qdp_codec::Yuv420Frame;
 use qdp_runtime::{
     CursorWarp, FrameInfo, FrameSink, InputHandle, PointerButton, SinkControl, UserInput, WarpKind,
@@ -22,10 +22,12 @@ use tokio::sync::Notify;
 use tracing::{debug, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::keyboard::PhysicalKey;
-use winit::window::{CustomCursor, Window, WindowId};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
 use crate::color::{Placement, RgbFrame, scale_into, yuv420_to_rgb};
 use crate::cursor::ScaledCursor;
@@ -46,6 +48,10 @@ const UNITS_PER_PIXEL: f64 = 3.0;
 /// second (Section 9.4).
 const MIN_WARP_INTERVAL: Duration = Duration::from_micros(16_667);
 
+/// The key that, with Ctrl, Alt and Shift held, releases the pointer from
+/// capture (Section 8.9). It is never sent to the host.
+const RELEASE_KEY: KeyCode = KeyCode::KeyZ;
+
 /// What the session thread tells the window.
 #[derive(Debug, Clone)]
 pub enum WindowMessage {
@@ -56,6 +62,8 @@ pub enum WindowMessage {
     Cursor(Option<Arc<CursorImage>>),
     /// The host's pointer moved without the user's input.
     Warp(CursorWarp),
+    /// The host's pointer mode changed.
+    PointerMode(PointerMode),
     /// The session ended, so the window closes.
     SessionEnded,
 }
@@ -153,6 +161,10 @@ impl FrameSink for WindowSink {
     fn warp_cursor(&mut self, warp: CursorWarp) {
         let _ = self.proxy.send_event(WindowMessage::Warp(warp));
     }
+
+    fn set_pointer_mode(&mut self, mode: &PointerMode) {
+        let _ = self.proxy.send_event(WindowMessage::PointerMode(*mode));
+    }
 }
 
 /// The window and its drawing surface.
@@ -195,6 +207,12 @@ pub struct WindowApp {
     focused: bool,
     /// When the user's pointer was last warped.
     last_warp: Option<Instant>,
+    /// The host's pointer mode.
+    pointer_mode: PointerKind,
+    /// Whether the window has captured the pointer for relative mode.
+    captured: bool,
+    /// The modifier keys held.
+    modifiers: ModifiersState,
 }
 
 impl WindowApp {
@@ -220,7 +238,61 @@ impl WindowApp {
             follow: None,
             focused: false,
             last_warp: None,
+            pointer_mode: PointerKind::Absolute,
+            captured: false,
+            modifiers: ModifiersState::empty(),
         }
+    }
+
+    /// Captures the pointer for relative mode: hides it and locks it in
+    /// place, or confines it to the window where it cannot be locked.
+    fn capture_pointer(&mut self) {
+        let Some(display) = &self.display else {
+            return;
+        };
+        let grabbed = display
+            .window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .or_else(|_| display.window.set_cursor_grab(CursorGrabMode::Confined));
+        if let Err(error) = grabbed {
+            debug!(%error, "the pointer cannot be captured");
+        }
+        display.window.set_cursor_visible(false);
+        self.captured = true;
+    }
+
+    /// Releases the pointer from capture, showing the host's cursor again.
+    fn release_pointer(&mut self) {
+        let Some(display) = &self.display else {
+            return;
+        };
+        if let Err(error) = display.window.set_cursor_grab(CursorGrabMode::None) {
+            debug!(%error, "the pointer cannot be released");
+        }
+        display
+            .window
+            .set_cursor_visible(self.cursor.is_some() && self.follow.is_none());
+        self.captured = false;
+    }
+
+    /// Follows the host's pointer mode: relative mode captures the pointer
+    /// while the window has focus.
+    fn set_pointer_mode(&mut self, mode: &PointerMode) {
+        self.pointer_mode = mode.mode;
+        match mode.mode {
+            PointerKind::Relative if self.focused => self.capture_pointer(),
+            PointerKind::Relative => {}
+            _ => self.release_pointer(),
+        }
+    }
+
+    /// Returns whether a key event is the local release action, which
+    /// releases the pointer and the keys held and is not sent to the host.
+    fn is_release_action(&self, event: &KeyEvent) -> bool {
+        event.physical_key == PhysicalKey::Code(RELEASE_KEY)
+            && self.modifiers.control_key()
+            && self.modifiers.alt_key()
+            && self.modifiers.shift_key()
     }
 
     /// Returns where the picture sits in the window and the picture's size,
@@ -522,12 +594,25 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 self.request_redraw();
             }
             WindowMessage::Warp(warp) => self.warp(warp),
+            WindowMessage::PointerMode(mode) => self.set_pointer_mode(&mode),
             WindowMessage::SessionEnded => event_loop.exit(),
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.update_cursor(event_loop);
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device: DeviceId,
+        event: DeviceEvent,
+    ) {
+        // Raw, unaccelerated motion drives the mouse in relative mode.
+        if let (DeviceEvent::MouseMotion { delta: (dx, dy) }, true) = (event, self.captured) {
+            self.input.send(UserInput::MouseMoved { dx, dy });
+        }
     }
 
     fn window_event(
@@ -546,16 +631,32 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 self.cursor_stale = true;
                 self.request_redraw();
             }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::KeyboardInput { event, .. } if self.is_release_action(&event) => {
+                if event.state == ElementState::Pressed {
+                    self.release_pointer();
+                    self.input.send(UserInput::ReleaseAll);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => self.key(&event),
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::CursorMoved { position, .. } if !self.captured => {
                 self.stop_following();
                 self.pointer_moved(position);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } if self.pointer_mode == PointerKind::Relative && !self.captured => {
+                // A click on the window captures the pointer again; it is
+                // not sent.
+                self.capture_pointer();
             }
             WindowEvent::MouseInput { state, button, .. } => self.button(button, state),
             WindowEvent::MouseWheel { delta, .. } => self.scroll(delta),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if !focused {
+                    self.release_pointer();
                     self.input.send(UserInput::ReleaseAll);
                 }
             }

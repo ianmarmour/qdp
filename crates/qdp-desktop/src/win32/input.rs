@@ -9,17 +9,27 @@
 
 use std::io;
 
-use qdp::message::KeyboardLeds;
+use qdp::message::{KeyboardInfo, KeyboardLeds, LayoutPlatform, PointerKind};
 use qdp_runtime::{InputAction, InputInjector, PointerButton};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE,
-    MAPVK_VSC_TO_VK_EX, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput, VIRTUAL_KEY,
-    VK_CAPITAL, VK_NUMLOCK, VK_SCROLL,
+    ACTIVATE_KEYBOARD_LAYOUT_FLAGS, GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
+    KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+    KEYEVENTF_UNICODE, KLF_ACTIVATE, KLF_SUBSTITUTE_OK, LoadKeyboardLayoutW, MAPVK_VSC_TO_VK_EX,
+    MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput, VIRTUAL_KEY, VK_CAPITAL, VK_NUMLOCK,
+    VK_SCROLL,
 };
+
+use windows::Win32::Foundation::{LPARAM, RECT, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CURSOR_SHOWING, CURSORINFO, GetClipCursor, GetCursorInfo, GetForegroundWindow,
+    GetSystemMetrics, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, WM_INPUTLANGCHANGEREQUEST,
+};
+
+use windows::core::PCWSTR;
 
 use super::keycodes::{ScanCode, WindowsKey, consumer_key, keyboard_key};
 
@@ -284,6 +294,72 @@ impl InputInjector for SendInputInjector {
 
     fn supports_text(&self) -> bool {
         true
+    }
+
+    /// Loads the client's layout, when it names a Windows one, and asks the
+    /// window with focus to switch to it.
+    fn set_keyboard_layout(&mut self, info: &KeyboardInfo) {
+        if info.layout_platform != LayoutPlatform::WINDOWS {
+            return;
+        }
+        let name: Vec<u16> = info.layout.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: the name is a terminated wide string.
+        let layout = match unsafe {
+            let flags = ACTIVATE_KEYBOARD_LAYOUT_FLAGS(KLF_ACTIVATE.0 | KLF_SUBSTITUTE_OK.0);
+            LoadKeyboardLayoutW(PCWSTR(name.as_ptr()), flags)
+        } {
+            Ok(layout) => layout,
+            Err(error) => {
+                tracing::warn!(%error, layout = info.layout, "the client's keyboard layout is not installed");
+                return;
+            }
+        };
+        // SAFETY: the request carries the layout handle loaded above.
+        unsafe {
+            let window = GetForegroundWindow();
+            if !window.is_invalid() {
+                let _ = PostMessageW(
+                    Some(window),
+                    WM_INPUTLANGCHANGEREQUEST,
+                    WPARAM(0),
+                    LPARAM(layout.0 as isize),
+                );
+            }
+        }
+    }
+
+    /// Returns relative mode while an application has both hidden the pointer
+    /// and confined it, as games that read raw mouse motion do.
+    fn pointer_mode(&mut self) -> PointerKind {
+        let mut cursor = CURSORINFO {
+            cbSize: size_of::<CURSORINFO>() as u32,
+            ..CURSORINFO::default()
+        };
+        // SAFETY: the structure's size is set as the call requires.
+        let hidden =
+            unsafe { GetCursorInfo(&mut cursor) }.is_ok() && cursor.flags.0 & CURSOR_SHOWING.0 == 0;
+        let mut clip = RECT::default();
+        // SAFETY: the rectangle is written before the call returns.
+        let clipped = unsafe { GetClipCursor(&mut clip) }.is_ok() && clip != virtual_screen();
+        if hidden && clipped {
+            PointerKind::Relative
+        } else {
+            PointerKind::Absolute
+        }
+    }
+}
+
+/// Returns the area of all monitors, which the pointer moves in when nothing
+/// confines it.
+fn virtual_screen() -> RECT {
+    // SAFETY: GetSystemMetrics takes any index.
+    let metric = |index| unsafe { GetSystemMetrics(index) };
+    let (left, top) = (metric(SM_XVIRTUALSCREEN), metric(SM_YVIRTUALSCREEN));
+    RECT {
+        left,
+        top,
+        right: left + metric(SM_CXVIRTUALSCREEN),
+        bottom: top + metric(SM_CYVIRTUALSCREEN),
     }
 }
 

@@ -18,6 +18,7 @@
 mod clipboard;
 #[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
 mod cpal_audio;
+mod keyboard_layout;
 #[cfg(any(
     all(target_os = "linux", feature = "screen-capture"),
     target_os = "macos"
@@ -36,6 +37,7 @@ use qdp_runtime::{ClientAudio, Clipboard, FrameSource, HostAudio, InputInjector,
 use tracing::warn;
 
 pub use clipboard::SystemClipboard;
+pub use keyboard_layout::keyboard_info;
 
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 pub use linux::ScreenCapture;

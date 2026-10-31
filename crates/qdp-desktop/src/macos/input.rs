@@ -3,6 +3,7 @@
 //! macOS delivers posted events only from apps the user has allowed under
 //! System Settings, Privacy & Security, Accessibility.
 
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID,
@@ -31,6 +32,33 @@ const BACK_BUTTON: u32 = 3;
 
 /// The Forward button's number.
 const FORWARD_BUTTON: u32 = 4;
+
+/// The subtype of system-defined events that carry the media keys.
+const MEDIA_KEY_SUBTYPE: i16 = 8;
+
+/// The state bits of a media key event: pressed, and released.
+const MEDIA_KEY_DOWN: isize = 0x0a;
+
+/// The state bits of a released media key.
+const MEDIA_KEY_UP: isize = 0x0b;
+
+/// The modifier flags system-defined media key events carry, pressed and
+/// released.
+const MEDIA_KEY_FLAGS: [usize; 2] = [0xa00, 0xb00];
+
+/// Returns the macOS media key (`NX_KEYTYPE_*` in IOKit's `ev_keymap.h`) of a
+/// Consumer page usage, if it has one.
+fn media_key(usage: u16) -> Option<isize> {
+    match usage {
+        0x00e9 => Some(0),  // Volume Increment: NX_KEYTYPE_SOUND_UP
+        0x00ea => Some(1),  // Volume Decrement: NX_KEYTYPE_SOUND_DOWN
+        0x00e2 => Some(7),  // Mute: NX_KEYTYPE_MUTE
+        0x00cd => Some(16), // Play/Pause: NX_KEYTYPE_PLAY
+        0x00b5 => Some(17), // Scan Next Track: NX_KEYTYPE_NEXT
+        0x00b6 => Some(18), // Scan Previous Track: NX_KEYTYPE_PREVIOUS
+        _ => None,
+    }
+}
 
 /// Returns the event types and button number of a button: the press, the
 /// release and the drag.
@@ -141,6 +169,31 @@ impl QuartzInjector {
         Ok(())
     }
 
+    /// Presses or releases a media key, which macOS posts as a system-defined
+    /// event rather than a key event.
+    fn media_key(&self, key: isize, down: bool) -> Result<(), String> {
+        let (state, flags) = if down {
+            (MEDIA_KEY_DOWN, MEDIA_KEY_FLAGS[0])
+        } else {
+            (MEDIA_KEY_UP, MEDIA_KEY_FLAGS[1])
+        };
+        let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+            NSEventType::SystemDefined,
+            CGPoint { x: 0.0, y: 0.0 },
+            NSEventModifierFlags(flags),
+            0.0,
+            0,
+            None,
+            MEDIA_KEY_SUBTYPE,
+            (key << 16) | (state << 8),
+            -1,
+        )
+        .and_then(|event| event.CGEvent())
+        .ok_or("cannot create a media key event")?;
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+        Ok(())
+    }
+
     /// Types text, a few characters per event.
     fn text(&self, text: &str) -> Result<(), String> {
         let units: Vec<u16> = text.encode_utf16().collect();
@@ -171,8 +224,9 @@ impl InputInjector for QuartzInjector {
                 let code = virtual_key(usage).ok_or("the key has no macOS key code")?;
                 self.key(code, matches!(action, InputAction::KeyDown(_)))
             }
-            InputAction::ConsumerKeyDown(_) | InputAction::ConsumerKeyUp(_) => {
-                Err("media keys are not supported on macOS hosts yet".to_owned())
+            &InputAction::ConsumerKeyDown(usage) | &InputAction::ConsumerKeyUp(usage) => {
+                let key = media_key(usage).ok_or("the media key has no macOS equivalent")?;
+                self.media_key(key, matches!(action, InputAction::ConsumerKeyDown(_)))
             }
             &InputAction::PointerMoveTo { x, y } => {
                 let position = CGPoint {
