@@ -13,8 +13,9 @@
 //!
 //! [`SystemClipboard`] shares the system clipboard's text on each of them,
 //! [`host_audio`] and [`client_audio`] open the audio devices sessions play
-//! and capture through, `GamepadCapture` watches a client's gamepads, and
-//! [`PassthroughCapture`] passes the devices the user chose through.
+//! and capture through, `GamepadCapture` watches a client's gamepads,
+//! [`PassthroughCapture`] passes the devices the user chose through, and
+//! [`TouchpadCapture`] sends the touchpad's raw contacts.
 
 mod clipboard;
 #[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
@@ -32,6 +33,7 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod passthrough;
+mod touchpad;
 #[cfg(windows)]
 mod win32;
 
@@ -45,6 +47,7 @@ pub use clipboard::SystemClipboard;
 pub use gamepad::GamepadCapture;
 pub use keyboard_layout::keyboard_info;
 pub use passthrough::{DeviceSelector, PassthroughCapture};
+pub use touchpad::TouchpadCapture;
 
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 pub use linux::ScreenCapture;
