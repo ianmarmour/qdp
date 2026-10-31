@@ -148,7 +148,8 @@ controller; hosts on other systems decline them. A Linux client can also pass
 a HID device through as it is, with `qdp connect --passthrough
 VENDOR:PRODUCT` (the IDs `lsusb` shows, such as `054c:09cc`), which needs
 read and write access to its `/dev/hidraw*` node, as the udev rules for game
-controllers grant. A Linux host recreates the device through uhid for its
+controllers grant. Devices in a firmware update mode, such as bootloaders, are
+never passed through, so that the host's software cannot reflash them. A Linux host recreates the device through uhid for its
 games, rumble and lights included; by default the host accepts only game
 controllers, and `qdp serve --passthrough all` or `--passthrough off`
 accepts every device or none. On
