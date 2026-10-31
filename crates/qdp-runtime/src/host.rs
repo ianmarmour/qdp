@@ -37,6 +37,7 @@ use crate::host_passthrough::{
 };
 use crate::layout::VideoLayout;
 use crate::media::{CursorState, FrameSource};
+use crate::rate_control::{QueueDetector, RateControl};
 use crate::send_stats::{SendStats, queue_delay};
 use crate::stream_ids::StreamIds;
 use crate::{HostAuthenticator, RuntimeError, close_on_error, is_normal_close};
@@ -181,6 +182,10 @@ struct ActiveHost {
     stream_ids: StreamIds,
     /// How the host encodes, whatever the stream's size.
     tuning: EncoderTuning,
+    /// The quantizer, chosen from how frames cross the path.
+    rate: RateControl,
+    /// Finds queues on the path from the frames' arrival times.
+    queue: QueueDetector,
     /// The session's statistics.
     summary: HostSummary,
     /// The statistics logged every second.
@@ -404,6 +409,8 @@ async fn serve_session(
         display,
         stream_ids,
         tuning: options.encoder,
+        rate: RateControl::new(options.encoder.quantizer),
+        queue: QueueDetector::default(),
         summary: HostSummary::default(),
         outputs: DeviceOutputs::default(),
         cursor: HostCursor::default(),
@@ -617,6 +624,7 @@ impl ActiveHost {
                     self.request_frame(now)?;
                 } else {
                     self.stats.frame_skipped();
+                    self.rate.frame_skipped(now);
                 }
                 next_frame_at = if now >= next_frame_at {
                     next_frame_at + frame_interval
@@ -635,6 +643,7 @@ impl ActiveHost {
                 connection.queued_datagram_bytes(),
                 self.pending_since
                     .map(|since| now.saturating_duration_since(since)),
+                self.rate.quantizer(),
             );
         }
     }
@@ -859,6 +868,7 @@ impl ActiveHost {
             recovery,
             stream_id: self.display.stream_id(),
             settings: self.display.plan().encoder_settings(&self.tuning),
+            quantizer: self.rate.quantizer(),
         })?;
         self.pending_since = Some(now);
         self.frames_requested += 1;
@@ -927,8 +937,22 @@ impl ActiveHost {
             output.frame.is_key_frame,
             now.saturating_duration_since(output.captured_at),
         );
+        self.rate.frame_sent(
+            output.frame.temporal_unit.len(),
+            output.frame.is_key_frame,
+            &self.driver.connection().path_stats(),
+            self.display.plan().frame_interval(),
+            now,
+        );
         for datagram in sent.datagrams {
             self.send(datagram)?;
+        }
+        if !output.frame.is_key_frame {
+            self.queue.frame_sent(
+                self.display.stream_id(),
+                sent.frame_number,
+                self.clock.timestamp(Instant::now()),
+            );
         }
         Ok(())
     }
@@ -1059,6 +1083,11 @@ impl ActiveHost {
             }
             FeedbackRecord::Loss(loss) if loss.stream_id == self.display.stream_id() => {
                 self.sender.handle_loss(loss, smoothed_rtt, now);
+            }
+            FeedbackRecord::FrameTiming(timing) => {
+                if let Some(delay) = self.queue.frame_timing(timing, now) {
+                    self.rate.queue_measured(delay, now);
+                }
             }
             _ => {}
         }

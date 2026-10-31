@@ -35,6 +35,8 @@ pub(crate) struct EncodeJob {
     /// scaled to. A job with other settings than the last reopens the
     /// encoder with them.
     pub(crate) settings: EncoderSettings,
+    /// The quantizer rate control chose for the frame (Section 5.5).
+    pub(crate) quantizer: u8,
 }
 
 /// One frame the encoder produced.
@@ -256,6 +258,7 @@ fn encode_one(
             settings: job.settings,
         };
     }
+    opened.encoder.set_quantizer(job.quantizer);
     let captured = source.capture()?;
     let capture_size = (captured.width(), captured.height());
     let frame = captured.scaled(job.settings.width, job.settings.height);
@@ -300,11 +303,12 @@ mod tests {
             height: height / 2,
             ..settings
         };
-        let job = |request, stream_id, settings| EncodeJob {
+        let job = |request, stream_id, settings: EncoderSettings| EncodeJob {
             request,
             recovery: false,
             stream_id,
             settings,
+            quantizer: settings.quantizer,
         };
         let jobs = [
             job(KeyFrameRequest::Force, first, settings),

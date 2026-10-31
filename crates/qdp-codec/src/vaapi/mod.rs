@@ -856,6 +856,11 @@ impl VideoEncoder for VaapiEncoder {
         }])
     }
 
+    fn set_quantizer(&mut self, quantizer: u8) {
+        // A `base_q_idx` of 0 would make frames lossless.
+        self.base_q_idx = quantizer.max(1);
+    }
+
     fn description(&self) -> &str {
         &self.description
     }

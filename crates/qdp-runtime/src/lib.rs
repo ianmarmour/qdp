@@ -40,6 +40,7 @@ mod host_output;
 mod host_passthrough;
 mod layout;
 mod media;
+mod rate_control;
 mod send_stats;
 mod stream_format;
 mod stream_ids;
