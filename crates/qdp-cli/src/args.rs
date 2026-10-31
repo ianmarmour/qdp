@@ -1,6 +1,6 @@
 //! Command-line arguments.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
 use qdp_quic::KeyPin;
@@ -9,7 +9,8 @@ use qdp_quic::KeyPin;
 pub const USAGE: &str = "\
 Usage:
   qdp serve [options]          Serve this machine's desktop
-  qdp connect ADDRESS [options] Connect to a host
+  qdp connect HOST [options]   Connect to a host, by address or name,
+                               with an optional :PORT (default 4433)
   qdp pin [--identity DIR]     Print this host's key pin for clients
   qdp help                     Show this help
 
@@ -174,6 +175,29 @@ pub fn parse_pin(text: &str) -> Result<KeyPin, ArgsError> {
     Ok(KeyPin(pin))
 }
 
+/// Resolves the host's address: an IP address or a host name, with or without a
+/// port, using the default port when there is none.
+pub fn resolve_address(text: &str) -> Result<SocketAddr, ArgsError> {
+    if let Ok(address) = text.parse::<SocketAddr>() {
+        return Ok(address);
+    }
+    if let Ok(ip) = text.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, DEFAULT_PORT));
+    }
+    let has_port = text
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>().is_ok());
+    let resolved = if has_port {
+        text.to_socket_addrs()
+    } else {
+        (text, DEFAULT_PORT).to_socket_addrs()
+    };
+    resolved
+        .map_err(|resolve_error| error(format!("cannot resolve {text}: {resolve_error}")))?
+        .next()
+        .ok_or_else(|| error(format!("{text} has no address")))
+}
+
 /// Formats a key pin as 64 hexadecimal digits.
 pub fn format_pin(pin: KeyPin) -> String {
     pin.0.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -240,10 +264,8 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
 fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectArgs, ArgsError> {
     let address = arguments
         .next()
-        .ok_or_else(|| error("connect needs the host's address, such as 192.0.2.7:4433"))?;
-    let address = address
-        .parse()
-        .map_err(|_| error(format!("invalid address: {address}")))?;
+        .ok_or_else(|| error("connect needs the host's address, such as 192.0.2.7"))?;
+    let address = resolve_address(&address)?;
     let mut pin = None;
     let mut connect = ConnectArgs {
         address,
@@ -313,6 +335,25 @@ mod tests {
         assert!(parse_line(&format!("connect 192.0.2.7:4433 --pin {pin}")).is_err());
         assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
         assert!(parse_line("connect nowhere --pin x --token t").is_err());
+    }
+
+    /// Addresses may omit the port and may be host names.
+    #[test]
+    fn addresses() {
+        let resolve = |text| resolve_address(text).unwrap();
+        assert_eq!(resolve("192.0.2.7"), "192.0.2.7:4433".parse().unwrap());
+        assert_eq!(resolve("192.0.2.7:5000"), "192.0.2.7:5000".parse().unwrap());
+        assert_eq!(
+            resolve("2001:db8::1"),
+            "[2001:db8::1]:4433".parse().unwrap()
+        );
+        assert_eq!(
+            resolve("[2001:db8::1]:5000"),
+            "[2001:db8::1]:5000".parse().unwrap()
+        );
+        assert!(resolve("localhost").ip().is_loopback());
+        assert_eq!(resolve("localhost:5000").port(), 5000);
+        assert!(resolve_address("no-such-host.invalid").is_err());
     }
 
     /// Pins round-trip through their hexadecimal form, with or without colons.

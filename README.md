@@ -35,10 +35,12 @@ The host creates its key in `./qdp-identity` the first time:
 ./target/release/qdp serve --token my-secret
 ```
 
-On the client, connect with the host's address and pin:
+On the client, connect with the host's address or name and its pin. The host
+listens on UDP port 4433 unless given `--listen`; add `:PORT` to the address
+for another port:
 
 ```bash
-./target/release/qdp connect 192.0.2.7:4433 --pin PIN --token my-secret --output session.y4m
+./target/release/qdp connect 192.0.2.7 --pin PIN --token my-secret --output session.y4m
 ```
 
 To use a password instead of a token, pass `--user NAME` on both sides with the
