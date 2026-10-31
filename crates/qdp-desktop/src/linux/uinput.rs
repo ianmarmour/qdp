@@ -6,11 +6,14 @@
 //! Three devices are created: a keyboard, a relative mouse, and an absolute
 //! pointer covering the desktop, as virtual machines' tablets do, and, when
 //! the client uses them, a touchscreen and a pen tablet covering the desktop
-//! and a gamepad for each one it attaches. Each move of the absolute pointer
-//! also reports the motion it makes, as a mouse does: compositors give
-//! applications no motion for absolute moves, and games that follow the
-//! mouse's motion rather than the pointer's position, as many do to drag
-//! what is under the pointer, would not see the pointer move. Passthrough devices are created
+//! and a gamepad for each one it attaches. While a button is held, each move
+//! of the absolute pointer also reports the motion it makes, as a mouse
+//! does: compositors give applications no motion for absolute moves, and
+//! games that follow the mouse's motion rather than the pointer's position,
+//! as many do to drag what is under the pointer, would not see a drag. Only
+//! while a button is held, because the compositor accelerates the motion,
+//! so that the pointer overshoots before the position puts it back, which
+//! KWin takes for a shake to find the pointer, except during a drag. Passthrough devices are created
 //! through uhid, which needs write access to `/dev/uhid`. Creating them needs write access
 //! to `/dev/uinput`.
 
@@ -239,6 +242,8 @@ pub(super) struct Translator {
     last_position: Option<(i32, i32)>,
     /// The motion of absolute moves not yet sent, in 1/256 count.
     position_remainder: (i32, i32),
+    /// The pointer buttons held, by their codes.
+    held_buttons: Vec<u16>,
     /// Scrolling not yet sent as whole detents, in 1/120 detent.
     detent_remainder: (i32, i32),
 }
@@ -272,7 +277,8 @@ impl Translator {
                 // the position says.
                 match self.last_position.replace((x, y)) {
                     Some((last_x, last_y))
-                        if (x - last_x).abs() <= MAX_MOTION_PIXELS * SUBUNITS
+                        if !self.held_buttons.is_empty()
+                            && (x - last_x).abs() <= MAX_MOTION_PIXELS * SUBUNITS
                             && (y - last_y).abs() <= MAX_MOTION_PIXELS * SUBUNITS =>
                     {
                         let (dx, dy) =
@@ -294,14 +300,18 @@ impl Translator {
                 push_motion(&mut events, x, y);
                 (Device::Mouse, events)
             }
-            InputAction::ButtonDown(button) => (
-                Device::Pointer,
-                vec![Event::new(EV_KEY, button_code(button), 1)],
-            ),
-            InputAction::ButtonUp(button) => (
-                Device::Pointer,
-                vec![Event::new(EV_KEY, button_code(button), 0)],
-            ),
+            InputAction::ButtonDown(button) => {
+                let code = button_code(button);
+                if !self.held_buttons.contains(&code) {
+                    self.held_buttons.push(code);
+                }
+                (Device::Pointer, vec![Event::new(EV_KEY, code, 1)])
+            }
+            InputAction::ButtonUp(button) => {
+                let code = button_code(button);
+                self.held_buttons.retain(|&held| held != code);
+                (Device::Pointer, vec![Event::new(EV_KEY, code, 0)])
+            }
             InputAction::Scroll {
                 vertical,
                 horizontal,
@@ -906,17 +916,35 @@ mod tests {
         assert_eq!(translator.events(&InputAction::Text("a".to_owned())), None);
     }
 
-    /// Each move of the absolute pointer reports its motion, in whole
-    /// pixels, before its position, unless it jumps.
+    /// While a button is held, each move of the absolute pointer reports
+    /// its motion, in whole pixels, before its position, unless it jumps.
     #[test]
-    fn reports_the_motion_of_positions() {
+    fn reports_the_motion_of_drags() {
         let mut translator = Translator::default();
+        let pixel = SUBUNITS;
+        // Without a button held, a move reports only its position.
+        let position =
+            |x: i32, y: i32| vec![Event::new(EV_ABS, ABS_X, x), Event::new(EV_ABS, ABS_Y, y)];
+        for x in [100, 120] {
+            assert_eq!(
+                translator
+                    .events(&InputAction::PointerMoveTo {
+                        x: x * pixel,
+                        y: 100 * pixel
+                    })
+                    .unwrap()
+                    .1,
+                position(x * pixel, 100 * pixel)
+            );
+        }
+        translator
+            .events(&InputAction::ButtonDown(PointerButton::Left))
+            .unwrap();
         let mut move_to = |x: i32, y: i32| {
             translator
                 .events(&InputAction::PointerMoveTo { x, y })
                 .unwrap()
         };
-        let pixel = SUBUNITS;
         move_to(100 * pixel, 100 * pixel);
         assert_eq!(
             move_to(103 * pixel, 100 * pixel - pixel / 2),
@@ -959,9 +987,22 @@ mod tests {
                     y: 10 * pixel
                 })
                 .unwrap()
-                .1
-                .len(),
-            2
+                .1,
+            position(10 * pixel, 10 * pixel)
+        );
+        // Once the button is released, moves report positions alone again.
+        translator
+            .events(&InputAction::ButtonUp(PointerButton::Left))
+            .unwrap();
+        assert_eq!(
+            translator
+                .events(&InputAction::PointerMoveTo {
+                    x: 20 * pixel,
+                    y: 10 * pixel
+                })
+                .unwrap()
+                .1,
+            position(20 * pixel, 10 * pixel)
         );
     }
 
