@@ -122,7 +122,9 @@ sudo usermod -aG input "$USER"
 ```
 
 Log out and in again for the group change to apply. Without access the host
-logs a warning and ignores input. On Windows the host sends input with
+logs a warning and ignores input. A Linux host also accepts the client's
+gamepads, each as a virtual Xbox 360 controller that games rumble; hosts on
+other systems decline them. On Windows the host sends input with
 `SendInput`; Windows keeps it from reaching programs run as administrator unless
 the host runs as administrator too, and from the sign-in screen and elevation
 prompts entirely.

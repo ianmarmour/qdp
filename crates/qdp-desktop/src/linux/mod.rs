@@ -9,6 +9,7 @@
 
 #[cfg(feature = "audio")]
 mod audio;
+mod gamepad;
 mod keycodes;
 #[cfg(feature = "screen-capture")]
 mod screencast;

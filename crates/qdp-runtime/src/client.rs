@@ -8,14 +8,14 @@ use bytes::Bytes;
 use qdp::input::{DeviceClass, InputSender};
 use qdp::message::{
     Av1Profiles, Capability, ClientHello, ClientMonitor, ClientMonitorFlags, ClientMonitorId,
-    ControlMessage, CursorImage, Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId,
-    DeviceKind, DeviceStatusCode, DisplayConfig, DisplayRequest, DisplayRequestId, FeedbackRecord,
-    InputClasses, KeyboardInfo, KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT,
-    StreamHeader, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback,
-    VideoLayer, WarpFlags,
+    ControlMessage, CursorImage, Datagram, DatagramPayload, DeviceAttach, DeviceDetach,
+    DeviceFeatures, DeviceId, DeviceKind, DeviceOutput, DeviceStatusCode, DisplayConfig,
+    DisplayRequest, DisplayRequestId, FeedbackRecord, GamepadOutput, InputClasses, KeyboardInfo,
+    KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader, StreamId,
+    VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer, WarpFlags,
 };
 use qdp::registry::ErrorCode;
-use qdp::session::ClientEvent;
+use qdp::session::{ClientEvent, Negotiated};
 use qdp::time::{ClockSync, SessionClock, answer_ping};
 use qdp::video::VideoReceiver;
 use qdp::wire::{SignedVarInt, VarInt};
@@ -28,7 +28,10 @@ use tracing::{debug, info, warn};
 use crate::audio::{ClientAudio, ClientAudioStreams};
 use crate::auth::ClientAuthExchange;
 use crate::client_cursor::{ClientCursor, CursorChange};
-use crate::client_input::{ClientDevices, InputQueue, KEYBOARD_ID, MOUSE_ID, POINTER_ID, TEXT_ID};
+use crate::client_input::{
+    ClientDevices, DeviceFeedback, InputQueue, KEYBOARD_ID, MOUSE_ID, POINTER_ID, TEXT_ID,
+    UserInput,
+};
 use crate::clipboard::{
     self, ClipboardDirections, ClipboardLink, ClipboardOutput, ClipboardWorker, SharedClipboard,
     Side,
@@ -59,6 +62,10 @@ const RECORD_OVERHEAD: usize = 16;
 
 /// QDP positions are in 1/256 pixel (Section 1.5.6).
 const SUBUNITS: f64 = 256.0;
+
+/// How long a gamepad keeps rumbling without its output being repeated
+/// (Section 8.8.1).
+const RUMBLE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// The most bytes a `CURSOR_IMAGE` stream carries after its Stream Type: the
 /// largest image's pixels and eight variable-length integers.
@@ -102,7 +109,8 @@ pub struct ClientSummary {
     pub decode_failures: u64,
 }
 
-/// The devices every client attaches during configuration (Section 8.2.1).
+/// The devices every client attaches during configuration, if the session
+/// negotiated their input class (Section 8.2.1).
 const STANDARD_DEVICES: [(DeviceId, DeviceKind, &str); 4] = [
     (KEYBOARD_ID, DeviceKind::KEYBOARD, "Keyboard"),
     (POINTER_ID, DeviceKind::POINTER, "Pointer"),
@@ -120,6 +128,25 @@ fn device_class(device_id: DeviceId) -> Option<DeviceClass> {
     } else {
         DeviceClass::Standard
     })
+}
+
+/// Returns the input classes the client can attach: its standard devices and
+/// the gamepads the user connects.
+fn input_classes() -> InputClasses {
+    InputClasses::KEYBOARD
+        .union(InputClasses::POINTER)
+        .union(InputClasses::MOUSE)
+        .union(InputClasses::TEXT)
+        .union(InputClasses::GAMEPAD)
+}
+
+/// Returns whether a session that negotiated `negotiated` can use devices
+/// of `kind` (Section 4.6.5).
+fn supports_kind(negotiated: Option<&Negotiated>, kind: DeviceKind) -> bool {
+    let class = kind.input_class();
+    negotiated
+        .zip(class)
+        .is_some_and(|(negotiated, class)| negotiated.supports_input(class))
 }
 
 /// Returns the client's hello, with clipboard sharing in `clipboard`'s
@@ -143,11 +170,7 @@ fn client_hello(
                 flags: VideoCodecFlags::default(),
                 max_level: NO_LEVEL_LIMIT,
             }),
-            Capability::Input(
-                InputClasses::KEYBOARD
-                    .union(InputClasses::POINTER)
-                    .union(InputClasses::MOUSE),
-            ),
+            Capability::Input(input_classes()),
         ],
     };
     if let Some(directions) = clipboard {
@@ -256,6 +279,10 @@ struct ActiveClient<'a> {
     clipboard: Option<ClipboardLink>,
     /// The audio streams.
     audio: ClientAudioStreams,
+    /// The Output Sequence last applied to each gamepad.
+    output_sequences: HashMap<DeviceId, u64>,
+    /// When each rumbling gamepad's output last arrived.
+    rumbling: HashMap<DeviceId, Instant>,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
@@ -305,6 +332,9 @@ pub async fn run(
                     options.display,
                 )))?;
                 for (device_id, kind, name) in STANDARD_DEVICES {
+                    if !supports_kind(session.negotiated(), kind) {
+                        continue;
+                    }
                     session.send(&ControlMessage::DeviceAttach(DeviceAttach {
                         device_id,
                         kind,
@@ -353,6 +383,8 @@ pub async fn run(
         devices: ClientDevices::default(),
         input_queue: input,
         audio: ClientAudioStreams::new(audio),
+        output_sequences: HashMap::new(),
+        rumbling: HashMap::new(),
         cursor: ClientCursor::default(),
         monitor_origin: (0.0, 0.0),
         clipboard,
@@ -415,6 +447,58 @@ impl ActiveClient<'_> {
         Ok(())
     }
 
+    /// Passes a gamepad's output to its device, if it is newer than the last
+    /// applied (Section 8.8.1).
+    fn handle_device_output(&mut self, output: &DeviceOutput<'_>, now: Instant) {
+        let (Some(slot), Some(queue)) = (
+            self.devices.gamepad_slot(output.device_id),
+            &self.input_queue,
+        ) else {
+            return;
+        };
+        let sequence = output.output_sequence.into_inner();
+        let last = self.output_sequences.entry(output.device_id).or_default();
+        if sequence <= *last {
+            return;
+        }
+        *last = sequence;
+        let Ok(gamepad) = GamepadOutput::decode(output.data) else {
+            debug!("malformed gamepad output ignored");
+            return;
+        };
+        if gamepad.is_rumbling() {
+            self.rumbling.insert(output.device_id, now);
+        } else {
+            self.rumbling.remove(&output.device_id);
+        }
+        queue.send_feedback(DeviceFeedback::Gamepad {
+            slot,
+            output: gamepad,
+        });
+    }
+
+    /// Stops the rumble of gamepads whose output has not been repeated for
+    /// 250 ms while they rumbled (Section 8.8.1).
+    fn stop_stale_rumble(&mut self, now: Instant) {
+        let stale: Vec<DeviceId> = self
+            .rumbling
+            .iter()
+            .filter(|(_, last)| now.saturating_duration_since(**last) >= RUMBLE_TIMEOUT)
+            .map(|(&device_id, _)| device_id)
+            .collect();
+        for device_id in stale {
+            self.rumbling.remove(&device_id);
+            if let (Some(slot), Some(queue)) =
+                (self.devices.gamepad_slot(device_id), &self.input_queue)
+            {
+                queue.send_feedback(DeviceFeedback::Gamepad {
+                    slot,
+                    output: GamepadOutput::default(),
+                });
+            }
+        }
+    }
+
     /// Acts on a unidirectional stream from the host.
     fn handle_stream(&mut self, stream: qdp_quic::ReceivedStream) -> Result<(), RuntimeError> {
         if let (StreamHeader::ClipboardData { request_id }, Some(link)) =
@@ -451,8 +535,21 @@ impl ActiveClient<'_> {
             ControlMessage::DisplayConfig(config) => self.configure(&config)?,
             ControlMessage::DeviceStatus(status) => {
                 if status.status == DeviceStatusCode::Accepted {
-                    if let Some(class) = device_class(status.device_id) {
+                    let gamepad = self
+                        .devices
+                        .gamepad_slot(status.device_id)
+                        .map(|_| DeviceClass::Standard);
+                    if let Some(class) = device_class(status.device_id).or(gamepad) {
                         self.input.add_device(status.device_id, class);
+                    }
+                    if let Some(report) = self.devices.gamepad_state(status.device_id) {
+                        self.input.push(
+                            report.device_id,
+                            report.data,
+                            report.kind,
+                            report.rest,
+                            Instant::now(),
+                        );
                     }
                 } else {
                     debug!(
@@ -578,6 +675,7 @@ impl ActiveClient<'_> {
                 .chain(Some(self.sync.next_ping_at()))
                 .chain(self.input.poll_timeout(smoothed_rtt))
                 .chain(self.clipboard.as_ref().map(ClipboardLink::poll_timeout))
+                .chain(self.rumbling.values().map(|last| *last + RUMBLE_TIMEOUT))
                 .min();
             let wake = self.input_queue.as_ref().map(InputQueue::wake);
             match self.driver.next_input(deadline, wake).await {
@@ -608,6 +706,7 @@ impl ActiveClient<'_> {
             if let Some(ping) = self.sync.poll_ping(now) {
                 self.send(ping.to_bytes())?;
             }
+            self.stop_stale_rumble(now);
             self.send_input(smoothed_rtt, now)?;
         }
     }
@@ -617,9 +716,45 @@ impl ActiveClient<'_> {
     fn send_input(&mut self, smoothed_rtt: Duration, now: Instant) -> Result<(), RuntimeError> {
         if let Some(queue) = &self.input_queue {
             while let Some(action) = queue.try_next() {
-                for report in self.devices.reports(action) {
-                    self.input
-                        .push(report.device_id, report.data, report.kind, report.rest, now);
+                match action {
+                    UserInput::GamepadConnected { .. }
+                        if !supports_kind(
+                            self.driver.session().negotiated(),
+                            DeviceKind::GAMEPAD,
+                        ) =>
+                    {
+                        debug!("the host does not take gamepads");
+                    }
+                    UserInput::GamepadConnected {
+                        slot,
+                        features,
+                        name,
+                    } => {
+                        let attach = self.devices.connect_gamepad(slot, features, name);
+                        self.driver
+                            .session()
+                            .send(&ControlMessage::DeviceAttach(attach))?;
+                    }
+                    UserInput::GamepadDisconnected { slot } => {
+                        if let Some(device_id) = self.devices.disconnect_gamepad(slot) {
+                            self.input.remove_device(device_id);
+                            self.rumbling.remove(&device_id);
+                            self.driver
+                                .session()
+                                .send(&ControlMessage::DeviceDetach(DeviceDetach { device_id }))?;
+                        }
+                    }
+                    action => {
+                        for report in self.devices.reports(action) {
+                            self.input.push(
+                                report.device_id,
+                                report.data,
+                                report.kind,
+                                report.rest,
+                                now,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -677,6 +812,7 @@ impl ActiveClient<'_> {
                 self.send(pong.to_bytes())?;
             }
             Datagram::InputAck(ack) => self.input.handle_ack(&ack, now),
+            Datagram::DeviceOutput(output) => self.handle_device_output(&output, now),
             Datagram::AudioPacket(packet) => self.audio.handle_packet(&packet, now),
             _ => {}
         }

@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 use qdp::input::{InputEvent, total_delta};
 use qdp::message::{
-    DeviceId, DeviceKind, KeyboardInfo, KeyboardLeds, KeyboardReport, MouseReport, PointerButtons,
-    PointerKind, PointerReport, TextReport,
+    DeviceId, DeviceKind, GamepadOutput, GamepadReport, KeyboardInfo, KeyboardLeds, KeyboardReport,
+    MouseReport, PointerButtons, PointerKind, PointerReport, TextReport,
 };
 use tracing::debug;
 
@@ -93,6 +93,15 @@ pub enum InputAction {
     },
     /// Types committed text.
     Text(String),
+    /// Sets a gamepad's controls, creating the gamepad on its first report.
+    Gamepad {
+        /// The gamepad.
+        device_id: DeviceId,
+        /// Its complete state.
+        report: GamepadReport,
+    },
+    /// Removes a gamepad, as when the client detaches it.
+    GamepadRemoved(DeviceId),
 }
 
 /// Performs input actions on the host's desktop.
@@ -120,6 +129,18 @@ pub trait InputInjector: Send {
     /// do, and absolute otherwise.
     fn pointer_mode(&mut self) -> PointerKind {
         PointerKind::Absolute
+    }
+
+    /// Returns whether the injector can present gamepads to the host's
+    /// applications, so that the host accepts gamepad devices.
+    fn supports_gamepads(&self) -> bool {
+        false
+    }
+
+    /// Returns the gamepads whose rumble or LED the host's applications
+    /// changed since the last call, with their new output.
+    fn gamepad_outputs(&mut self) -> Vec<(DeviceId, GamepadOutput)> {
+        Vec::new()
     }
 
     /// Selects the keyboard layout matching the client's, where the platform
@@ -170,6 +191,8 @@ enum DeviceState {
     Mouse(MouseReport),
     /// A text device, which has no state.
     Text,
+    /// A gamepad.
+    Gamepad(GamepadReport),
 }
 
 /// The standard devices of one session and their last applied states.
@@ -188,6 +211,7 @@ impl StandardInput {
             DeviceKind::POINTER => DeviceState::Pointer(PointerReport::default(), false),
             DeviceKind::MOUSE => DeviceState::Mouse(MouseReport::default()),
             DeviceKind::TEXT => DeviceState::Text,
+            DeviceKind::GAMEPAD => DeviceState::Gamepad(GamepadReport::default()),
             _ => return false,
         };
         self.devices.insert(device_id, state);
@@ -208,11 +232,17 @@ impl StandardInput {
         self.devices.contains_key(&device_id)
     }
 
-    /// Removes a device, returning the actions that release what it held.
+    /// Removes a device, returning the actions that release what it held and,
+    /// for a gamepad, remove it.
     pub(crate) fn detach(&mut self, device_id: DeviceId) -> Vec<InputAction> {
-        self.devices
-            .remove(&device_id)
-            .map_or_else(Vec::new, |state| release(&state))
+        let Some(state) = self.devices.remove(&device_id) else {
+            return Vec::new();
+        };
+        let mut actions = release(device_id, &state);
+        if matches!(state, DeviceState::Gamepad(_)) {
+            actions.push(InputAction::GamepadRemoved(device_id));
+        }
+        actions
     }
 
     /// Returns the actions that release everything every device holds, as when
@@ -222,7 +252,7 @@ impl StandardInput {
         let mut actions = Vec::new();
         for id in ids {
             if let Some(state) = self.devices.get_mut(&id) {
-                actions.extend(release(state));
+                actions.extend(release(id, state));
                 *state = at_rest(state);
             }
         }
@@ -306,6 +336,17 @@ impl StandardInput {
                 Ok(report) => actions.push(InputAction::Text(report.text)),
                 Err(_) => debug!("malformed text report skipped"),
             },
+            DeviceState::Gamepad(previous) => match GamepadReport::decode(&event.data) {
+                Ok(report) if report != *previous => {
+                    actions.push(InputAction::Gamepad {
+                        device_id: event.device_id,
+                        report,
+                    });
+                    *previous = report;
+                }
+                Ok(_) => {}
+                Err(_) => debug!("malformed gamepad report skipped"),
+            },
         }
         actions
     }
@@ -375,7 +416,7 @@ fn scroll_action(previous: (i32, i32), current: (i32, i32), actions: &mut Vec<In
 }
 
 /// Returns the actions that release what a device holds.
-fn release(state: &DeviceState) -> Vec<InputAction> {
+fn release(device_id: DeviceId, state: &DeviceState) -> Vec<InputAction> {
     let mut actions = Vec::new();
     match state {
         DeviceState::Keyboard(report) => {
@@ -388,8 +429,27 @@ fn release(state: &DeviceState) -> Vec<InputAction> {
             button_actions(report.buttons, PointerButtons::default(), &mut actions);
         }
         DeviceState::Text => {}
+        DeviceState::Gamepad(report) => {
+            let rest = gamepad_at_rest(report);
+            if rest != *report {
+                actions.push(InputAction::Gamepad {
+                    device_id,
+                    report: rest,
+                });
+            }
+        }
     }
     actions
+}
+
+/// Returns a gamepad's state with its buttons and triggers released and its
+/// sticks centred, keeping its motion sensors' readings.
+fn gamepad_at_rest(report: &GamepadReport) -> GamepadReport {
+    GamepadReport {
+        gyro: report.gyro,
+        accel: report.accel,
+        ..GamepadReport::default()
+    }
 }
 
 /// Returns a device's state with nothing held, keeping its position and
@@ -409,13 +469,14 @@ fn at_rest(state: &DeviceState) -> DeviceState {
             ..*report
         }),
         DeviceState::Text => DeviceState::Text,
+        DeviceState::Gamepad(report) => DeviceState::Gamepad(gamepad_at_rest(report)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qdp::message::{DisplayConfigId, InputSequence, Timestamp, WarpId};
+    use qdp::message::{DisplayConfigId, GamepadButtons, InputSequence, Timestamp, WarpId};
     use qdp::wire::VarInt;
 
     /// The keyboard's Device ID in the tests.
@@ -426,6 +487,9 @@ mod tests {
 
     /// The mouse's Device ID in the tests.
     const MOUSE: DeviceId = DeviceId(VarInt::from_u32(3));
+
+    /// The gamepad's Device ID in the tests.
+    const GAMEPAD: DeviceId = DeviceId(VarInt::from_u32(16));
 
     /// Returns an event carrying `data` from `device_id`.
     fn event(device_id: DeviceId, data: Vec<u8>) -> InputEvent {
@@ -445,7 +509,7 @@ mod tests {
         assert!(input.attach(KEYBOARD, DeviceKind::KEYBOARD));
         assert!(input.attach(POINTER, DeviceKind::POINTER));
         assert!(input.attach(MOUSE, DeviceKind::MOUSE));
-        assert!(!input.attach(DeviceId(VarInt::from_u32(9)), DeviceKind::GAMEPAD));
+        assert!(!input.attach(DeviceId(VarInt::from_u32(9)), DeviceKind::TOUCHPAD));
         input
     }
 
@@ -659,5 +723,45 @@ mod tests {
                 )
                 .is_empty()
         );
+    }
+
+    /// Gamepad reports become actions only when the controls change, and
+    /// detaching a gamepad recentres it, then removes it.
+    #[test]
+    fn gamepad_differences() {
+        let mut input = devices();
+        assert!(input.attach(GAMEPAD, DeviceKind::GAMEPAD));
+        let report = GamepadReport {
+            buttons: GamepadButtons::button(0),
+            left_stick_x: -1000,
+            right_trigger: 40_000,
+            ..GamepadReport::default()
+        };
+        let apply = |input: &mut StandardInput| {
+            input.apply(
+                &event(GAMEPAD, report.to_bytes()),
+                Positions::Apply,
+                PointerKind::Absolute,
+            )
+        };
+        assert_eq!(
+            apply(&mut input),
+            [InputAction::Gamepad {
+                device_id: GAMEPAD,
+                report
+            }]
+        );
+        assert!(apply(&mut input).is_empty());
+        assert_eq!(
+            input.detach(GAMEPAD),
+            [
+                InputAction::Gamepad {
+                    device_id: GAMEPAD,
+                    report: GamepadReport::default()
+                },
+                InputAction::GamepadRemoved(GAMEPAD)
+            ]
+        );
+        assert!(apply(&mut input).is_empty());
     }
 }

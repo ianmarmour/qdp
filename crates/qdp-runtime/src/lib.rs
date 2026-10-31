@@ -31,6 +31,7 @@ mod encode_thread;
 mod host;
 mod host_cursor;
 mod host_input;
+mod host_output;
 mod media;
 mod send_stats;
 
@@ -47,7 +48,7 @@ pub use audio::{
 };
 pub use auth::{ClientCredentials, HostAuthenticator};
 pub use client::{ClientOptions, ClientSummary, DisplaySize, run};
-pub use client_input::{InputHandle, InputQueue, UserInput, input_channel};
+pub use client_input::{DeviceFeedback, InputHandle, InputQueue, UserInput, input_channel};
 pub use clipboard::{Clipboard, ClipboardDirections, SharedClipboard};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
 pub use host_input::{InputAction, InputInjector, NoInput, PointerButton};
