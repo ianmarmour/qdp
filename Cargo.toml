@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/qdp", "crates/qdp-codec", "crates/qdp-quic"]
-exclude = ["third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -32,7 +31,10 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 missing_docs_in_private_items = "warn"
 
-# rav1e is vendored with a patch that removes its lookahead delay in
-# low-latency mode; see third_party/README.md.
+# rav1e comes from a fork carrying one patch: it accepts an RDO lookahead of
+# zero frames in low-latency mode, so each frame is encoded as soon as it is
+# received rather than four frames later. The patch is the single commit on
+# the fork's qdp-zero-lookahead branch, on top of the commit rav1e 0.8.1 was
+# published from. Remove this entry once rav1e accepts an equivalent change.
 [patch.crates-io]
-rav1e = { path = "third_party/rav1e" }
+rav1e = { git = "https://github.com/ianmarmour/rav1e", rev = "9cedec14a47010f0e078640707a6a0403abfa4de" }
