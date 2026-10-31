@@ -135,6 +135,16 @@ impl InputInjector for NoInput {
     }
 }
 
+/// Whether a report's pointer positions are applied (Section 8.7, rule 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Positions {
+    /// The positions are current: apply them.
+    Apply,
+    /// The positions were computed before the host's latest warp: ignore
+    /// them, applying buttons and scrolling only.
+    Ignore,
+}
+
 /// The last applied state of one device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DeviceState {
@@ -207,7 +217,7 @@ impl StandardInput {
 
     /// Returns the actions a report calls for. A report that does not parse
     /// is skipped.
-    pub(crate) fn apply(&mut self, event: &InputEvent) -> Vec<InputAction> {
+    pub(crate) fn apply(&mut self, event: &InputEvent, positions: Positions) -> Vec<InputAction> {
         let Some(state) = self.devices.get_mut(&event.device_id) else {
             return Vec::new();
         };
@@ -222,17 +232,23 @@ impl StandardInput {
                 *previous = report;
             }
             DeviceState::Pointer(previous, positioned) => {
-                let Ok(report) = PointerReport::decode(&event.data) else {
+                let Ok(mut report) = PointerReport::decode(&event.data) else {
                     debug!("malformed pointer report skipped");
                     return actions;
                 };
                 // Move first, so that a press lands where the report says.
-                if !*positioned || (report.x, report.y) != (previous.x, previous.y) {
+                let moved = !*positioned || (report.x, report.y) != (previous.x, previous.y);
+                if moved && positions == Positions::Apply {
                     actions.push(InputAction::PointerMoveTo {
                         x: report.x,
                         y: report.y,
                     });
                     *positioned = true;
+                }
+                if positions == Positions::Ignore {
+                    // Keep the last applied position, so that the next current
+                    // report moves the pointer even to the same place.
+                    (report.x, report.y) = (previous.x, previous.y);
                 }
                 button_actions(previous.buttons, report.buttons, &mut actions);
                 scroll_action(
@@ -415,7 +431,7 @@ mod tests {
         report.set_held(0xe1, true); // Left Shift
         report.set_held(0x04, true); // A
         report.consumer_keys[0] = 0x00e9; // Volume Increment
-        let actions = input.apply(&event(KEYBOARD, report.to_bytes()));
+        let actions = input.apply(&event(KEYBOARD, report.to_bytes()), Positions::Apply);
         assert_eq!(
             actions,
             [
@@ -427,7 +443,7 @@ mod tests {
         report.set_held(0x04, false);
         report.set_held(0x05, true);
         report.consumer_keys[0] = 0;
-        let actions = input.apply(&event(KEYBOARD, report.to_bytes()));
+        let actions = input.apply(&event(KEYBOARD, report.to_bytes()), Positions::Apply);
         assert_eq!(
             actions,
             [
@@ -456,7 +472,7 @@ mod tests {
             pan_total: 0,
         };
         assert_eq!(
-            input.apply(&event(POINTER, report.to_bytes())),
+            input.apply(&event(POINTER, report.to_bytes()), Positions::Apply),
             [
                 InputAction::PointerMoveTo {
                     x: 100 * 256,
@@ -475,7 +491,7 @@ mod tests {
             ..report
         };
         assert_eq!(
-            input.apply(&event(POINTER, next.to_bytes())),
+            input.apply(&event(POINTER, next.to_bytes()), Positions::Apply),
             [
                 InputAction::ButtonUp(PointerButton::Left),
                 InputAction::Scroll {
@@ -483,6 +499,31 @@ mod tests {
                     horizontal: 0
                 }
             ]
+        );
+    }
+
+    /// Positions computed before a warp are ignored while buttons apply, and
+    /// the next current report moves the pointer.
+    #[test]
+    fn ignores_positions_before_a_warp() {
+        let mut input = devices();
+        let report = PointerReport {
+            buttons: PointerButtons::LEFT,
+            x: 10 * 256,
+            y: 20 * 256,
+            wheel_total: 0,
+            pan_total: 0,
+        };
+        assert_eq!(
+            input.apply(&event(POINTER, report.to_bytes()), Positions::Ignore),
+            [InputAction::ButtonDown(PointerButton::Left)]
+        );
+        assert_eq!(
+            input.apply(&event(POINTER, report.to_bytes()), Positions::Apply),
+            [InputAction::PointerMoveTo {
+                x: 10 * 256,
+                y: 20 * 256
+            }]
         );
     }
 
@@ -499,7 +540,7 @@ mod tests {
             pan_total: 0,
         };
         assert_eq!(
-            input.apply(&event(MOUSE, report.to_bytes())),
+            input.apply(&event(MOUSE, report.to_bytes()), Positions::Apply),
             [
                 InputAction::MouseMoveBy { dx: 512, dy: -256 },
                 InputAction::ButtonDown(PointerButton::Right)
@@ -509,7 +550,15 @@ mod tests {
             input.detach(MOUSE),
             [InputAction::ButtonUp(PointerButton::Right)]
         );
-        assert!(input.apply(&event(MOUSE, report.to_bytes())).is_empty());
-        assert!(input.apply(&event(KEYBOARD, vec![1, 2])).is_empty());
+        assert!(
+            input
+                .apply(&event(MOUSE, report.to_bytes()), Positions::Apply)
+                .is_empty()
+        );
+        assert!(
+            input
+                .apply(&event(KEYBOARD, vec![1, 2]), Positions::Apply)
+                .is_empty()
+        );
     }
 }

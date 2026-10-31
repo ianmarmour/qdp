@@ -1,15 +1,17 @@
 //! Drivers that run the sans-I/O session state machines over a QDP connection.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
-use qdp::message::ClientHello;
+use qdp::message::{ClientHello, StreamHeader};
 use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, ClientSession, HostConfig, HostEvent, HostSession, SessionError};
 use tracing::debug;
 
+use crate::streams::{ReceivedStream, StreamPolicy, receive_streams};
 use crate::{QdpConnection, TransportError};
 
 /// What a session state machine must provide for a driver to run it.
@@ -103,6 +105,9 @@ pub enum DriverInput<E> {
     Event(E),
     /// A datagram from the peer.
     Datagram(Bytes),
+    /// A unidirectional stream from the peer, read to its end, once
+    /// [`SessionDriver::accept_streams`] has been called.
+    Stream(ReceivedStream),
     /// The deadline the application passed has been reached.
     Deadline,
     /// The application's wake-up signal was notified, for example by a worker
@@ -119,6 +124,8 @@ pub struct SessionDriver<S> {
     connection: QdpConnection,
     /// The session state machine.
     session: S,
+    /// The peer's complete streams, once the application accepts them.
+    streams: Option<mpsc::Receiver<ReceivedStream>>,
 }
 
 /// The driver of a host's session.
@@ -133,6 +140,7 @@ impl HostDriver {
         Self {
             connection,
             session: HostSession::new(config, Instant::now()),
+            streams: None,
         }
     }
 }
@@ -144,6 +152,7 @@ impl ClientDriver {
         Ok(Self {
             connection,
             session: ClientSession::new(hello)?,
+            streams: None,
         })
     }
 }
@@ -158,6 +167,18 @@ impl<S: DrivenSession> SessionDriver<S> {
     /// [`SessionDriver::flush`] after changing it.
     pub fn session(&mut self) -> &mut S {
         &mut self.session
+    }
+
+    /// Starts accepting the peer's unidirectional streams, which
+    /// [`SessionDriver::next_input`] then returns, each read to its end, as
+    /// `policy` directs. Streams the peer opened earlier wait in the QUIC
+    /// connection until then.
+    pub fn accept_streams(
+        &mut self,
+        policy: impl Fn(&StreamHeader) -> StreamPolicy + Send + Sync + 'static,
+    ) {
+        let connection = self.connection.quic().clone();
+        self.streams = Some(receive_streams(connection, Arc::new(policy)));
     }
 
     /// Writes everything the session has queued to the control stream, and closes
@@ -234,12 +255,19 @@ impl<S: DrivenSession> SessionDriver<S> {
                 }
             };
             let quic = self.connection.quic().clone();
+            let stream = async {
+                match self.streams.as_mut() {
+                    Some(streams) => streams.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 biased;
                 datagram = quic.read_datagram() => {
                     return Ok(DriverInput::Datagram(datagram?));
                 }
                 read = self.connection.read_control() => self.handle_control_read(read)?,
+                Some(stream) = stream => return Ok(DriverInput::Stream(stream)),
                 () = woken => return Ok(DriverInput::Wake),
                 () = sleep => {
                     let now = Instant::now();

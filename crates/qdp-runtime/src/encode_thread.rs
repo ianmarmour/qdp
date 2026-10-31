@@ -15,7 +15,7 @@ use qdp_codec::{
 use tokio::sync::{Notify, oneshot};
 
 use crate::RuntimeError;
-use crate::media::{FrameSource, changed_blocks};
+use crate::media::{CursorState, FrameSource, changed_blocks};
 
 /// The name of the encoder thread, as debuggers and profilers show it.
 const THREAD_NAME: &str = "qdp-encoder";
@@ -41,6 +41,9 @@ pub(crate) struct EncodedOutput {
     pub(crate) blocks: BlockSet,
     /// When the source frame was captured.
     pub(crate) captured_at: Instant,
+    /// The pointer when the frame was captured, if the source reports it
+    /// apart from the frames.
+    pub(crate) cursor: Option<CursorState>,
 }
 
 /// A thread that owns the capture source and the encoder.
@@ -148,36 +151,38 @@ fn run(
     let mut next_input_index = 0;
     while let Ok(job) = jobs.recv() {
         let captured_at = Instant::now();
-        let outputs = encode_one(&mut *source, &mut *encoder, job).map(|(frame, encoded)| {
-            let input_index = next_input_index;
-            next_input_index += 1;
-            let changed = previous
-                .as_ref()
-                .map(|previous| changed_blocks(previous, &frame, grid));
-            previous = Some(frame);
-            encoded
-                .into_iter()
-                .map(|frame| {
-                    // The encoder returns each frame immediately; if it ever
-                    // returned an earlier one, marking every block changed is
-                    // always correct.
-                    let blocks = match &changed {
-                        Some(changed)
-                            if !frame.is_key_frame && frame.input_index == input_index =>
-                        {
-                            changed.clone()
+        let outputs =
+            encode_one(&mut *source, &mut *encoder, job).map(|(frame, cursor, encoded)| {
+                let input_index = next_input_index;
+                next_input_index += 1;
+                let changed = previous
+                    .as_ref()
+                    .map(|previous| changed_blocks(previous, &frame, grid));
+                previous = Some(frame);
+                encoded
+                    .into_iter()
+                    .map(|frame| {
+                        // The encoder returns each frame immediately; if it ever
+                        // returned an earlier one, marking every block changed is
+                        // always correct.
+                        let blocks = match &changed {
+                            Some(changed)
+                                if !frame.is_key_frame && frame.input_index == input_index =>
+                            {
+                                changed.clone()
+                            }
+                            _ => BlockSet::full(grid.len()),
+                        };
+                        EncodedOutput {
+                            job,
+                            frame,
+                            blocks,
+                            captured_at,
+                            cursor: cursor.clone(),
                         }
-                        _ => BlockSet::full(grid.len()),
-                    };
-                    EncodedOutput {
-                        job,
-                        frame,
-                        blocks,
-                        captured_at,
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
+                    })
+                    .collect::<Vec<_>>()
+            });
         let delivered = match outputs {
             Ok(outputs) => outputs
                 .into_iter()
@@ -191,15 +196,17 @@ fn run(
     }
 }
 
-/// Captures one frame and encodes it.
+/// Captures one frame, with the pointer if the source reports it, and
+/// encodes it.
 fn encode_one(
     source: &mut dyn FrameSource,
     encoder: &mut dyn VideoEncoder,
     job: EncodeJob,
-) -> Result<(Yuv420Frame, Vec<EncodedFrame>), RuntimeError> {
+) -> Result<(Yuv420Frame, Option<CursorState>, Vec<EncodedFrame>), RuntimeError> {
     let frame = source.capture()?;
+    let cursor = source.cursor();
     let encoded = encoder.encode(&frame, job.request)?;
-    Ok((frame, encoded))
+    Ok((frame, cursor, encoded))
 }
 
 #[cfg(test)]

@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qdp::auth::scram::ScramCredentials;
+use qdp::message::CursorImage;
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
-    ClientCredentials, ClientOptions, DisplaySize, EncoderTuning, FrameInfo, FrameSink,
-    HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput,
-    PointerButton, RuntimeError, SinkControl, TestPattern, UserInput, input_channel, run, serve,
+    ClientCredentials, ClientOptions, CursorShape, CursorState, CursorWarp, DisplaySize,
+    EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAuthenticator, HostOptions, InputAction,
+    InputHandle, InputInjector, InputQueue, NoInput, PointerButton, RuntimeError, SinkControl,
+    TestPattern, UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -57,6 +59,56 @@ struct Collector {
     frames: Vec<(u64, f64, FrameInfo)>,
     /// Where to send the test input.
     input: Option<InputHandle>,
+    /// The cursor images the client was told to draw, `None` for hidden.
+    cursors: Vec<Option<CursorImage>>,
+    /// The warps the client received.
+    warps: Vec<CursorWarp>,
+}
+
+/// Where the cursor source's pointer is, in pixels.
+const CURSOR_POSITION: (i32, i32) = (40, 30);
+
+/// The capture after which the cursor source's pointer changes shape.
+const SHAPE_CHANGE: u64 = 10;
+
+/// Returns a solid square pointer image.
+fn pointer_shape(size: u32, colour: u8) -> Arc<CursorShape> {
+    Arc::new(CursorShape {
+        width: size,
+        height: size,
+        hotspot: (0, 0),
+        pixels: vec![colour; (size * size * 4) as usize],
+    })
+}
+
+/// The test pattern, with a pointer reported apart from the frames that
+/// changes shape after [`SHAPE_CHANGE`] captures.
+struct CursorPattern {
+    /// The frames.
+    pattern: TestPattern,
+    /// The captures so far.
+    captures: u64,
+    /// The pointer's shapes, before and after the change.
+    shapes: [Arc<CursorShape>; 2],
+}
+
+impl FrameSource for CursorPattern {
+    fn size(&self) -> (usize, usize) {
+        self.pattern.size()
+    }
+
+    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
+        self.captures += 1;
+        self.pattern.capture()
+    }
+
+    fn cursor(&mut self) -> Option<CursorState> {
+        let shape = &self.shapes[usize::from(self.captures > SHAPE_CHANGE)];
+        Some(CursorState {
+            position: Some(CURSOR_POSITION),
+            shape: Some(Arc::clone(shape)),
+        })
+    }
 }
 
 /// The input the input test sends, as the user would produce it.
@@ -146,12 +198,26 @@ impl FrameSink for Collector {
             SinkControl::Continue
         }
     }
+
+    fn set_cursor(&mut self, cursor: Option<&CursorImage>) {
+        self.cursors.push(cursor.cloned());
+    }
+
+    fn warp_cursor(&mut self, warp: CursorWarp) {
+        self.warps.push(warp);
+    }
+}
+
+/// Returns the test pattern source.
+fn test_pattern() -> Box<dyn FrameSource> {
+    Box::new(TestPattern::new(WIDTH, HEIGHT))
 }
 
 /// Starts a host serving one connection, and returns its address, its key pin
 /// and the task that returns the host's summary.
 fn start_host(
     authenticator: HostAuthenticator,
+    source: Box<dyn FrameSource>,
     injector: Box<dyn InputInjector>,
 ) -> (
     SocketAddr,
@@ -175,13 +241,7 @@ fn start_host(
     };
     let task = tokio::spawn(async move {
         let connection = endpoint.accept().await.expect("a client")?;
-        serve(
-            connection,
-            &options,
-            Box::new(TestPattern::new(WIDTH, HEIGHT)),
-            injector,
-        )
-        .await
+        serve(connection, &options, source, injector).await
     });
     (address, pin, task)
 }
@@ -249,7 +309,7 @@ fn check_frames(collector: &Collector) {
 async fn stream_with_token() {
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
-    let (address, pin, host) = start_host(authenticator, Box::new(NoInput));
+    let (address, pin, host) = start_host(authenticator, test_pattern(), Box::new(NoInput));
     let collector = tokio::time::timeout(
         TEST_TIMEOUT,
         stream(address, pin, ClientCredentials::Token(TOKEN.to_vec()), None),
@@ -276,7 +336,7 @@ async fn stream_with_password() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator, Box::new(NoInput));
+    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput));
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "pencil".to_owned(),
@@ -296,7 +356,7 @@ async fn wrong_password_is_refused() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator, Box::new(NoInput));
+    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput));
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "wrong".to_owned(),
@@ -314,7 +374,8 @@ async fn input_reaches_the_host() {
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
     let recorder = Recorder::default();
-    let (address, pin, host) = start_host(authenticator, Box::new(recorder.clone()));
+    let (address, pin, host) =
+        start_host(authenticator, test_pattern(), Box::new(recorder.clone()));
     let credentials = ClientCredentials::Token(TOKEN.to_vec());
     tokio::time::timeout(
         TEST_TIMEOUT,
@@ -330,4 +391,36 @@ async fn input_reaches_the_host() {
         .unwrap();
     assert!(summary.input_reports >= 6);
     assert_eq!(*recorder.0.lock().unwrap(), expected_actions());
+}
+
+/// A pointer the host captures apart from its frames reaches the client as
+/// cursor images, `CURSOR_SET`s and a warp to where the pointer is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_reaches_the_client() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let source = CursorPattern {
+        pattern: TestPattern::new(WIDTH, HEIGHT),
+        captures: 0,
+        shapes: [pointer_shape(4, 0x11), pointer_shape(6, 0x22)],
+    };
+    let (address, pin, _host) = start_host(authenticator, Box::new(source), Box::new(NoInput));
+    let credentials = ClientCredentials::Token(TOKEN.to_vec());
+    let collector = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials, None))
+        .await
+        .expect("streaming finishes in time")
+        .unwrap();
+
+    // The host hides the cursor until the first capture, then shows each
+    // shape in turn.
+    let shown: Vec<Option<(u32, u8)>> = collector
+        .cursors
+        .iter()
+        .map(|cursor| cursor.as_ref().map(|image| (image.width, image.pixels[0])))
+        .collect();
+    assert_eq!(shown, [None, Some((4, 0x11)), Some((6, 0x22))]);
+    assert_eq!(collector.warps.len(), 1, "{:?}", collector.warps);
+    let warp = collector.warps[0];
+    assert_eq!(warp.position, (40.0, 30.0));
+    assert_eq!(warp.kind, WarpKind::Move);
 }
