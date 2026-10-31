@@ -19,8 +19,9 @@ const MAX_DATAGRAM_FRAME_SIZE: usize = 65535;
 /// The datagram receive buffer, which holds several frames' worth of fragments.
 const DATAGRAM_RECEIVE_BUFFER: usize = 8 << 20;
 
-/// The datagram send buffer.
-const DATAGRAM_SEND_BUFFER: usize = 8 << 20;
+/// The datagram send buffer. Senders should keep far less than this queued:
+/// see [`QdpConnection::queued_datagram_bytes`](crate::QdpConnection::queued_datagram_bytes).
+pub(crate) const DATAGRAM_SEND_BUFFER: usize = 8 << 20;
 
 /// The QUIC idle timeout (Section 3.3).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);

@@ -77,8 +77,10 @@ impl DecodableFrame {
 /// The fragments received so far of one frame.
 #[derive(Debug)]
 struct PendingFrame {
-    /// The frame's `KEY_FRAME` and `RECOVERY` flags, which every fragment repeats.
-    flags: FragmentFlags,
+    /// The frame's `KEY_FRAME` and `RECOVERY` flags, which every fragment
+    /// repeats; `None` for a frame known only from a gap in the frame numbers
+    /// received, until one of its fragments arrives.
+    flags: Option<FragmentFlags>,
     /// The size S of every fragment but the last, once a non-last one has arrived.
     piece_size: Option<usize>,
     /// The index of the `LAST` fragment, once it has arrived.
@@ -122,8 +124,9 @@ enum Insertion {
 }
 
 impl PendingFrame {
-    /// Creates the state of a frame from its first fragment's flags.
-    fn new(flags: FragmentFlags, now: Instant) -> Self {
+    /// Creates the state of a frame from its first fragment's flags, or with no
+    /// flags for a frame none of whose fragments has arrived.
+    fn new(flags: Option<FragmentFlags>, now: Instant) -> Self {
         Self {
             flags,
             piece_size: None,
@@ -141,7 +144,7 @@ impl PendingFrame {
     fn insert(&mut self, fragment: &VideoFragment<'_>, frame_flags: FragmentFlags) -> Insertion {
         let index = fragment.fragment_index.into_inner();
         let is_last = fragment.flags.contains(FragmentFlags::LAST);
-        if frame_flags != self.flags
+        if self.flags.is_some_and(|flags| flags != frame_flags)
             || index >= MAX_FRAGMENTS_PER_FRAME
             || fragment.data.is_empty()
             || self.last_index.is_some_and(|last| index > last)
@@ -175,8 +178,14 @@ impl PendingFrame {
                 return Insertion::Inconsistent;
             }
         }
+        self.flags = Some(frame_flags);
         self.fragments.insert(index, fragment.data.to_vec());
         Insertion::Added
+    }
+
+    /// Returns whether the frame is known to carry `flag`.
+    fn has_flag(&self, flag: FragmentFlags) -> bool {
+        self.flags.is_some_and(|flags| flags.contains(flag))
     }
 
     /// Returns whether every fragment up to the `LAST` one has arrived.
@@ -305,15 +314,22 @@ impl VideoReceiver {
         }
         self.last_fragment_at = Some(now);
         let is_new_frame = frame_number > self.highest_seen;
+        if is_new_frame {
+            self.add_skipped_frames(frame_number, now);
+        }
         self.highest_seen = self.highest_seen.max(frame_number);
 
         let frame_flags = fragment.flags.intersection(FragmentFlags::FRAME_FLAGS);
         let frame = self
             .frames
             .entry(frame_number)
-            .or_insert_with(|| PendingFrame::new(frame_flags, now));
+            .or_insert_with(|| PendingFrame::new(Some(frame_flags), now));
         if frame.complete.is_some() {
             return;
+        }
+        if frame.flags.is_none() {
+            // The first fragment of a frame that was missing entirely.
+            frame.first_arrival = now;
         }
         match frame.insert(fragment, frame_flags) {
             Insertion::Duplicate => return,
@@ -372,9 +388,7 @@ impl VideoReceiver {
 
         let resets_composition = frame_number == FrameNumber::FIRST
             || (self.state != ReceiverState::Decoding
-                && self.frames[&frame_number]
-                    .flags
-                    .contains(FragmentFlags::KEY_FRAME));
+                && self.frames[&frame_number].has_flag(FragmentFlags::KEY_FRAME));
         // Frames below the chosen one are abandoned.
         let mut later = self.frames.split_off(&frame_number);
         self.frames = std::mem::take(&mut later);
@@ -383,7 +397,7 @@ impl VideoReceiver {
         self.decoding = Some(frame_number);
         Some(DecodableFrame {
             frame_number,
-            flags: frame.flags,
+            flags: frame.flags.unwrap_or_default(),
             header,
             resets_composition,
             payload,
@@ -546,11 +560,11 @@ impl VideoReceiver {
         let Some((header, _, _)) = &frame.complete else {
             return false;
         };
-        if frame.flags.contains(FragmentFlags::KEY_FRAME) {
+        if frame.has_flag(FragmentFlags::KEY_FRAME) {
             return true;
         }
         self.state != ReceiverState::KeyOnly
-            && frame.flags.contains(FragmentFlags::RECOVERY)
+            && frame.has_flag(FragmentFlags::RECOVERY)
             && header.recovery_base == Some(self.last_decoded)
     }
 
@@ -563,13 +577,13 @@ impl VideoReceiver {
         }
         let state = self.state;
         self.frames.range(..=frame_number).any(|(_, frame)| {
-            frame.flags.contains(FragmentFlags::KEY_FRAME)
-                || (state == ReceiverState::Loss && frame.flags.contains(FragmentFlags::RECOVERY))
+            frame.has_flag(FragmentFlags::KEY_FRAME)
+                || (state == ReceiverState::Loss && frame.has_flag(FragmentFlags::RECOVERY))
         })
     }
 
     /// Queues a `NACK` for the missing fragments of `frame_number`, at most once
-    /// per smoothed RTT, and starts its loss timer.
+    /// per smoothed RTT, and starts its loss timer if this is its first `NACK`.
     fn nack(
         &mut self,
         frame_number: FrameNumber,
@@ -590,7 +604,11 @@ impl VideoReceiver {
             return;
         }
         frame.nacked_at = Some(now);
-        frame.loss_deadline = Some(now + smoothed_rtt + LOSS_MARGIN);
+        // Only progress restarts the loss timer: were each repeated NACK to
+        // restart it, a frame whose fragments never come would wait forever.
+        frame
+            .loss_deadline
+            .get_or_insert(now + smoothed_rtt + LOSS_MARGIN);
         let missing = frame.missing(reason);
         self.pending_records.push(FeedbackRecord::Nack(NackRecord {
             stream_id: self.stream_id,
@@ -609,7 +627,8 @@ impl VideoReceiver {
             .into_values()
             .flatten()
             .collect();
-        match FramePayload::decode(&payload, self.layer, frame.flags, self.grid) {
+        let flags = frame.flags.unwrap_or_default();
+        match FramePayload::decode(&payload, self.layer, flags, self.grid) {
             Ok(decoded) => {
                 let header = decoded.header;
                 let offset = payload.len() - decoded.temporal_unit.len();
@@ -631,6 +650,27 @@ impl VideoReceiver {
                 self.frames.remove(&frame_number);
                 self.declare_lost();
             }
+        }
+    }
+
+    /// Adds frames above the highest seen and below `frame_number`, none of
+    /// whose fragments has arrived: they are missing entirely, and are `NACK`ed
+    /// and declared lost like any other incomplete frame (Section 6.8.1).
+    fn add_skipped_frames(&mut self, frame_number: FrameNumber, now: Instant) {
+        let first = self.highest_seen.max(self.last_decoded).0.into_inner() + 1;
+        let end = frame_number.0.into_inner();
+        // Only the latest skipped frames are kept; older ones are lost outright.
+        let kept_from = end.saturating_sub(MAX_INCOMPLETE_FRAMES as u64).max(first);
+        if kept_from > first {
+            self.declare_lost();
+        }
+        for number in kept_from..end {
+            let Ok(number) = VarInt::new(number) else {
+                break;
+            };
+            self.frames
+                .entry(FrameNumber(number))
+                .or_insert_with(|| PendingFrame::new(None, now));
         }
     }
 
@@ -969,7 +1009,7 @@ mod tests {
     #[test]
     fn missing_ranges() {
         let now = Instant::now();
-        let mut frame = PendingFrame::new(FragmentFlags::default(), now);
+        let mut frame = PendingFrame::new(Some(FragmentFlags::default()), now);
         for index in [0u32, 3] {
             let fragment = VideoFragment {
                 stream_id: StreamId(VarInt::from_u32(1)),

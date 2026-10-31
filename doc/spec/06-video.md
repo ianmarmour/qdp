@@ -432,23 +432,27 @@ Missing Range {
 
 The client sends a `NACK` for a frame's missing fragments when it has evidence that
 they are missing: a fragment with a higher index of the same frame, or a fragment of a
-later frame of the same stream, has arrived. It MAY also send one when the frame has
-been incomplete with no new fragment for max(1 ms, smoothed RTT / 8). It SHOULD NOT
+later frame of the same stream, has arrived. A frame none of whose fragments has
+arrived is missing entirely once a fragment of a later frame arrives, and its `NACK`
+names all of its fragments. The client MAY also send a `NACK` when a frame has been
+incomplete with no new fragment for max(1 ms, smoothed RTT / 8). It SHOULD NOT
 request the same fragment again within one smoothed RTT.
 
 The host SHOULD retransmit requested fragments it still holds, unless sending a
 recovery frame would reach the client sooner. It ignores requests for fragments it
 has not sent yet, and does not resend a fragment it sent less than one smoothed RTT
-ago. It SHOULD keep each frame's fragments for at least two smoothed RTTs after
-sending them. At the round-trip times QDP targets, a retransmission usually arrives
+ago. It MUST keep each frame's fragments for at least two smoothed RTTs after sending
+them, and SHOULD keep them for the longer of 100 ms and four smoothed RTTs, so that a
+large frame can recover over several rounds of `NACK`s. At the round-trip times QDP targets, a retransmission usually arrives
 within a frame interval.
 
 ### 6.8.2 Declaring loss
 
-The client declares a frame lost when it stops making progress: when fragments named
-in a `NACK` are still missing one smoothed RTT plus 4 ms after that `NACK` and no new
-fragment of the frame has arrived in that time. Each newly arriving fragment of the
-frame restarts this timer. A frame dropped to save memory, or found inconsistent, is
+The client declares a frame lost when it stops making progress: when its fragments are
+still missing one smoothed RTT plus 4 ms after its first `NACK`, and no new fragment of
+the frame has arrived in that time. Each newly arriving fragment of the frame restarts
+this timer; repeating a `NACK` does not, or a frame whose fragments never come would
+wait forever. A frame dropped to save memory, or found inconsistent, is
 also lost.
 
 ### 6.8.3 Client rules
