@@ -115,6 +115,9 @@ fn input_classes(injector: &dyn InputInjector) -> InputClasses {
     if injector.supports_text() {
         classes = classes.union(InputClasses::TEXT);
     }
+    if injector.supports_touch() {
+        classes = classes.union(InputClasses::TOUCHSCREEN);
+    }
     if injector.supports_gamepads() {
         classes = classes.union(InputClasses::GAMEPAD);
     }

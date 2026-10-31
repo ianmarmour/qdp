@@ -21,7 +21,7 @@ use qdp_runtime::{
     DeviceFeedback, DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAudio,
     HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput,
     Playout, PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
-    UserInput, WarpKind, input_channel, run, serve,
+    TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -143,8 +143,38 @@ fn test_input() -> Vec<UserInput> {
             vertical: 120,
             horizontal: 0,
         },
+        touch(TouchPhase::Down, 30.0),
+        touch(TouchPhase::Move, 31.0),
+        touch(TouchPhase::Up, 31.0),
         UserInput::Text("hé".to_owned()),
     ]
+}
+
+/// The finger the input test touches with.
+const FINGER: u64 = 7;
+
+/// Returns the input test's finger doing `phase` at `x` pixels across and 40
+/// down, pressing halfway.
+fn touch(phase: TouchPhase, x: f64) -> UserInput {
+    UserInput::Touch {
+        finger: FINGER,
+        phase,
+        x,
+        y: 40.0,
+        pressure: Some(0.5),
+    }
+}
+
+/// Returns the frame the host performs for the input test's finger doing
+/// `phase` at `x` pixels across.
+fn touch_frame(phase: TouchPhase, x: i32) -> InputAction {
+    InputAction::Touch(vec![TouchPoint {
+        id: 0,
+        phase,
+        x: x * 256,
+        y: 40 * 256,
+        pressure: 32_767,
+    }])
 }
 
 /// The actions the host should perform for [`test_input`].
@@ -162,6 +192,9 @@ fn expected_actions() -> Vec<InputAction> {
             vertical: 120,
             horizontal: 0,
         },
+        touch_frame(TouchPhase::Down, 30),
+        touch_frame(TouchPhase::Move, 31),
+        touch_frame(TouchPhase::Up, 31),
         InputAction::Text("hé".to_owned()),
     ]
 }
@@ -185,6 +218,10 @@ impl InputInjector for Recorder {
     }
 
     fn supports_text(&self) -> bool {
+        true
+    }
+
+    fn supports_touch(&self) -> bool {
         true
     }
 

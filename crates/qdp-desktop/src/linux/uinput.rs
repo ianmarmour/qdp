@@ -4,8 +4,9 @@
 //! server, without the compositor's cooperation.
 //!
 //! Three devices are created: a keyboard, a relative mouse, and an absolute
-//! pointer covering the desktop, as virtual machines' tablets do, and a
-//! gamepad for each one the client attaches. Creating them needs write access
+//! pointer covering the desktop, as virtual machines' tablets do, and, when
+//! the client uses them, a touchscreen covering the desktop and a gamepad for
+//! each one it attaches. Creating them needs write access
 //! to `/dev/uinput`.
 
 use std::collections::HashMap;
@@ -17,10 +18,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::time::Instant;
 
 use qdp::message::{DeviceId, GamepadOutput, GamepadReport, KeyboardLeds};
-use qdp_runtime::{InputAction, InputInjector, PointerButton};
+use qdp_runtime::{InputAction, InputInjector, PointerButton, TouchPoint};
 
 use super::gamepad::VirtualGamepad;
 use super::keycodes::{all_keys, consumer_key, keyboard_key};
+use super::touchscreen::VirtualTouchscreen;
 
 /// The uinput device node.
 const UINPUT_PATH: &str = "/dev/uinput";
@@ -130,7 +132,7 @@ const EVENTS_PER_READ: usize = 16;
 const UNITS_PER_DETENT: i32 = 120;
 
 /// QDP positions and motion are in 1/256 pixel or count (Section 1.5.6).
-const SUBUNITS: i32 = 256;
+pub(super) const SUBUNITS: i32 = 256;
 
 /// Returns the code of a button.
 fn button_code(button: PointerButton) -> u16 {
@@ -284,7 +286,10 @@ impl Translator {
                 (Device::Pointer, events)
             }
             // Gamepads are devices of their own, and text has no events.
-            InputAction::Text(_) | InputAction::Gamepad { .. } | InputAction::GamepadRemoved(_) => {
+            InputAction::Text(_)
+            | InputAction::Gamepad { .. }
+            | InputAction::GamepadRemoved(_)
+            | InputAction::Touch(_) => {
                 return None;
             }
         };
@@ -324,7 +329,7 @@ pub(super) struct Identity<'a> {
 impl<'a> Identity<'a> {
     /// Returns the identity of a virtual device named `name`, without force
     /// feedback.
-    const fn virtual_device(name: &'a str) -> Self {
+    pub(super) const fn virtual_device(name: &'a str) -> Self {
         Self {
             name,
             bus: BUS_VIRTUAL,
@@ -475,6 +480,10 @@ pub struct UinputInjector {
     leds: KeyboardLeds,
     /// The client's gamepads, created on their first report.
     gamepads: HashMap<DeviceId, VirtualGamepad>,
+    /// The touchscreen, created on the first touch.
+    touchscreen: Option<VirtualTouchscreen>,
+    /// The desktop's size in pixels, which the touchscreen covers.
+    desktop_size: (u32, u32),
 }
 
 impl UinputInjector {
@@ -531,7 +540,21 @@ impl UinputInjector {
             translator: Translator::default(),
             leds: KeyboardLeds::default(),
             gamepads: HashMap::new(),
+            touchscreen: None,
+            desktop_size: (width, height),
         })
+    }
+
+    /// Performs a touch frame, creating the touchscreen on the first one.
+    fn touch(&mut self, points: &[TouchPoint]) -> io::Result<()> {
+        let touchscreen = match &mut self.touchscreen {
+            Some(touchscreen) => touchscreen,
+            empty => empty.insert(VirtualTouchscreen::new(
+                self.desktop_size.0,
+                self.desktop_size.1,
+            )?),
+        };
+        touchscreen.touch(points)
     }
 
     /// Sets a gamepad's controls, creating it on its first report.
@@ -572,6 +595,9 @@ impl InputInjector for UinputInjector {
                 self.gamepads.remove(device_id);
                 return Ok(());
             }
+            InputAction::Touch(points) => {
+                return self.touch(points).map_err(|error| error.to_string());
+            }
             _ => {}
         }
         let Some((device, events)) = self.translator.events(action) else {
@@ -595,6 +621,10 @@ impl InputInjector for UinputInjector {
     fn keyboard_leds(&mut self) -> KeyboardLeds {
         self.read_leds();
         self.leds
+    }
+
+    fn supports_touch(&self) -> bool {
+        true
     }
 
     fn supports_gamepads(&self) -> bool {

@@ -13,6 +13,7 @@ mod gamepad;
 mod keycodes;
 #[cfg(feature = "screen-capture")]
 mod screencast;
+mod touchscreen;
 mod uinput;
 
 #[cfg(feature = "audio")]

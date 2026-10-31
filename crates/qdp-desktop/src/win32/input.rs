@@ -32,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use super::keycodes::{ScanCode, WindowsKey, consumer_key, keyboard_key};
+use super::touch::TouchInjector;
 
 /// QDP positions and motion are in 1/256 pixel or count (Section 1.5.6).
 const SUBUNITS: i64 = 256;
@@ -243,6 +244,8 @@ impl Translator {
             InputAction::Gamepad { .. } | InputAction::GamepadRemoved(_) => {
                 return Err("SendInput cannot present gamepads".to_owned());
             }
+            // Touches are injected apart from `SendInput`.
+            InputAction::Touch(_) => return Err("SendInput cannot touch".to_owned()),
         })
     }
 }
@@ -253,6 +256,8 @@ impl Translator {
 pub struct SendInputInjector {
     /// Turns actions into inputs.
     translator: Translator,
+    /// Performs touches.
+    touch: TouchInjector,
 }
 
 impl SendInputInjector {
@@ -261,12 +266,16 @@ impl SendInputInjector {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             translator: Translator::new(width, height),
+            touch: TouchInjector::default(),
         }
     }
 }
 
 impl InputInjector for SendInputInjector {
     fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        if let InputAction::Touch(points) = action {
+            return self.touch.touch(points);
+        }
         let inputs = self.translator.inputs(action)?;
         if inputs.is_empty() {
             return Ok(());
@@ -285,6 +294,10 @@ impl InputInjector for SendInputInjector {
 
     fn description(&self) -> &str {
         "SendInput"
+    }
+
+    fn supports_touch(&self) -> bool {
+        true
     }
 
     fn keyboard_leds(&mut self) -> KeyboardLeds {

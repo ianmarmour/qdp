@@ -26,6 +26,7 @@ mod auth;
 mod client;
 mod client_cursor;
 mod client_input;
+mod client_touch;
 mod clipboard;
 mod encode_thread;
 mod host;
@@ -51,7 +52,7 @@ pub use client::{ClientOptions, ClientSummary, DisplaySize, run};
 pub use client_input::{DeviceFeedback, InputHandle, InputQueue, UserInput, input_channel};
 pub use clipboard::{Clipboard, ClipboardDirections, SharedClipboard};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
-pub use host_input::{InputAction, InputInjector, NoInput, PointerButton};
+pub use host_input::{InputAction, InputInjector, NoInput, PointerButton, TouchPhase, TouchPoint};
 pub use media::{
     CursorShape, CursorState, CursorWarp, FrameInfo, FrameSink, FrameSource, SinkControl,
     TestPattern, WarpKind, changed_blocks,
