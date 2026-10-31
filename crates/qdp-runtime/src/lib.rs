@@ -32,6 +32,7 @@ mod client_passthrough;
 mod client_touch;
 mod clipboard;
 mod decode_thread;
+mod decoder_lag;
 mod encode_thread;
 mod host;
 mod host_cursor;
