@@ -26,13 +26,7 @@ impl TouchpadCapture {
     pub fn start(input: &InputHandle) -> Result<Self, String> {
         let focused = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        #[cfg(target_os = "linux")]
-        let thread = crate::linux::start_touchpad(input, &focused, &stop)?;
-        #[cfg(not(target_os = "linux"))]
-        let thread = {
-            let _ = input;
-            return Err("this client cannot read its touchpad raw".to_owned());
-        };
+        let thread = start_thread(input, &focused, &stop)?;
         Ok(Self {
             focused,
             stop,
@@ -45,6 +39,27 @@ impl TouchpadCapture {
     pub fn set_focused(&self, focused: bool) {
         self.focused.store(focused, Ordering::Relaxed);
     }
+}
+
+/// Starts reading the touchpad on a thread of its own.
+#[cfg(target_os = "linux")]
+fn start_thread(
+    input: &InputHandle,
+    focused: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+) -> Result<JoinHandle<()>, String> {
+    crate::linux::start_touchpad(input, focused, stop)
+}
+
+/// Refuses to read the touchpad, which only Linux clients read raw yet.
+#[cfg(not(target_os = "linux"))]
+fn start_thread(
+    input: &InputHandle,
+    focused: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+) -> Result<JoinHandle<()>, String> {
+    let _ = (input, focused, stop);
+    Err("this client cannot read its touchpad raw".to_owned())
 }
 
 impl Drop for TouchpadCapture {
