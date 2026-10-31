@@ -867,10 +867,12 @@ impl ActiveHost {
     fn follow_pointer_mode(&mut self) -> Result<(), RuntimeError> {
         let mode = if self.injector.detects_pointer_capture() {
             self.injector.pointer_mode()
-        } else if self.cursor.captured_by_application(Instant::now()) {
-            PointerKind::Relative
         } else {
-            PointerKind::Absolute
+            self.cursor.application_pointer_mode(
+                self.pointer_mode,
+                self.devices.holds_buttons(),
+                Instant::now(),
+            )
         };
         let confinement = match mode {
             PointerKind::Absolute => self
