@@ -448,11 +448,15 @@ within a frame interval.
 
 ### 6.8.2 Declaring loss
 
-The client declares a frame lost when it stops making progress: when its fragments are
-still missing one smoothed RTT plus 4 ms after its first `NACK`, and no new fragment of
-the frame has arrived in that time. Each newly arriving fragment of the frame restarts
-this timer; repeating a `NACK` does not, or a frame whose fragments never come would
-wait forever. A frame dropped to save memory, or found inconsistent, is
+The client declares a frame lost when it stops making progress while the stream does
+not: when its fragments are still missing one smoothed RTT plus 4 ms after its first
+`NACK`, no new fragment of the frame has arrived in that time, and some fragment of the
+stream has arrived since the timer started. Each newly arriving fragment of the frame
+restarts this timer; repeating a `NACK` does not, or a frame whose fragments never come
+would wait forever. Fragments arrive in the order they were sent, so while nothing
+arrives at all, as when a Wi-Fi client's radio briefly leaves its channel and then
+delivers what it held, the missing fragments are late rather than lost, and declaring
+the frame lost would only cost a recovery frame. A frame dropped to save memory, or found inconsistent, is
 also lost.
 
 ### 6.8.3 Client rules

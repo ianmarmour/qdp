@@ -108,6 +108,10 @@ struct PendingFrame {
     /// When the frame is declared lost if no new fragment arrives, once a `NACK`
     /// was sent.
     loss_deadline: Option<Instant>,
+    /// When the loss timer last started: at the first `NACK`, then at each
+    /// new fragment. The frame is declared lost only if a fragment of the
+    /// stream arrived after it.
+    loss_timer_start: Option<Instant>,
     /// The reassembled payload and parsed header, once complete.
     complete: Option<(FrameHeader, Vec<u8>, usize)>,
 }
@@ -149,6 +153,7 @@ impl PendingFrame {
             last_arrival: now,
             nacked_at: None,
             loss_deadline: None,
+            loss_timer_start: None,
             complete: None,
         }
     }
@@ -357,6 +362,7 @@ impl VideoReceiver {
         frame.last_arrival = now;
         if frame.loss_deadline.is_some() {
             frame.loss_deadline = Some(now + smoothed_rtt + LOSS_MARGIN);
+            frame.loss_timer_start = Some(now);
         }
         if frame.is_complete() {
             self.complete_frame(frame_number, now);
@@ -473,7 +479,12 @@ impl VideoReceiver {
                     }
                     None => frame.last_arrival + idle_delay,
                 });
-                idle.into_iter().chain(frame.loss_deadline).min()
+                // A frame waiting for the stream to show it is lost is
+                // looked at again when a fragment arrives.
+                let loss = frame
+                    .loss_deadline
+                    .filter(|_| self.lost_while_others_arrive(frame));
+                idle.into_iter().chain(loss).min()
             });
         let feedback = self.next_feedback_due();
         frame_deadlines.chain(feedback).min()
@@ -489,7 +500,9 @@ impl VideoReceiver {
             if frame.complete.is_some() {
                 continue;
             }
-            if frame.loss_deadline.is_some_and(|deadline| now >= deadline) {
+            if frame.loss_deadline.is_some_and(|deadline| now >= deadline)
+                && self.lost_while_others_arrive(frame)
+            {
                 lost.push(number);
             } else if now >= frame.last_arrival + idle_delay && self.may_nack(number) {
                 idle.push(number);
@@ -631,9 +644,10 @@ impl VideoReceiver {
         frame.nacked_at = Some(now);
         // Only progress restarts the loss timer: were each repeated NACK to
         // restart it, a frame whose fragments never come would wait forever.
-        frame
-            .loss_deadline
-            .get_or_insert(now + smoothed_rtt + LOSS_MARGIN);
+        if frame.loss_deadline.is_none() {
+            frame.loss_deadline = Some(now + smoothed_rtt + LOSS_MARGIN);
+            frame.loss_timer_start = Some(now);
+        }
         let missing = frame.missing(reason);
         self.pending_records.push(FeedbackRecord::Nack(NackRecord {
             stream_id: self.stream_id,
@@ -800,6 +814,20 @@ impl VideoReceiver {
         match first {
             Some(first) => self.frames = self.frames.split_off(&first),
             None => self.frames.clear(),
+        }
+    }
+}
+
+impl VideoReceiver {
+    /// Returns whether the stream shows that `frame`'s missing fragments
+    /// are lost rather than late: a fragment arrived after its loss timer
+    /// started (Section 6.8.2). Fragments arrive in the order they were
+    /// sent, so while nothing arrives at all, as when the client's radio
+    /// briefly leaves its channel, the missing ones may still come.
+    fn lost_while_others_arrive(&self, frame: &PendingFrame) -> bool {
+        match (frame.loss_timer_start, self.last_fragment_at) {
+            (Some(started), Some(arrived)) => arrived > started,
+            _ => false,
         }
     }
 }
@@ -1006,8 +1034,9 @@ mod tests {
         assert_eq!(harness.decode_all(), [1]);
     }
 
-    /// A frame that makes no progress after a NACK is lost, the stream enters
-    /// `LOSS`, and a recovery frame from Last Decoded Frame ends it.
+    /// A frame that makes no progress after a NACK, while later fragments
+    /// arrive, is lost, the stream enters `LOSS`, and a recovery frame from
+    /// Last Decoded Frame ends it.
     #[test]
     fn loss_and_recovery() {
         let mut harness = Harness::new();
@@ -1020,11 +1049,21 @@ mod tests {
         harness.deliver(&lost);
         harness.feedback();
         harness.now += RTT + LOSS_MARGIN;
+        // While nothing else arrives, the missing fragment may be late.
         harness.receiver.handle_timeout(RTT, harness.now);
-        assert_eq!(harness.receiver.state(), ReceiverState::Loss);
+        assert_eq!(harness.receiver.state(), ReceiverState::Decoding);
+        assert!(
+            harness
+                .receiver
+                .poll_timeout(RTT)
+                .is_none_or(|deadline| deadline > harness.now)
+        );
 
+        // A later frame arriving shows it is lost.
         let later = harness.send(FrameKind::Delta, 100);
         harness.deliver(&later);
+        harness.receiver.handle_timeout(RTT, harness.now);
+        assert_eq!(harness.receiver.state(), ReceiverState::Loss);
         assert!(harness.decode_all().is_empty());
 
         let records = harness.feedback();
