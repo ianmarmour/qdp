@@ -12,6 +12,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use tracing::{debug, info};
 
 use crate::RuntimeError;
+use crate::admission::AdmissionTicket;
 
 /// The number of random bytes in a SCRAM nonce.
 const NONCE_LENGTH: usize = 18;
@@ -114,6 +115,11 @@ pub(crate) struct HostAuthExchange<'a> {
     binding: ChannelBinding,
     /// A SCRAM exchange waiting for the client-final-message.
     scram: Option<ScramServer>,
+    /// The user the last SCRAM attempt was for, if it is one of the host's.
+    user: Option<String>,
+    /// Whether that user is locked after repeated failures, so that the
+    /// attempt fails whatever the client proves.
+    locked: bool,
 }
 
 impl<'a> HostAuthExchange<'a> {
@@ -123,11 +129,26 @@ impl<'a> HostAuthExchange<'a> {
             authenticator,
             binding,
             scram: None,
+            user: None,
+            locked: false,
         }
     }
 
-    /// Answers `AUTH_START`.
-    pub(crate) fn start(&mut self, method: AuthMethod, auth_data: &[u8]) -> AuthResponse {
+    /// Returns the user the last attempt was for, if it was a SCRAM attempt
+    /// as one of the host's users.
+    pub(crate) fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
+    /// Answers `AUTH_START` on the connection `ticket` admitted.
+    pub(crate) fn start(
+        &mut self,
+        method: AuthMethod,
+        auth_data: &[u8],
+        ticket: &AdmissionTicket,
+    ) -> AuthResponse {
+        self.user = None;
+        self.locked = false;
         match method {
             AuthMethod::TOKEN => {
                 let accepted = self
@@ -142,13 +163,15 @@ impl<'a> HostAuthExchange<'a> {
                     AuthResponse::Reject
                 }
             }
-            AuthMethod::SCRAM_SHA_256_PLUS => self.start_scram(auth_data),
+            AuthMethod::SCRAM_SHA_256_PLUS => self.start_scram(auth_data, ticket),
             _ => AuthResponse::Reject,
         }
     }
 
-    /// Answers a SCRAM client-first-message.
-    fn start_scram(&mut self, client_first: &[u8]) -> AuthResponse {
+    /// Answers a SCRAM client-first-message. A locked user's exchange runs
+    /// with its own credentials, so that it looks like any other, and fails
+    /// only at the end.
+    fn start_scram(&mut self, client_first: &[u8], ticket: &AdmissionTicket) -> AuthResponse {
         let Ok(first) = ClientFirst::parse(client_first) else {
             return AuthResponse::Reject;
         };
@@ -157,6 +180,10 @@ impl<'a> HostAuthExchange<'a> {
         };
         let credentials = self.authenticator.users.get(&first.username).cloned();
         debug!(known = credentials.is_some(), "SCRAM authentication");
+        if credentials.is_some() {
+            self.locked = ticket.user_locked(&first.username);
+            self.user = Some(first.username.clone());
+        }
         let (server, server_first) = ScramServer::new(
             first,
             credentials,
@@ -175,6 +202,10 @@ impl<'a> HostAuthExchange<'a> {
             return AuthResponse::Reject;
         };
         match server.handle_client_final(auth_data) {
+            Ok(_) if self.locked => {
+                info!("SCRAM authentication refused: the user failed too often recently");
+                AuthResponse::Reject
+            }
             Ok(server_final) => {
                 info!("SCRAM authentication succeeded");
                 AuthResponse::Accept(server_final)
@@ -306,10 +337,20 @@ impl ClientAuthExchange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use crate::admission::{Admission, AdmissionLimits};
 
     /// Returns a channel binding for tests.
     fn binding() -> ChannelBinding {
         ChannelBinding([7; 32])
+    }
+
+    /// Returns the ticket of a connection from the loopback address.
+    fn ticket(admission: &Admission) -> AdmissionTicket {
+        admission
+            .admit(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .expect("the connection is admitted")
     }
 
     /// Tokens are accepted only when they match exactly.
@@ -318,18 +359,22 @@ mod tests {
         let mut authenticator = HostAuthenticator::new().unwrap();
         authenticator.add_token(b"secret".to_vec());
         assert_eq!(authenticator.methods(), [AuthMethod::TOKEN]);
+        let admission = Admission::default();
+        let ticket = ticket(&admission);
         let mut exchange = HostAuthExchange::new(&authenticator, binding());
         assert_eq!(
-            exchange.start(AuthMethod::TOKEN, b"secret"),
+            exchange.start(AuthMethod::TOKEN, b"secret", &ticket),
             AuthResponse::Accept(Vec::new())
         );
         assert_eq!(
-            exchange.start(AuthMethod::TOKEN, b"secrets"),
+            exchange.start(AuthMethod::TOKEN, b"secrets", &ticket),
             AuthResponse::Reject
         );
+        assert_eq!(exchange.user(), None);
     }
 
-    /// A client and host complete a SCRAM exchange, and a wrong password fails.
+    /// A client and host complete a SCRAM exchange, and a wrong password
+    /// fails; once a user failed too often, so does the right one.
     #[test]
     fn scram_exchange() {
         let mut authenticator = HostAuthenticator::new().unwrap();
@@ -337,7 +382,12 @@ mod tests {
             "ian".to_owned(),
             ScramCredentials::derive("pencil", b"salt".to_vec(), 4096).unwrap(),
         );
-        for (password, succeeds) in [("pencil", true), ("wrong", false)] {
+        let admission = Admission::new(AdmissionLimits {
+            failures_per_user: 1,
+            ..AdmissionLimits::default()
+        });
+        let ticket = ticket(&admission);
+        for (password, succeeds) in [("pencil", true), ("wrong", false), ("pencil", false)] {
             let mut host = HostAuthExchange::new(&authenticator, binding());
             let mut client = ClientAuthExchange::new(
                 ClientCredentials::Password {
@@ -347,9 +397,10 @@ mod tests {
                 binding(),
             );
             let (method, first) = client.start(&authenticator.methods()).unwrap();
-            let AuthResponse::Continue(server_first) = host.start(method, &first) else {
+            let AuthResponse::Continue(server_first) = host.start(method, &first, &ticket) else {
                 panic!("expected a server-first-message");
             };
+            assert_eq!(host.user(), Some("ian"));
             let client_final = client.continue_exchange(&server_first).unwrap();
             let result = match host.continue_exchange(&client_final) {
                 AuthResponse::Accept(auth_data) => AuthResult {
@@ -357,11 +408,14 @@ mod tests {
                     auth_data,
                     reason: String::new(),
                 },
-                _ => AuthResult {
-                    status: AuthStatus::FailedRetry,
-                    auth_data: Vec::new(),
-                    reason: "authentication failed".to_owned(),
-                },
+                _ => {
+                    ticket.failed(host.user());
+                    AuthResult {
+                        status: AuthStatus::FailedRetry,
+                        auth_data: Vec::new(),
+                        reason: "authentication failed".to_owned(),
+                    }
+                }
             };
             assert_eq!(client.finish(&result).is_ok(), succeeds, "{password}");
         }
