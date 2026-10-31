@@ -11,7 +11,7 @@ use tracing::debug;
 
 use crate::TransportError;
 use crate::config::DATAGRAM_SEND_BUFFER;
-use crate::streams::write_stream;
+use crate::streams::{OutgoingStream, write_stream};
 
 /// The largest chunk read from the control stream at once.
 const CONTROL_READ_CHUNK: usize = 64 << 10;
@@ -131,6 +131,13 @@ impl QdpConnection {
                 debug!(%error, "stream not delivered");
             }
         });
+    }
+
+    /// Opens a unidirectional stream that stays open for data sent over time,
+    /// in order, starting with `header` (Section 3.5.2). Dropping the
+    /// returned stream finishes it.
+    pub fn open_stream(&self, header: Vec<u8>) -> OutgoingStream {
+        OutgoingStream::open(self.connection.clone(), header)
     }
 
     /// Writes bytes to the control stream.

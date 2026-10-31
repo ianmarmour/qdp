@@ -11,7 +11,7 @@ use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, ClientSession, HostConfig, HostEvent, HostSession, SessionError};
 use tracing::debug;
 
-use crate::streams::{ReceivedStream, StreamPolicy, receive_streams};
+use crate::streams::{Incoming, ReceivedStream, StreamChunk, StreamPolicy, receive_streams};
 use crate::{QdpConnection, TransportError};
 
 /// What a session state machine must provide for a driver to run it.
@@ -108,6 +108,9 @@ pub enum DriverInput<E> {
     /// A unidirectional stream from the peer, read to its end, once
     /// [`SessionDriver::accept_streams`] has been called.
     Stream(ReceivedStream),
+    /// Data of a stream the application follows as it arrives
+    /// ([`StreamPolicy::Follow`]).
+    StreamChunk(StreamChunk),
     /// The deadline the application passed has been reached.
     Deadline,
     /// The application's wake-up signal was notified, for example by a worker
@@ -124,8 +127,8 @@ pub struct SessionDriver<S> {
     connection: QdpConnection,
     /// The session state machine.
     session: S,
-    /// The peer's complete streams, once the application accepts them.
-    streams: Option<mpsc::Receiver<ReceivedStream>>,
+    /// What the peer's streams carry, once the application accepts them.
+    streams: Option<mpsc::Receiver<Incoming>>,
 }
 
 /// The driver of a host's session.
@@ -170,8 +173,8 @@ impl<S: DrivenSession> SessionDriver<S> {
     }
 
     /// Starts accepting the peer's unidirectional streams, which
-    /// [`SessionDriver::next_input`] then returns, each read to its end, as
-    /// `policy` directs. Streams the peer opened earlier wait in the QUIC
+    /// [`SessionDriver::next_input`] then returns, each read to its end or
+    /// followed as its data arrives, as `policy` directs. Streams the peer opened earlier wait in the QUIC
     /// connection until then.
     pub fn accept_streams(
         &mut self,
@@ -267,7 +270,12 @@ impl<S: DrivenSession> SessionDriver<S> {
                     return Ok(DriverInput::Datagram(datagram?));
                 }
                 read = self.connection.read_control() => self.handle_control_read(read)?,
-                Some(stream) = stream => return Ok(DriverInput::Stream(stream)),
+                Some(incoming) = stream => {
+                    return Ok(match incoming {
+                        Incoming::Complete(stream) => DriverInput::Stream(stream),
+                        Incoming::Chunk(chunk) => DriverInput::StreamChunk(chunk),
+                    });
+                }
                 () = woken => return Ok(DriverInput::Wake),
                 () = sleep => {
                     let now = Instant::now();

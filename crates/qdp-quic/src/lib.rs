@@ -31,7 +31,9 @@ pub use connection::{PathStats, QdpConnection};
 pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDriver};
 pub use endpoint::{ClientEndpoint, HostEndpoint};
 pub use identity::{HostIdentity, KeyPin};
-pub use streams::{ReceivedStream, StreamFailure, StreamLimit, StreamPolicy};
+pub use streams::{
+    OutgoingStream, ReceivedStream, StreamChunk, StreamFailure, StreamLimit, StreamPolicy,
+};
 pub use verify::PinnedKeyVerifier;
 
 /// An error from the transport or the session it carries.

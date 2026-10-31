@@ -470,6 +470,8 @@ impl ActiveHost {
                 Ok(DriverInput::Event(event)) => self.handle_event(event)?,
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(&datagram)?,
                 Ok(DriverInput::Stream(stream)) => self.handle_stream(stream)?,
+                // No stream is followed yet.
+                Ok(DriverInput::StreamChunk(_)) => {}
                 Ok(DriverInput::Deadline | DriverInput::Wake) => {}
                 Err(error) if is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
