@@ -337,6 +337,7 @@ async fn receive(
         credentials,
         display: DEFAULT_DISPLAY,
         decoder_threads: 0,
+        decoder: args.decoder,
     };
     let result = tokio::select! {
         result = qdp_runtime::run(connection, &options, sink) => result.map(Some),

@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use qdp::message::{BlockGrid, BlockSet};
 use qdp_codec::{
-    EncodedFrame, EncoderPreference, EncoderSettings, KeyFrameRequest, VideoEncoder, Yuv420Frame,
+    CodecPreference, EncodedFrame, EncoderSettings, KeyFrameRequest, VideoEncoder, Yuv420Frame,
     open_encoder,
 };
 use tokio::sync::{Notify, oneshot};
@@ -65,7 +65,7 @@ impl EncoderThread {
     pub(crate) async fn spawn(
         source: Box<dyn FrameSource>,
         settings: EncoderSettings,
-        preference: EncoderPreference,
+        preference: CodecPreference,
         grid: BlockGrid,
     ) -> Result<(Self, String), RuntimeError> {
         let (job_sender, jobs) = mpsc::channel();
@@ -223,7 +223,7 @@ mod tests {
         let (thread, description) = EncoderThread::spawn(
             Box::new(TestPattern::new(width, height)),
             settings,
-            EncoderPreference::Software,
+            CodecPreference::Software,
             grid,
         )
         .await

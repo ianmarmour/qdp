@@ -6,6 +6,8 @@
 //!   one ([`VaapiEncoder`] on Linux) and falls back to software otherwise.
 //! - [`Av1Encoder`], the software encoder every platform can fall back on,
 //!   built on rav1e in low-latency mode.
+//! - [`open_decoder`], which opens the platform's hardware decoder when it has
+//!   one (VideoToolbox on macOS) and falls back to software otherwise.
 //! - [`Av1Decoder`], which decodes with rav1d, returning one picture per
 //!   temporal unit.
 //! - [`parse_obus`] and [`to_qdp_temporal_unit`], which check and convert AV1
@@ -26,18 +28,22 @@ mod frame;
 #[cfg(target_os = "linux")]
 mod headers;
 mod obu;
+mod sequence;
 #[cfg(target_os = "linux")]
 mod vaapi;
+#[cfg(target_os = "macos")]
+mod videotoolbox;
 
 use thiserror::Error;
 
-pub use backend::{EncoderPreference, VideoEncoder, open_encoder};
+pub use backend::{CodecPreference, VideoDecoder, VideoEncoder, open_decoder, open_encoder};
 pub use decoder::Av1Decoder;
 pub use encoder::{
     Av1Encoder, EncodedFrame, EncoderSettings, FASTEST_SPEED, KeyFrameRequest, tile_count,
 };
 pub use frame::Yuv420Frame;
 pub use obu::{Obu, ObuType, parse_obus, to_qdp_temporal_unit};
+pub use sequence::SequenceHeader;
 #[cfg(target_os = "linux")]
 pub use vaapi::VaapiEncoder;
 
@@ -67,4 +73,7 @@ pub enum CodecError {
     /// The decoded picture is not 8-bit 4:2:0.
     #[error("unsupported picture format")]
     UnsupportedFormat,
+    /// A hardware codec cannot handle the stream, so software must.
+    #[error("the hardware codec cannot be used: {0}")]
+    HardwareUnavailable(String),
 }

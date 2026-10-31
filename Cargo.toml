@@ -18,6 +18,11 @@ repository = "https://github.com/ianmarmour/qdp"
 [workspace.dependencies]
 bytes = { version = "1.10", default-features = false, features = ["std"] }
 libc = { version = "0.2.172", default-features = false }
+# Apple's frameworks, for hardware video decoding on macOS.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTUtilities", "objc2-core-media", "objc2-core-video"] }
 qdp = { path = "crates/qdp" }
 qdp-codec = { path = "crates/qdp-codec" }
 qdp-quic = { path = "crates/qdp-quic" }

@@ -17,7 +17,7 @@ use qdp::session::{HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, VideoSender};
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{EncoderPreference, EncoderSettings, KeyFrameRequest};
+use qdp_codec::{CodecPreference, EncoderSettings, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, TransportError};
 use tracing::{debug, info, warn};
 
@@ -64,7 +64,7 @@ const FAILURE_REASON: &str = "authentication failed";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderTuning {
     /// Whether to encode in hardware or software.
-    pub preference: EncoderPreference,
+    pub preference: CodecPreference,
     /// rav1e's speed preset, from 0 to 10.
     pub speed: u8,
     /// The quantizer, from 0 (best) to 255.
