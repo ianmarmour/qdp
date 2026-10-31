@@ -9,9 +9,10 @@ use qdp::message::{
     AuthMethod, AuthStatus, Av1Profiles, Capability, ClientHello, ClientMonitor,
     ClientMonitorFlags, ClientMonitorId, ControlMessage, CursorId, CursorSet, Datagram,
     DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus,
-    DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequest, DisplayRequestId, HostHello,
-    ImageSerial, MinorVersion, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamHeader, VideoCodec,
-    VideoCodecCapability, VideoCodecFlags,
+    DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequest, DisplayRequestId,
+    HidOutputDecoder, HostHello, ImageSerial, MinorVersion, NO_LEVEL_LIMIT, PointerKind,
+    PointerMode, StreamHeader, VideoCodec, VideoCodecCapability, VideoCodecFlags,
+    encode_hid_output_report,
 };
 use qdp::registry::{ErrorCode, StreamType};
 use qdp::session::{AuthResponse, ClientEvent, HostConfig, HostEvent, Phase};
@@ -43,6 +44,13 @@ const STREAM_DATA: &[u8] = b"cursor image";
 /// The most data the client accepts on a cursor image stream.
 const STREAM_LIMIT: usize = 16;
 
+/// The device the host's HID output stream is for.
+const OUTPUT_DEVICE: DeviceId = DeviceId(VarInt::from_u32(7));
+
+/// The output reports the host sends on its HID output stream, some time
+/// apart.
+const OUTPUT_REPORTS: [&[u8]; 2] = [&[0x01, 0xff], &[0x02, 0x00, 0x10]];
+
 /// A stream type no version defines.
 const UNKNOWN_STREAM_TYPE: StreamType = StreamType(VarInt::from_u32(0x3f));
 
@@ -58,6 +66,7 @@ fn stream_policy(header: &StreamHeader) -> StreamPolicy {
             max_bytes: STREAM_LIMIT,
             overflow: ErrorCode::PROTOCOL_VIOLATION,
         }),
+        StreamHeader::HidOutput { .. } => StreamPolicy::Follow,
         StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
         _ => StreamPolicy::Forbid(ErrorCode::STREAM_CREATION_ERROR),
     }
@@ -194,6 +203,19 @@ async fn run_host(host: HostEndpoint, credentials: ScramCredentials) -> Transpor
     ));
     connection.send_stream(stream(StreamHeader::CursorImage, STREAM_DATA));
     connection.send_stream(stream(StreamHeader::CursorImage, &[0; STREAM_LIMIT + 1]));
+    // Output reports go out on one stream as they happen, which dropping it
+    // finishes.
+    let output = connection.open_stream(
+        StreamHeader::HidOutput {
+            device_id: OUTPUT_DEVICE,
+        }
+        .to_bytes(),
+    );
+    for report in OUTPUT_REPORTS {
+        assert!(output.send(encode_hid_output_report(report)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(output);
 
     driver
         .next_event()
@@ -266,17 +288,39 @@ async fn run_client(address: SocketAddr, pin: KeyPin) {
         .expect("a clock sample");
     assert!(sample.delay < Duration::from_secs(1));
 
-    // The unknown stream is refused, so only the cursor images arrive.
+    // The unknown stream is refused, so only the cursor images arrive, and
+    // the output stream's reports, as they come.
     driver.accept_streams(stream_policy);
     let mut received = Vec::new();
-    while received.len() < 2 {
-        if let DriverInput::Stream(stream) = driver.next_input(None, None).await.unwrap() {
-            assert_eq!(stream.header, StreamHeader::CursorImage);
-            received.push(stream.data);
+    let mut decoder = HidOutputDecoder::new();
+    let mut reports = Vec::new();
+    let mut output_end = None;
+    while received.len() < 2 || output_end.is_none() {
+        match driver.next_input(None, None).await.unwrap() {
+            DriverInput::Stream(stream) => {
+                assert_eq!(stream.header, StreamHeader::CursorImage);
+                received.push(stream.data);
+            }
+            DriverInput::StreamChunk(chunk) => {
+                assert_eq!(
+                    chunk.header,
+                    StreamHeader::HidOutput {
+                        device_id: OUTPUT_DEVICE
+                    }
+                );
+                decoder.push(&chunk.data);
+                while let Some(report) = decoder.next_report().unwrap() {
+                    reports.push(report);
+                }
+                output_end = chunk.end;
+            }
+            _ => {}
         }
     }
     assert!(received.contains(&Ok(STREAM_DATA.to_vec())));
     assert!(received.contains(&Err(StreamFailure::TooLong)));
+    assert_eq!(reports, OUTPUT_REPORTS.map(<[u8]>::to_vec));
+    assert_eq!(output_end, Some(Ok(())));
 
     driver.close("test complete");
     endpoint.wait_idle().await;

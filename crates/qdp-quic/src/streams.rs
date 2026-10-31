@@ -1,6 +1,7 @@
-//! Unidirectional streams (Section 3.5.2): sending a whole stream in the
-//! background, and receiving the peer's streams, each read to its end in the
-//! background before the application sees it.
+//! Unidirectional streams (Section 3.5.2): sending a whole stream, or one that
+//! stays open for data sent over time, in the background; and receiving the
+//! peer's streams, each read to its end before the application sees it or
+//! followed as its data arrives.
 
 use std::sync::Arc;
 
@@ -16,8 +17,8 @@ use crate::connection::quic_code;
 /// The largest chunk read from a stream at once.
 const READ_CHUNK: usize = 64 << 10;
 
-/// The complete streams waiting for the application. When it falls behind,
-/// reading further streams waits.
+/// The complete streams and chunks waiting for the application. When it
+/// falls behind, reading further streams waits.
 const RECEIVED_QUEUE: usize = 16;
 
 /// How much of a stream's data to read, and the code that aborts a stream
@@ -35,6 +36,10 @@ pub struct StreamLimit {
 pub enum StreamPolicy {
     /// Read the stream to its end, within the limit.
     Read(StreamLimit),
+    /// Deliver the stream's data in order as it arrives, for streams that
+    /// stay open as long as what they carry, such as a device's output
+    /// reports.
+    Follow,
     /// Abort reading with STOP_SENDING carrying this code, as for unknown
     /// stream types.
     Refuse(ErrorCode),
@@ -64,6 +69,67 @@ pub struct ReceivedStream {
     pub data: Result<Vec<u8>, StreamFailure>,
 }
 
+/// Data that arrived on a followed stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamChunk {
+    /// Identifies the stream among the connection's streams.
+    pub stream: u64,
+    /// The stream's header.
+    pub header: StreamHeader,
+    /// The data that arrived, after what earlier chunks carried.
+    pub data: Vec<u8>,
+    /// `None` while the stream continues, otherwise how it ended: `Ok` when
+    /// the peer finished it.
+    pub end: Option<Result<(), StreamFailure>>,
+}
+
+/// What the stream readers queue for the application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Incoming {
+    /// A stream read to its end.
+    Complete(ReceivedStream),
+    /// Data of a followed stream.
+    Chunk(StreamChunk),
+}
+
+/// A unidirectional stream that stays open for data sent over time, in
+/// order. Dropping it finishes the stream.
+#[derive(Debug)]
+pub struct OutgoingStream {
+    /// The data waiting to be written, in order.
+    chunks: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl OutgoingStream {
+    /// Opens a stream in the background and writes `header` to it.
+    pub(crate) fn open(connection: Connection, header: Vec<u8>) -> Self {
+        let (chunks, mut queued) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            let written = async {
+                let mut stream = connection.open_uni().await?;
+                stream.write_all(&header).await?;
+                while let Some(chunk) = queued.recv().await {
+                    stream.write_all(&chunk).await?;
+                }
+                stream
+                    .finish()
+                    .map_err(|_| quinn::WriteError::ClosedStream)?;
+                Ok::<(), TransportError>(())
+            };
+            if let Err(error) = written.await {
+                debug!(%error, "stream not delivered");
+            }
+        });
+        Self { chunks }
+    }
+
+    /// Queues `data` to be written after everything sent before, returning
+    /// `false` if the stream has failed.
+    pub fn send(&self, data: Vec<u8>) -> bool {
+        self.chunks.send(data).is_ok()
+    }
+}
+
 /// Sends `data` on a new unidirectional stream and finishes it.
 pub(crate) async fn write_stream(
     connection: &Connection,
@@ -78,32 +144,31 @@ pub(crate) async fn write_stream(
 }
 
 /// Accepts the peer's streams until the connection ends, reading each in a
-/// task of its own and queueing the complete ones on `received`.
+/// task of its own and queueing what they carry on `received`.
 async fn accept_streams(
     connection: Connection,
     policy: Arc<dyn Fn(&StreamHeader) -> StreamPolicy + Send + Sync>,
-    received: mpsc::Sender<ReceivedStream>,
+    received: mpsc::Sender<Incoming>,
 ) {
     while let Ok(stream) = connection.accept_uni().await {
         let connection = connection.clone();
         let policy = Arc::clone(&policy);
         let received = received.clone();
         tokio::spawn(async move {
-            if let Some(stream) = read_stream(&connection, stream, &*policy).await {
-                let _ = received.send(stream).await;
-            }
+            read_stream(&connection, stream, &*policy, &received).await;
         });
     }
 }
 
-/// Reads one stream: its header, then its data as `policy` directs. Returns
-/// `None` for streams that end before their header does, which are ignored,
-/// and for streams that are refused or forbidden.
+/// Reads one stream: its header, then its data as `policy` directs, queued
+/// on `received`. Streams that end before their header does are ignored, as
+/// are streams that are refused or forbidden.
 async fn read_stream(
     connection: &Connection,
     mut stream: RecvStream,
     policy: &(dyn Fn(&StreamHeader) -> StreamPolicy + Send + Sync),
-) -> Option<ReceivedStream> {
+    received: &mpsc::Sender<Incoming>,
+) {
     let mut buffer = Vec::new();
     let (header, header_length) = loop {
         if let Some(decoded) = StreamHeader::decode(&buffer) {
@@ -111,19 +176,24 @@ async fn read_stream(
         }
         match stream.read_chunk(READ_CHUNK, true).await {
             Ok(Some(chunk)) => buffer.extend_from_slice(&chunk.bytes),
-            Ok(None) | Err(_) => return None,
+            Ok(None) | Err(_) => return,
         }
     };
     let limit = match policy(&header) {
         StreamPolicy::Read(limit) => limit,
+        StreamPolicy::Follow => {
+            buffer.drain(..header_length);
+            follow_stream(stream, header, buffer, received).await;
+            return;
+        }
         StreamPolicy::Refuse(code) => {
             debug!(?header, "stream refused");
             let _ = stream.stop(quic_code(code));
-            return None;
+            return;
         }
         StreamPolicy::Forbid(code) => {
             connection.close(quic_code(code), b"a stream was opened that is not allowed");
-            return None;
+            return;
         }
     };
     buffer.drain(..header_length);
@@ -141,15 +211,58 @@ async fn read_stream(
             Err(_) => break Err(StreamFailure::ConnectionLost),
         }
     };
-    Some(ReceivedStream { header, data })
+    let _ = received
+        .send(Incoming::Complete(ReceivedStream { header, data }))
+        .await;
 }
 
-/// Returns the queue that receives the peer's complete streams, and starts
+/// Queues a followed stream's data on `received` as it arrives, starting
+/// with `first`, the data read with its header, then its end.
+async fn follow_stream(
+    mut stream: RecvStream,
+    header: StreamHeader,
+    first: Vec<u8>,
+    received: &mpsc::Sender<Incoming>,
+) {
+    let id = u64::from(stream.id());
+    let chunk = |data: Vec<u8>, end: Option<Result<(), StreamFailure>>| {
+        Incoming::Chunk(StreamChunk {
+            stream: id,
+            header,
+            data,
+            end,
+        })
+    };
+    if !first.is_empty() && received.send(chunk(first, None)).await.is_err() {
+        return;
+    }
+    let end = loop {
+        match stream.read_chunk(READ_CHUNK, true).await {
+            Ok(Some(data)) => {
+                if received
+                    .send(chunk(data.bytes.to_vec(), None))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(None) => break Ok(()),
+            Err(quinn::ReadError::Reset(code)) => {
+                break Err(StreamFailure::Reset(code.into_inner()));
+            }
+            Err(_) => break Err(StreamFailure::ConnectionLost),
+        }
+    };
+    let _ = received.send(chunk(Vec::new(), Some(end))).await;
+}
+
+/// Returns the queue that receives what the peer's streams carry, and starts
 /// accepting them with `policy`.
 pub(crate) fn receive_streams(
     connection: Connection,
     policy: Arc<dyn Fn(&StreamHeader) -> StreamPolicy + Send + Sync>,
-) -> mpsc::Receiver<ReceivedStream> {
+) -> mpsc::Receiver<Incoming> {
     let (sender, receiver) = mpsc::channel(RECEIVED_QUEUE);
     tokio::spawn(accept_streams(connection, policy, sender));
     receiver

@@ -707,6 +707,8 @@ impl ActiveClient<'_> {
                 Ok(DriverInput::Event(_) | DriverInput::Deadline | DriverInput::Wake) => {}
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(datagram)?,
                 Ok(DriverInput::Stream(stream)) => self.handle_stream(stream)?,
+                // No stream is followed yet.
+                Ok(DriverInput::StreamChunk(_)) => {}
                 Err(error) if crate::is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
             }
