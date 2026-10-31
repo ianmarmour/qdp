@@ -58,6 +58,12 @@ disconnects:
 ./target/release/qdp connect 192.0.2.7 --pin PIN --token my-secret
 ```
 
+The host sends video at the window's size, up to its screen's. To stream less
+at a large or full-screen window, `--resolution 1920x1080` asks for that size
+instead, whatever the window's, and the client stretches the picture to fill
+it, keeping its shape: the picture is softer, but the host encodes and the
+client decodes far fewer pixels.
+
 With `--headless` the client opens no window and only logs statistics, and
 `--output session.y4m` also writes the decoded video to a YUV4MPEG2 file, which
 ffmpeg and most players open. To build without window support, for a machine

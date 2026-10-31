@@ -468,13 +468,15 @@ fn connect(args: ConnectArgs) -> CliResult {
 /// Receives the stream without a window, until the frame limit, an interrupt,
 /// or the host closing.
 fn connect_headless(args: &ConnectArgs, mut sink: CliSink) -> CliResult {
-    let result = run_async(receive(
-        args,
-        DEFAULT_DISPLAY,
-        &mut sink,
-        interrupted(),
-        None,
-    ));
+    let display = match args.resolution {
+        Some((width, height)) => DisplaySize {
+            width,
+            height,
+            ..DEFAULT_DISPLAY
+        },
+        None => DEFAULT_DISPLAY,
+    };
+    let result = run_async(receive(args, display, &mut sink, interrupted(), None));
     finish(&mut sink, result)
 }
 
@@ -490,6 +492,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
     let (input, input_queue) = qdp_runtime::input_channel();
     let passthrough = args.passthrough.clone();
     let touchpad = args.touchpad;
+    let resolution = args.resolution;
     let slot = FrameSlot::default();
     let close = Arc::new(CloseSignal::default());
     let title = format!("QDP: {}", args.address);
@@ -528,6 +531,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
         microphone,
         passthrough: &passthrough,
         touchpad,
+        resolution,
     };
     let mut app = WindowApp::new(
         choices,

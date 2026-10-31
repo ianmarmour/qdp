@@ -364,6 +364,9 @@ pub struct WindowApp {
     /// Tells the session the display it is shown on, once the window has
     /// opened and measured it.
     display_sender: Option<oneshot::Sender<DisplaySize>>,
+    /// The video size the user chose, in pixels, asked for whatever the
+    /// window's size.
+    resolution: Option<(u32, u32)>,
 }
 
 /// What the user chose for the window's session.
@@ -378,6 +381,9 @@ pub struct WindowChoices<'a> {
     pub passthrough: &'a [DeviceSelector],
     /// How the touchpad is sent.
     pub touchpad: TouchpadMode,
+    /// The video size to ask for, in pixels, whatever the window's size, if
+    /// the user chose one: the picture is stretched to fill the window.
+    pub resolution: Option<(u32, u32)>,
 }
 
 impl WindowApp {
@@ -395,8 +401,10 @@ impl WindowApp {
             microphone,
             passthrough,
             touchpad,
+            resolution,
         } = choices;
         Self {
+            resolution,
             microphone,
             display_sender: Some(display_sender),
             title,
@@ -862,8 +870,10 @@ impl WindowApp {
     /// or the monitor it is on. The session requests a matching stream.
     fn display_changed(&self) {
         if let Some(display) = &self.display {
-            self.input
-                .send(UserInput::Display(display_size(&display.window)));
+            self.input.send(UserInput::Display(display_size(
+                &display.window,
+                self.resolution,
+            )));
         }
     }
 
@@ -952,7 +962,7 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
         match self.open(event_loop) {
             Ok(display) => {
                 if let Some(sender) = self.display_sender.take() {
-                    let _ = sender.send(display_size(&display.window));
+                    let _ = sender.send(display_size(&display.window, self.resolution));
                 }
                 self.display = Some(display);
             }
@@ -1133,15 +1143,17 @@ fn confined(area: DesktopRect, x: f64, y: f64) -> (f64, f64) {
 }
 
 /// Returns the display the session is shown on: the window's content area,
-/// at the refresh rate of the monitor it is on (Section 6.2).
-fn display_size(window: &Window) -> DisplaySize {
+/// or the `resolution` the user chose instead, at the refresh rate of the
+/// monitor it is on (Section 6.2).
+fn display_size(window: &Window, resolution: Option<(u32, u32)>) -> DisplaySize {
     let monitor = window
         .current_monitor()
         .or_else(|| window.primary_monitor());
     let size = window.inner_size();
+    let (width, height) = resolution.unwrap_or((size.width, size.height));
     DisplaySize {
-        width: size.width,
-        height: size.height,
+        width,
+        height,
         refresh_millihertz: monitor
             .and_then(|monitor| monitor.refresh_rate_millihertz())
             .unwrap_or(0),
