@@ -17,12 +17,15 @@
 //!   (Section 4.4.4).
 //! - [`video`] holds the sans-I/O logic of video streams: fragmentation,
 //!   reassembly, retransmission, loss recovery and composition (Section 6).
+//! - [`hid`] parses and validates the HID report descriptors of passthrough
+//!   devices (Section 8.2.5).
 //! - [`input`] holds the sans-I/O delivery of input reports: retention and repeats
 //!   on the client, ordering and acknowledgement on the host (Section 8).
 //! - [`time`] holds the session clock that timestamps are measured on and the
 //!   estimation of the peer's clock offset (Sections 5.1 and 5.2).
 
 pub mod auth;
+pub mod hid;
 pub mod input;
 pub mod message;
 pub mod registry;
