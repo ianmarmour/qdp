@@ -198,8 +198,11 @@ Every video stream MUST conform to [AV1], and in addition:
    Frames are therefore never reordered and never held back by the decoder.
 4. OBU extension headers MUST NOT be used (`obu_extension_flag` is 0): there is one
    operating point with no spatial or temporal scalability.
-5. Every frame's size MUST equal the monitor size, super-resolution MUST NOT be
-   enabled (`enable_superres` is 0), and the render size MUST equal the frame size.
+5. Every frame's render size MUST equal the monitor size, and super-resolution MUST
+   NOT be enabled (`enable_superres` is 0). The frame size SHOULD equal the monitor
+   size, but a host whose encoder can only code aligned sizes MAY pad frames on the
+   right by fewer than 64 samples and at the bottom by fewer than 16. Receivers show
+   only the top-left region of the monitor size.
 6. Film grain synthesis MUST NOT be used (`film_grain_params_present` is 0).
 7. Frame Number 1, and every frame flagged `KEY_FRAME`
    ([Section 6.6.1](#661-video_fragment-datagram)), MUST begin with a sequence header

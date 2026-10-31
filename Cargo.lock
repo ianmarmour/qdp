@@ -1602,6 +1602,7 @@ dependencies = [
  "rav1d",
  "rav1e",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

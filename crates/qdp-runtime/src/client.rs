@@ -136,6 +136,8 @@ struct ReceivedStream {
     receiver: VideoReceiver,
     /// The decoder.
     decoder: Av1Decoder,
+    /// The monitor's size, to which decoded frames are cropped.
+    size: (usize, usize),
 }
 
 /// Datagrams for streams whose `DISPLAY_CONFIG` has not arrived (Section 3.7.3).
@@ -298,6 +300,10 @@ impl ActiveClient<'_> {
                         self.clock,
                     ),
                     decoder: Av1Decoder::new(self.decoder_threads)?,
+                    size: (
+                        monitor.width.into_inner() as usize,
+                        monitor.height.into_inner() as usize,
+                    ),
                 },
             );
         }
@@ -399,6 +405,8 @@ impl ActiveClient<'_> {
             while let Some(frame) = stream.receiver.poll_decodable() {
                 match stream.decoder.decode(frame.temporal_unit()) {
                     Ok(picture) => {
+                        // A hardware encoder may have padded the frame.
+                        let picture = picture.cropped(stream.size.0, stream.size.1);
                         let decoded_at = Instant::now();
                         stream
                             .receiver

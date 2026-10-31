@@ -147,6 +147,7 @@ async fn serve(args: ServeArgs) -> CliResult {
         authenticator,
         frame_rate: args.fps,
         encoder: EncoderTuning {
+            preference: args.encoder,
             speed: args.speed,
             quantizer: args.quantizer,
             threads: 0,

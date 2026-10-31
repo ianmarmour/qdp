@@ -3,6 +3,7 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
+use qdp_codec::EncoderPreference;
 use qdp_quic::KeyPin;
 
 /// The usage text printed by `qdp help` and on errors.
@@ -21,8 +22,10 @@ Serve options:
   --user NAME          Accept NAME with the password in QDP_PASSWORD
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
   --fps N              Frames per second (default 60)
-  --speed N            Encoder speed preset, 0 to 10 (default 10)
-  --quantizer N        Encoder quantizer, 0 to 255 (default 100)
+  --encoder KIND       auto, hardware or software (default auto: the GPU's
+                       encoder when it has one, otherwise software)
+  --speed N            Software encoder speed preset, 0 to 10 (default 10)
+  --quantizer N        Encoder quantizer, 1 to 255 (default 100)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -93,6 +96,8 @@ pub struct ServeArgs {
     pub size: (usize, usize),
     /// The frame rate.
     pub fps: u32,
+    /// Whether to encode in hardware or software.
+    pub encoder: EncoderPreference,
     /// The encoder speed preset.
     pub speed: u8,
     /// The encoder quantizer.
@@ -246,6 +251,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         user: None,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         fps: DEFAULT_FPS,
+        encoder: EncoderPreference::Auto,
         speed: DEFAULT_SPEED,
         quantizer: DEFAULT_QUANTIZER,
     };
@@ -257,6 +263,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             "--user" => serve.user = Some(value("--user", &mut arguments)?),
             "--size" => serve.size = parse_size(&value("--size", &mut arguments)?)?,
             "--fps" => serve.fps = parse("--fps", &mut arguments)?,
+            "--encoder" => serve.encoder = parse_encoder(&value("--encoder", &mut arguments)?)?,
             "--speed" => serve.speed = parse("--speed", &mut arguments)?,
             "--quantizer" => serve.quantizer = parse("--quantizer", &mut arguments)?,
             other => return Err(error(format!("unknown option: {other}"))),
@@ -271,6 +278,18 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         return Err(error("--fps must be above 0"));
     }
     Ok(serve)
+}
+
+/// Parses the value of `--encoder`.
+fn parse_encoder(text: &str) -> Result<EncoderPreference, ArgsError> {
+    match text {
+        "auto" => Ok(EncoderPreference::Auto),
+        "hardware" => Ok(EncoderPreference::Hardware),
+        "software" => Ok(EncoderPreference::Software),
+        other => Err(error(format!(
+            "--encoder must be auto, hardware or software, not {other}"
+        ))),
+    }
 }
 
 /// Parses the arguments of `qdp connect`.
@@ -330,6 +349,13 @@ mod tests {
         assert_eq!(serve.size, (640, 480));
         assert_eq!(serve.fps, 30);
         assert_eq!(serve.listen.port(), DEFAULT_PORT);
+        assert_eq!(serve.encoder, EncoderPreference::Auto);
+        let Command::Serve(serve) = parse_line("serve --token abc --encoder software").unwrap()
+        else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.encoder, EncoderPreference::Software);
+        assert!(parse_line("serve --token abc --encoder gpu").is_err());
         assert!(parse_line("serve").is_err());
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }

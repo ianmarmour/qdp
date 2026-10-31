@@ -53,9 +53,17 @@ To use a password instead of a token, pass `--user NAME` on both sides with the
 password in the `QDP_PASSWORD` environment variable; it is checked with
 SCRAM-SHA-256-PLUS, so it never crosses the network.
 
+On Linux the host encodes on the GPU through VA-API when the GPU can encode
+AV1 (AMD RDNA 3 or newer, Intel Arc or newer), and otherwise falls back to
+software encoding. It needs the GPU's VA-API driver, which desktop
+distributions install with Mesa (`mesa-va-drivers`) or Intel's media driver
+(`intel-media-driver`); `vainfo` lists `VAProfileAV1Profile0` with
+`VAEntrypointEncSlice` when hardware encoding is available. The host logs which
+encoder it uses, and `--encoder software` or `--encoder hardware` forces one.
+
 For now the host streams a test pattern. Screen capture, input and hardware
-video codecs come next. Run `qdp help` for every option, and set
-`QDP_LOG=debug` for more detail.
+decoding come next. Run `qdp help` for every option, and set `QDP_LOG=debug`
+for more detail.
 
 ## Crates
 

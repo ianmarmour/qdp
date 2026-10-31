@@ -9,7 +9,7 @@ use rav1e::config::{Config, EncoderConfig, SpeedSettings};
 use rav1e::data::{EncoderStatus, FrameType, Rational};
 use rav1e::prelude::{FrameParameters, FrameTypeOverride, SceneDetectionSpeed};
 
-use crate::{CodecError, Yuv420Frame, to_qdp_temporal_unit};
+use crate::{CodecError, VideoEncoder, Yuv420Frame, to_qdp_temporal_unit};
 
 /// The bit depth of the frames this encoder accepts.
 const BIT_DEPTH: usize = 8;
@@ -29,6 +29,9 @@ const FOUR_TILE_SAMPLES: usize = 2560 * 1600;
 /// per second. QDP sends key frames only when a stream starts or a client needs
 /// one, so the encoder never chooses one on its own.
 const MAX_KEY_FRAME_INTERVAL: u64 = 715_827_882;
+
+/// How [`Av1Encoder`] describes itself.
+const DESCRIPTION: &str = "rav1e (software)";
 
 /// The fastest rav1e speed preset.
 pub const FASTEST_SPEED: u8 = 10;
@@ -53,6 +56,8 @@ pub struct EncoderSettings {
     pub width: usize,
     /// The frame height in pixels.
     pub height: usize,
+    /// The frames per second, which sets the level hardware encoders signal.
+    pub frame_rate: u32,
     /// rav1e's speed preset, from 0 (slowest) to [`FASTEST_SPEED`].
     pub speed: u8,
     /// The quantizer, from 0 (best) to 255.
@@ -216,6 +221,20 @@ impl Av1Encoder {
                 Err(status) => return Err(CodecError::Encoder(status.to_string())),
             }
         }
+    }
+}
+
+impl VideoEncoder for Av1Encoder {
+    fn encode(
+        &mut self,
+        frame: &Yuv420Frame,
+        request: KeyFrameRequest,
+    ) -> Result<Vec<EncodedFrame>, CodecError> {
+        Av1Encoder::encode(self, frame, request)
+    }
+
+    fn description(&self) -> &str {
+        DESCRIPTION
     }
 }
 
