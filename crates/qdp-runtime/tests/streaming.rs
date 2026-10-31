@@ -144,10 +144,12 @@ fn test_input() -> Vec<UserInput> {
             pressed: false,
         },
         UserInput::PointerMoved { x: 10.0, y: 20.0 },
+        // A drag: the button stays held while the pointer moves.
         UserInput::Button {
             button: PointerButton::Left,
             pressed: true,
         },
+        UserInput::PointerMoved { x: 20.0, y: 30.0 },
         UserInput::Button {
             button: PointerButton::Left,
             pressed: false,
@@ -229,6 +231,10 @@ fn expected_actions() -> Vec<InputAction> {
             y: 20 * 256,
         },
         InputAction::ButtonDown(PointerButton::Left),
+        InputAction::PointerMoveTo {
+            x: 20 * 256,
+            y: 30 * 256,
+        },
         InputAction::ButtonUp(PointerButton::Left),
         InputAction::Scroll {
             vertical: 120,
@@ -612,8 +618,8 @@ async fn wrong_password_is_refused() {
     assert!(!opened.load(Ordering::SeqCst));
 }
 
-/// Keys, pointer, buttons, scrolling and text sent by the client are
-/// performed on the host, in order.
+/// Keys, pointer, buttons (a drag among them), scrolling and text sent by
+/// the client are performed on the host, in order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn input_reaches_the_host() {
     let mut authenticator = HostAuthenticator::new().unwrap();
