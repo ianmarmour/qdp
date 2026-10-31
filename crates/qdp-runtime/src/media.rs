@@ -23,12 +23,71 @@ pub struct CursorShape {
     pub pixels: Vec<u8>,
 }
 
+/// The rows of the stock arrow: `B` is its black outline, `W` its white
+/// fill, and `.` transparent.
+const ARROW: [&str; 19] = [
+    "B...........",
+    "BB..........",
+    "BWB.........",
+    "BWWB........",
+    "BWWWB.......",
+    "BWWWWB......",
+    "BWWWWWB.....",
+    "BWWWWWWB....",
+    "BWWWWWWWB...",
+    "BWWWWWWWWB..",
+    "BWWWWWWWWWB.",
+    "BWWWWWWBBBBB",
+    "BWWWBWWB....",
+    "BWWBBWWB....",
+    "BWB..BWWB...",
+    "BB...BWWB...",
+    "B.....BWWB..",
+    "......BWWB..",
+    ".......BB...",
+];
+
+impl CursorShape {
+    /// Returns a stock arrow pointing up and left from its hotspot, for
+    /// sources that cannot read the pointer's image: the host never draws
+    /// the pointer into its video (Section 9.1).
+    pub fn arrow() -> Self {
+        let pixels = ARROW
+            .iter()
+            .flat_map(|row| row.bytes())
+            .flat_map(|pixel| match pixel {
+                b'B' => [0, 0, 0, 255],
+                b'W' => [255, 255, 255, 255],
+                _ => [0, 0, 0, 0],
+            })
+            .collect();
+        Self {
+            width: ARROW[0].len() as u32,
+            height: ARROW.len() as u32,
+            hotspot: (0, 0),
+            pixels,
+        }
+    }
+}
+
+/// Where a capture source saw the pointer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum PointerPosition {
+    /// Hidden, or on another monitor.
+    #[default]
+    Hidden,
+    /// Its hotspot is at this position in the frame, in pixels.
+    At(i32, i32),
+    /// Shown, but the source cannot tell where: the client draws it at its
+    /// own pointer, and the host cannot tell it about moves.
+    Unknown,
+}
+
 /// The pointer, as a capture source last saw it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CursorState {
-    /// The hotspot's position in the frame, in pixels, or `None` while the
-    /// pointer is hidden or on another monitor.
-    pub position: Option<(i32, i32)>,
+    /// Where the pointer is.
+    pub position: PointerPosition,
     /// The pointer's image, shared until it changes.
     pub shape: Option<Arc<CursorShape>>,
 }

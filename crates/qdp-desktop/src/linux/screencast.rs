@@ -24,7 +24,7 @@ use pipewire as pw;
 use pw::spa;
 use pw::spa::buffer::meta::MetaCursor;
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{CursorShape, CursorState, FrameSource, RuntimeError};
+use qdp_runtime::{CursorShape, CursorState, FrameSource, PointerPosition, RuntimeError};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -112,6 +112,14 @@ impl ScreenCapture {
         capture.stop_portal = Some(stop_portal);
         capture.portal = Some(portal);
         capture.restore_token = stream.restore_token;
+        if stream.cursor_mode == CursorMode::Hidden {
+            if let Ok(mut cursor) = capture.cursor.lock() {
+                *cursor = Some(CursorState {
+                    position: PointerPosition::Unknown,
+                    shape: Some(Arc::new(CursorShape::arrow())),
+                });
+            }
+        }
         capture.wait_for_first_frame()?;
         info!(cursor = ?stream.cursor_mode, "screen cast started");
         Ok(capture)
@@ -286,9 +294,15 @@ async fn negotiate(
     session: &ashpd::desktop::Session<Screencast>,
     restore_token: Option<&str>,
 ) -> Result<PortalStream, String> {
+    // The host never draws the pointer into its video (Section 9.1): without
+    // metadata the pointer is left out, and the client shows a stock arrow.
     let cursor_mode = match proxy.available_cursor_modes().await {
         Ok(modes) if modes.contains(CursorMode::Metadata) => CursorMode::Metadata,
-        _ => CursorMode::Embedded,
+        Ok(modes) if modes.contains(CursorMode::Hidden) => CursorMode::Hidden,
+        _ => {
+            warn!("the desktop can only draw the pointer into the screen cast");
+            CursorMode::Embedded
+        }
     };
     let options = SelectSourcesOptions::default()
         .set_cursor_mode(cursor_mode)
@@ -431,7 +445,7 @@ fn update_cursor(shared: &SharedCursor, meta: &MetaCursor) {
         state.shape = shape.map(Arc::new);
     }
     let position = meta.position();
-    state.position = Some((position.x, position.y));
+    state.position = PointerPosition::At(position.x, position.y);
 }
 
 /// Returns the parameter asking for cursor metadata on each buffer.

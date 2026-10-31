@@ -3,8 +3,8 @@
 //!
 //! AppKit reports the system-wide pointer through `currentSystemCursor`,
 //! which Apple has deprecated and says will return nothing in a future
-//! macOS. Until then the capture leaves the pointer out of its frames; once
-//! it returns nothing, the capture draws the pointer into the frames instead.
+//! macOS. Once it returns nothing, the client shows a stock arrow: the host
+//! never draws the pointer into its frames.
 
 use std::ptr;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDisplayBounds, CGEvent, CGImageAlphaInfo,
     CGImageByteOrderInfo, CGMainDisplayID,
 };
-use qdp_runtime::{CursorShape, CursorState};
+use qdp_runtime::{CursorShape, CursorState, PointerPosition};
 
 /// The bytes per RGBA pixel.
 const RGBA_PIXEL: usize = 4;
@@ -51,24 +51,23 @@ pub(super) struct SystemCursor {
 
 impl SystemCursor {
     /// Returns a reader for a main display captured at `width × height`
-    /// pixels, or `None` if macOS no longer reports the system pointer.
-    pub(super) fn new(width: usize, height: usize) -> Option<Self> {
-        autoreleasepool(|_| system_cursor())?;
+    /// pixels.
+    pub(super) fn new(width: usize, height: usize) -> Self {
         let bounds = CGDisplayBounds(CGMainDisplayID());
-        Some(Self {
+        Self {
             bounds,
             scale: (
                 width as f64 / bounds.size.width.max(1.0),
                 height as f64 / bounds.size.height.max(1.0),
             ),
             shape: None,
-        })
+        }
     }
 
     /// Returns the pointer now: its hotspot's position in captured pixels
     /// and its image at the captured pixel density.
     pub(super) fn state(&mut self) -> CursorState {
-        let shape = autoreleasepool(|_| self.read_shape());
+        let shape = autoreleasepool(|_| self.read_shape()).or_else(|| Some(CursorShape::arrow()));
         let shape = match (shape, &self.shape) {
             (Some(new), Some(old)) if new == **old => Some(Arc::clone(old)),
             (new, _) => new.map(Arc::new),
@@ -82,7 +81,10 @@ impl SystemCursor {
                 && (0.0..self.bounds.size.height).contains(&y);
             inside.then(|| ((x * self.scale.0) as i32, (y * self.scale.1) as i32))
         });
-        CursorState { position, shape }
+        CursorState {
+            position: position.map_or(PointerPosition::Hidden, |(x, y)| PointerPosition::At(x, y)),
+            shape,
+        }
     }
 
     /// Reads the pointer's image, drawn at the captured pixel density.
