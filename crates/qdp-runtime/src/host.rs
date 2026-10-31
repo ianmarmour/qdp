@@ -32,7 +32,7 @@ use crate::clipboard::{
 use crate::decoder_lag::DecoderLag;
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
 use crate::host_cursor::{CursorUpdate, HostCursor};
-use crate::host_display::{HostDisplay, StreamChange, VideoLimits};
+use crate::host_display::{HostDisplay, StreamChange, VideoLimits, wanted_display};
 use crate::host_input::{InputAction, InputInjector, Positions, StandardInput};
 use crate::host_output::{DeviceOutputs, OutputReport};
 use crate::host_passthrough::{
@@ -363,7 +363,7 @@ async fn serve_session(
     // pipelined are processed (Section 11.2); the clipboard is read from now
     // on, so that its content is known when the session becomes active.
     let OpenedDesktop {
-        source,
+        mut source,
         mut injector,
         lock,
     } = open().await?;
@@ -416,6 +416,18 @@ async fn serve_session(
             .map(|negotiated| negotiated.client_video),
     };
     let mut stream_ids = StreamIds::default();
+    // A source that can, as a virtual monitor, takes the client's display
+    // before the first configuration, so that its video needs no scaling.
+    let matched = display_request.as_ref().and_then(wanted_display);
+    if let Some(wanted) = &matched {
+        if source.match_display(wanted) {
+            info!(
+                width = wanted.width,
+                height = wanted.height,
+                "the captured monitor matches the client's display"
+            );
+        }
+    }
     let display = HostDisplay::new(
         source.size(),
         desktop_scale,
@@ -484,7 +496,7 @@ async fn serve_session(
 
     let settings = plan.encoder_settings(&options.encoder);
     let (encoder, description) =
-        EncoderThread::spawn(source, settings, options.encoder.preference).await?;
+        EncoderThread::spawn(source, matched, settings, options.encoder.preference).await?;
     info!(encoder = description, "encoding");
     let stats = SendStats::new(Instant::now(), driver.connection().path_stats());
     let mut active = ActiveHost {
@@ -1086,6 +1098,7 @@ impl ActiveHost {
             stream_id: self.display.stream_id(),
             settings: self.display.plan().encoder_settings(&self.tuning),
             quantizer: self.rate.quantizer(),
+            display: self.display.wanted_display(),
         })?;
         self.pending_since = Some(now);
         self.frames_requested += 1;

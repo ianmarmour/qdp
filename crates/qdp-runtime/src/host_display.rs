@@ -6,9 +6,9 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use qdp::message::{
-    Chroma, ClientMonitorFlags, ClientMonitorId, DisplayConfig, DisplayConfigId, DisplayRequest,
-    DisplayRequestId, HostMonitor, HostMonitorFlags, MonitorId, StreamId, VideoCodec,
-    VideoCodecCapability, VideoLayer, VideoStreamConfig, VideoStreamFlags,
+    Chroma, ClientMonitor, ClientMonitorFlags, ClientMonitorId, DisplayConfig, DisplayConfigId,
+    DisplayRequest, DisplayRequestId, HostMonitor, HostMonitorFlags, MonitorId, StreamId,
+    VideoCodec, VideoCodecCapability, VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::wire::{SignedVarInt, VarInt};
 use qdp_codec::{EncoderSettings, TileCount, frame_rate_within, tile_count};
@@ -17,7 +17,7 @@ use tracing::info;
 use crate::RuntimeError;
 use crate::host::{BIT_DEPTH, EncoderTuning};
 use crate::layout::VideoLayout;
-use crate::media::DesktopScale;
+use crate::media::{DesktopScale, WantedDisplay};
 use crate::stream_ids::StreamIds;
 
 /// The Monitor ID of the host's one monitor.
@@ -109,6 +109,12 @@ impl HostDisplay {
             config,
             scale,
         })
+    }
+
+    /// Returns the display the client's latest request asks the host's
+    /// monitor to match, if it sent one.
+    pub(crate) fn wanted_display(&self) -> Option<WantedDisplay> {
+        self.request.as_ref().and_then(wanted_display)
     }
 
     /// Returns the current configuration.
@@ -230,13 +236,7 @@ impl VideoPlan {
         frame_rate: u32,
         client: Option<&VideoCodecCapability>,
     ) -> Result<Self, RuntimeError> {
-        let area = request.and_then(|request| {
-            request
-                .monitors
-                .iter()
-                .find(|monitor| monitor.flags.contains(ClientMonitorFlags::PRIMARY))
-                .or(request.monitors.first())
-        });
+        let area = request.and_then(client_area);
         let side = |value: VarInt| usize::try_from(value.into_inner()).unwrap_or(usize::MAX);
         let bounds: Vec<(usize, usize)> = client
             .map(|client| (side(client.max_width), side(client.max_height)))
@@ -351,6 +351,29 @@ fn display_config(
             matrix_coefficients: BT709_MATRIX,
         }],
     }
+}
+
+/// Returns the client display area a request's monitor is for: its primary
+/// one, or else its first.
+fn client_area(request: &DisplayRequest) -> Option<&ClientMonitor> {
+    request
+        .monitors
+        .iter()
+        .find(|monitor| monitor.flags.contains(ClientMonitorFlags::PRIMARY))
+        .or(request.monitors.first())
+}
+
+/// Returns the display `request` asks the host's monitor to match: its
+/// display area's size, refresh rate and scale.
+pub(crate) fn wanted_display(request: &DisplayRequest) -> Option<WantedDisplay> {
+    let area = client_area(request)?;
+    let narrow = |value: VarInt| u32::try_from(value.into_inner()).unwrap_or(u32::MAX);
+    Some(WantedDisplay {
+        width: narrow(area.width),
+        height: narrow(area.height),
+        refresh_millihertz: narrow(area.refresh_rate),
+        scale_percent: narrow(area.scale),
+    })
 }
 
 /// Returns `value` as a variable-length integer, saturating.

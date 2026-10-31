@@ -28,7 +28,7 @@ use qdp_runtime::{
     PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton,
     PointerPosition, Presentation, PresentationTiming, RefreshMode, ResumptionSlot, RuntimeError,
     SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, TouchPhase, TouchPoint, UserInput,
-    WarpKind, input_channel, input_classes, run, serve,
+    WantedDisplay, WarpKind, input_channel, input_classes, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -881,6 +881,118 @@ async fn display_changes_during_the_session() {
         .map(|(number, _)| *number)
         .collect();
     assert_eq!(numbers, (1..=numbers.len() as u64).collect::<Vec<_>>());
+}
+
+/// A test pattern that takes the size of the client's display whenever the
+/// host asks, as a virtual monitor does.
+struct MatchingPattern {
+    /// The frames, at the size last asked for.
+    pattern: TestPattern,
+    /// The displays the host asked for.
+    asked: Arc<Mutex<Vec<WantedDisplay>>>,
+}
+
+impl FrameSource for MatchingPattern {
+    fn size(&self) -> (usize, usize) {
+        self.pattern.size()
+    }
+
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+        self.pattern.capture()
+    }
+
+    fn match_display(&mut self, display: &WantedDisplay) -> bool {
+        self.asked.lock().unwrap().push(*display);
+        self.pattern = TestPattern::new(display.width as usize, display.height as usize);
+        true
+    }
+}
+
+/// A source that can take the client's display is asked for it before the
+/// first frame and again when the display changes, and the video is its
+/// frames at their own size: no scaling, so not the pattern's shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_monitor_follows_the_display() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let source = MatchingPattern {
+        pattern: TestPattern::new(WIDTH, HEIGHT),
+        asked: Arc::clone(&asked),
+    };
+    let (address, pin, host) = start_host(
+        authenticator,
+        Box::new(source),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    // Neither display has the pattern's shape, which scaling would keep.
+    let first = DisplaySize {
+        width: 192,
+        height: 128,
+        refresh_millihertz: 60_000,
+        scale_percent: 150,
+    };
+    let second = DisplaySize {
+        width: 160,
+        height: 96,
+        ..first
+    };
+    let options = ClientOptions {
+        display: first,
+        ..client_options(ClientCredentials::Token(TOKEN.to_vec()))
+    };
+    let (handle, mut queue) = input_channel();
+    let mut collector = Collector {
+        input: Some(handle),
+        resize: Some((INPUT_FRAME, second)),
+        ..Collector::default()
+    };
+    let summary = tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut collector,
+            Some(&mut queue),
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("streaming finishes in time")
+    .unwrap();
+    assert_eq!(summary.decode_failures, 0);
+    endpoint.wait_idle().await;
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+
+    let wanted = |display: DisplaySize| WantedDisplay {
+        width: display.width,
+        height: display.height,
+        refresh_millihertz: display.refresh_millihertz,
+        scale_percent: display.scale_percent,
+    };
+    assert_eq!(*asked.lock().unwrap(), [wanted(first), wanted(second)]);
+    let sizes: Vec<(usize, usize)> = collector.sizes.iter().map(|(_, size)| *size).collect();
+    assert!(
+        sizes[..INPUT_FRAME].iter().all(|&size| size == (192, 128)),
+        "{sizes:?}"
+    );
+    assert_eq!(sizes.last(), Some(&(160, 96)), "{sizes:?}");
 }
 
 /// A test pattern whose monitor shrinks to half its size after a few

@@ -160,6 +160,20 @@ impl Default for DesktopScale {
     }
 }
 
+/// The display a client asks the host's monitor to match (Section 6.2): its
+/// size, refresh rate and interface scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WantedDisplay {
+    /// The width in pixels.
+    pub width: u32,
+    /// The height in pixels.
+    pub height: u32,
+    /// The refresh rate in millihertz, or 0 if the client did not say.
+    pub refresh_millihertz: u32,
+    /// The interface scale in percent, or 0 if the client did not say.
+    pub scale_percent: u32,
+}
+
 /// Produces the frames a host streams, such as a screen capture.
 pub trait FrameSource: Send {
     /// Returns the width and height of the frames, in pixels.
@@ -183,6 +197,15 @@ pub trait FrameSource: Send {
     /// it.
     fn desktop_scale(&self) -> Option<DesktopScale> {
         None
+    }
+
+    /// Asks the source to make the monitor it captures `display`, as a
+    /// virtual monitor can, so that the host streams it without scaling
+    /// (Section 6.3). Returns whether it did, once it did: its frames are of
+    /// the new size from then on. A source that cannot leaves its monitor as
+    /// it is, and the host scales its frames to the client's display.
+    fn match_display(&mut self, _display: &WantedDisplay) -> bool {
+        false
     }
 }
 
