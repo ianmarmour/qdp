@@ -64,26 +64,24 @@ fn encoder() -> Av1Encoder {
     .unwrap()
 }
 
-/// The most frames rav1e 0.8 holds back in its lookahead before returning one,
-/// even in low-latency mode with the shortest lookahead it allows.
-const RAV1E_FRAME_DELAY: u64 = 4;
-
-/// rav1e returns each frame at most [`RAV1E_FRAME_DELAY`] frames after receiving
-/// it. This bounds the software encoder's latency; a change in rav1e that
-/// reduces it should lower the constant.
+/// Every call to the encoder returns the frame it was given, with no lookahead
+/// delay, so the software encoder adds no frames of latency.
 #[test]
-fn encoder_delay_is_bounded() {
+fn encoder_returns_each_frame_immediately() {
     let mut encoder = encoder();
-    let mut worst = 0;
     for index in 0..8u64 {
+        let request = if index == 0 {
+            KeyFrameRequest::Force
+        } else {
+            KeyFrameRequest::Auto
+        };
         let frames = encoder
-            .encode(&test_frame(index as usize), KeyFrameRequest::Auto)
+            .encode(&test_frame(index as usize), request)
             .unwrap();
-        for frame in frames {
-            worst = worst.max(index - frame.input_index);
-        }
+        let indices: Vec<u64> = frames.iter().map(|frame| frame.input_index).collect();
+        assert_eq!(indices, [index], "frame {index}");
     }
-    assert!(worst <= RAV1E_FRAME_DELAY, "{worst} frames of delay");
+    assert!(encoder.flush().unwrap().is_empty());
 }
 
 /// Encodes `count` test frames, forcing a key frame at the indices in `keys`, and

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/qdp", "crates/qdp-codec", "crates/qdp-quic"]
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -30,3 +31,8 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 missing_docs_in_private_items = "warn"
+
+# rav1e is vendored with a patch that removes its lookahead delay in
+# low-latency mode; see third_party/README.md.
+[patch.crates-io]
+rav1e = { path = "third_party/rav1e" }

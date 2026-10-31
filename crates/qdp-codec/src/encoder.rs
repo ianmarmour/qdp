@@ -7,7 +7,7 @@ use rav1e::color::{
 };
 use rav1e::config::{Config, EncoderConfig, SpeedSettings};
 use rav1e::data::{EncoderStatus, FrameType, Rational};
-use rav1e::prelude::{FrameParameters, FrameTypeOverride};
+use rav1e::prelude::{FrameParameters, FrameTypeOverride, SceneDetectionSpeed};
 
 use crate::{CodecError, Yuv420Frame, to_qdp_temporal_unit};
 
@@ -114,7 +114,8 @@ impl Av1Encoder {
     /// matrix in limited range, as QDP requires for standard dynamic range.
     pub fn new(settings: EncoderSettings) -> Result<Self, CodecError> {
         let mut speed_settings = SpeedSettings::from_preset(settings.speed.min(FASTEST_SPEED));
-        speed_settings.rdo_lookahead_frames = 1;
+        speed_settings.rdo_lookahead_frames = 0;
+        speed_settings.scene_detection_mode = SceneDetectionSpeed::None;
         let encoder = EncoderConfig {
             width: settings.width,
             height: settings.height,
