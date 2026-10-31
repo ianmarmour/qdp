@@ -18,7 +18,7 @@ use qdp::message::{
 };
 use qdp::wire::{SignedVarInt, VarInt};
 use qdp_codec::{CodecPreference, Yuv420Frame};
-use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
+use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdentity};
 use qdp_runtime::{
     ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
@@ -383,7 +383,7 @@ fn start_host_with(
     KeyPin,
     tokio::task::JoinHandle<Result<qdp_runtime::HostSummary, RuntimeError>>,
 ) {
-    let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let pin = identity.key_pin().unwrap();
     let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = endpoint.local_address().unwrap();
@@ -446,19 +446,24 @@ async fn stream(
     credentials: ClientCredentials,
     input: Option<(InputHandle, InputQueue)>,
 ) -> Result<Collector, RuntimeError> {
-    stream_with(address, pin, client_options(credentials), input).await
+    stream_with(address, pin, client_options(credentials), input, None).await
 }
 
-/// Connects a client with `options`, and streams until the collector stops,
-/// sending the test input if `input` is given.
+/// Connects a client with `options`, presenting `identity` if given, and
+/// streams until the collector stops, sending the test input if `input` is
+/// given.
 async fn stream_with(
     address: SocketAddr,
     pin: KeyPin,
     options: ClientOptions,
     input: Option<(InputHandle, InputQueue)>,
+    identity: Option<TlsIdentity>,
 ) -> Result<Collector, RuntimeError> {
     let display = options.display;
-    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let mut endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    if let Some(identity) = identity {
+        endpoint.set_identity(identity);
+    }
     let connection = endpoint
         .connect(
             address,
@@ -674,7 +679,7 @@ async fn video_scales_to_the_display() {
     };
     let collector = tokio::time::timeout(
         TEST_TIMEOUT,
-        stream_with(address, pin, options, Some(input_channel())),
+        stream_with(address, pin, options, Some(input_channel()), None),
     )
     .await
     .expect("streaming finishes in time")
@@ -2229,7 +2234,7 @@ async fn deferred_presentations_are_reported() {
 /// disconnected does not (Section 11.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_session_replaces_older() {
-    let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let pin = identity.key_pin().unwrap();
     let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = endpoint.local_address().unwrap();
@@ -2329,7 +2334,7 @@ async fn newer_session_replaces_older() {
 /// (Section 4.4.7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnects_with_a_resumption_token() {
-    let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let pin = identity.key_pin().unwrap();
     let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = endpoint.local_address().unwrap();
@@ -2366,7 +2371,7 @@ async fn reconnects_with_a_resumption_token() {
         resumption: resumption.clone(),
         ..client_options(password)
     };
-    tokio::time::timeout(TEST_TIMEOUT, stream_with(address, pin, first, None))
+    tokio::time::timeout(TEST_TIMEOUT, stream_with(address, pin, first, None, None))
         .await
         .expect("the first session finishes in time")
         .unwrap();
@@ -2378,10 +2383,11 @@ async fn reconnects_with_a_resumption_token() {
         resumption: resumption.clone(),
         ..client_options(token.clone())
     };
-    let collector = tokio::time::timeout(TEST_TIMEOUT, stream_with(address, pin, resumed, None))
-        .await
-        .expect("the resumed session finishes in time")
-        .unwrap();
+    let collector =
+        tokio::time::timeout(TEST_TIMEOUT, stream_with(address, pin, resumed, None, None))
+            .await
+            .expect("the resumed session finishes in time")
+            .unwrap();
     check_frames(&collector);
     assert!(
         resumption.is_valid(Instant::now()),
@@ -2392,4 +2398,40 @@ async fn reconnects_with_a_resumption_token() {
         .await
         .expect("the attempt finishes in time");
     assert!(matches!(reused, Err(RuntimeError::AuthenticationFailed(_))));
+}
+
+/// A client presenting a certificate whose key the host accepts streams
+/// with `CLIENT_CERTIFICATE`; one presenting another key is refused
+/// (Section 4.4.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_certificate_authenticates() {
+    let accepted = TlsIdentity::generate_self_signed(vec!["client".to_owned()]).unwrap();
+    let other = TlsIdentity::generate_self_signed(vec!["client".to_owned()]).unwrap();
+    for (identity, admitted) in [(accepted.clone_key(), true), (other, false)] {
+        let mut authenticator = HostAuthenticator::new().unwrap();
+        authenticator.add_client_key(accepted.key_pin().unwrap());
+        let (address, pin, _host) = start_host(
+            authenticator,
+            test_pattern(),
+            Box::new(NoInput),
+            None,
+            HostAudio::default(),
+        );
+        let options = client_options(ClientCredentials::Certificate);
+        let result = tokio::time::timeout(
+            TEST_TIMEOUT,
+            stream_with(address, pin, options, None, Some(identity)),
+        )
+        .await
+        .expect("the session finishes in time");
+        if admitted {
+            check_frames(&result.unwrap());
+        } else {
+            assert!(
+                matches!(result, Err(RuntimeError::AuthenticationFailed(_))),
+                "{:?}",
+                result.err()
+            );
+        }
+    }
 }

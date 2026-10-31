@@ -9,8 +9,9 @@
 //!   open the control stream.
 //! - [`HostVerification`] selects how the client trusts the host: a pinned key,
 //!   checked by [`PinnedKeyVerifier`], or public key infrastructure.
-//! - [`HostIdentity`] holds a host's certificate and key, and can generate a
-//!   self-signed one whose [`KeyPin`] clients pin.
+//! - [`TlsIdentity`] holds a host's certificate and key, and can generate a
+//!   self-signed one whose [`KeyPin`] clients pin; a client presents one to
+//!   hosts that authorize it by its key.
 //! - [`SessionDriver`] runs a client or host session state machine over a
 //!   [`QdpConnection`], and delivers the peer's unidirectional streams as
 //!   [`ReceivedStream`]s.
@@ -30,7 +31,7 @@ pub use config::{HostVerification, client_config, host_config};
 pub use connection::{PathStats, QdpConnection};
 pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDriver};
 pub use endpoint::{ClientEndpoint, HostEndpoint, IncomingConnection};
-pub use identity::{HostIdentity, KeyPin};
+pub use identity::{KeyPin, TlsIdentity};
 pub use streams::{
     OutgoingStream, ReceivedStream, StreamChunk, StreamFailure, StreamLimit, StreamPolicy,
 };

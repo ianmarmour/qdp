@@ -10,6 +10,8 @@ use qdp_desktop::Microphone;
 use qdp_quic::KeyPin;
 use qdp_runtime::{ClipboardDirections, PassthroughPolicy};
 
+use crate::identity::Role;
+
 /// The usage text printed by `qdp help` and on errors.
 pub const USAGE: &str = "\
 Usage:
@@ -17,12 +19,16 @@ Usage:
   qdp connect HOST [options]   Connect to a host, by address or name,
                                with an optional :PORT (default 4433)
   qdp pin [--identity DIR]     Print this host's key pin for clients
+  qdp pin --client [--identity DIR]
+                               Print this client's key pin for hosts
   qdp help                     Show this help
 
 Serve options:
   --listen ADDRESS     Address to listen on (default 0.0.0.0:4433)
   --identity DIR       Directory holding the host's key (default ./qdp-identity)
   --token TOKEN        Accept clients presenting TOKEN (repeatable)
+  --client-key HEX     Accept clients presenting the key HEX, from their
+                       `qdp pin --client` (repeatable)
   --user NAME          Accept NAME with the password in QDP_PASSWORD
   --source KIND        auto, screen or test-pattern (default auto: the screen,
                        or the test pattern if it cannot be captured)
@@ -53,6 +59,9 @@ Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
   --token TOKEN        Authenticate with TOKEN
   --user NAME          Authenticate as NAME with the password in QDP_PASSWORD
+  --identity DIR       Directory holding this client's key, with which it
+                       authenticates when given neither --token nor --user
+                       (default ./qdp-client-identity)
   --server-name NAME   Name sent in the TLS handshake (default qdp-host)
   --frames N           Disconnect after N frames
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
@@ -94,6 +103,9 @@ const DEFAULT_QUANTIZER: u8 = 100;
 /// The default directory of the host's identity.
 const DEFAULT_IDENTITY_DIR: &str = "qdp-identity";
 
+/// The default directory of the client's identity.
+const DEFAULT_CLIENT_IDENTITY_DIR: &str = "qdp-client-identity";
+
 /// The longest `--resume` a host accepts: a day.
 const MAX_RESUME_SECONDS: u64 = 86_400;
 
@@ -110,10 +122,12 @@ pub enum Command {
     Serve(ServeArgs),
     /// Connect to a host.
     Connect(ConnectArgs),
-    /// Print the host's key pin.
+    /// Print the key pin of the host's or the client's identity.
     Pin {
-        /// The directory of the host's identity.
+        /// The directory of the identity.
         identity: PathBuf,
+        /// Whose identity it is.
+        role: Role,
     },
     /// Show the usage text.
     Help,
@@ -139,6 +153,8 @@ pub struct ServeArgs {
     pub identity: PathBuf,
     /// The accepted tokens.
     pub tokens: Vec<String>,
+    /// The keys of the accepted client certificates.
+    pub client_keys: Vec<KeyPin>,
     /// The accepted user, whose password is in `QDP_PASSWORD`.
     pub user: Option<String>,
     /// What to stream.
@@ -217,6 +233,9 @@ pub struct ConnectArgs {
     pub token: Option<String>,
     /// The user to authenticate as, with the password in `QDP_PASSWORD`.
     pub user: Option<String>,
+    /// The directory of the client's identity, with which it authenticates
+    /// when given neither a token nor a user.
+    pub identity: PathBuf,
     /// The name sent in the TLS handshake.
     pub server_name: String,
     /// The number of frames after which to disconnect.
@@ -332,14 +351,23 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
         Some("serve") => parse_serve(arguments).map(Command::Serve),
         Some("connect") => parse_connect(arguments).map(Command::Connect),
         Some("pin") => {
-            let mut identity = PathBuf::from(DEFAULT_IDENTITY_DIR);
+            let mut identity = None;
+            let mut role = Role::Host;
             while let Some(argument) = arguments.next() {
                 match argument.as_str() {
-                    "--identity" => identity = value("--identity", &mut arguments)?.into(),
+                    "--identity" => identity = Some(value("--identity", &mut arguments)?.into()),
+                    "--client" => role = Role::Client,
                     other => return Err(error(format!("unknown option: {other}"))),
                 }
             }
-            Ok(Command::Pin { identity })
+            let default = match role {
+                Role::Host => DEFAULT_IDENTITY_DIR,
+                Role::Client => DEFAULT_CLIENT_IDENTITY_DIR,
+            };
+            Ok(Command::Pin {
+                identity: identity.unwrap_or_else(|| PathBuf::from(default)),
+                role,
+            })
         }
         Some("help" | "--help" | "-h") | None => Ok(Command::Help),
         Some(other) => Err(error(format!("unknown command: {other}"))),
@@ -352,6 +380,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
         identity: PathBuf::from(DEFAULT_IDENTITY_DIR),
         tokens: Vec::new(),
+        client_keys: Vec::new(),
         user: None,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         fps: DEFAULT_FPS,
@@ -370,6 +399,9 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             "--listen" => serve.listen = parse("--listen", &mut arguments)?,
             "--identity" => serve.identity = value("--identity", &mut arguments)?.into(),
             "--token" => serve.tokens.push(value("--token", &mut arguments)?),
+            "--client-key" => serve
+                .client_keys
+                .push(parse_pin(&value("--client-key", &mut arguments)?)?),
             "--user" => serve.user = Some(value("--user", &mut arguments)?),
             "--size" => serve.size = parse_size(&value("--size", &mut arguments)?)?,
             "--fps" => serve.fps = parse("--fps", &mut arguments)?,
@@ -416,9 +448,9 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
-    if serve.tokens.is_empty() && serve.user.is_none() {
+    if serve.tokens.is_empty() && serve.user.is_none() && serve.client_keys.is_empty() {
         return Err(error(
-            "serve needs --token or --user, or no client can connect",
+            "serve needs --token, --user or --client-key, or no client can connect",
         ));
     }
     if serve.fps == 0 {
@@ -485,6 +517,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         pin: KeyPin([0; PIN_HEX_LENGTH / 2]),
         token: None,
         user: None,
+        identity: PathBuf::from(DEFAULT_CLIENT_IDENTITY_DIR),
         server_name: DEFAULT_SERVER_NAME.to_owned(),
         frames: None,
         output: None,
@@ -501,6 +534,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--pin" => pin = Some(parse_pin(&value("--pin", &mut arguments)?)?),
             "--token" => connect.token = Some(value("--token", &mut arguments)?),
             "--user" => connect.user = Some(value("--user", &mut arguments)?),
+            "--identity" => connect.identity = value("--identity", &mut arguments)?.into(),
             "--server-name" => connect.server_name = value("--server-name", &mut arguments)?,
             "--frames" => connect.frames = Some(parse("--frames", &mut arguments)?),
             "--output" => connect.output = Some(value("--output", &mut arguments)?.into()),
@@ -523,8 +557,8 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         }
     }
     connect.pin = pin.ok_or_else(|| error("connect needs --pin with the host's key pin"))?;
-    if connect.token.is_some() == connect.user.is_some() {
-        return Err(error("connect needs exactly one of --token and --user"));
+    if connect.token.is_some() && connect.user.is_some() {
+        return Err(error("connect takes --token or --user, not both"));
     }
     Ok(connect)
 }
@@ -604,6 +638,27 @@ mod tests {
         assert_eq!(serve.lock, LockPolicy::Leave);
         assert!(parse_line("serve --token abc --lock maybe").is_err());
         assert!(parse_line("serve").is_err());
+        let pin = "ab".repeat(PIN_HEX_LENGTH / 2);
+        let Command::Serve(serve) = parse_line(&format!("serve --client-key {pin}")).unwrap()
+        else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.client_keys, [KeyPin([0xab; PIN_HEX_LENGTH / 2])]);
+        assert!(parse_line("serve --client-key nothex").is_err());
+        assert_eq!(
+            parse_line("pin --client").unwrap(),
+            Command::Pin {
+                identity: PathBuf::from(DEFAULT_CLIENT_IDENTITY_DIR),
+                role: Role::Client,
+            }
+        );
+        assert_eq!(
+            parse_line("pin --identity keys").unwrap(),
+            Command::Pin {
+                identity: PathBuf::from("keys"),
+                role: Role::Host,
+            }
+        );
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }
 
@@ -677,7 +732,16 @@ mod tests {
             (connect.audio, connect.microphone),
             (Audio::Off, Microphone::On)
         );
-        assert!(parse_line(&format!("connect 192.0.2.7:4433 --pin {pin}")).is_err());
+        // Without a token or a user, the client authenticates with its key.
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7:4433 --pin {pin} --identity keys"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!((connect.token, connect.user), (None, None));
+        assert_eq!(connect.identity, PathBuf::from("keys"));
+        assert!(parse_line(&format!("connect 192.0.2.7 --pin {pin} --token t --user u")).is_err());
         assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
         assert!(parse_line("connect nowhere --pin x --token t").is_err());
     }

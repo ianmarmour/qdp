@@ -67,6 +67,12 @@ To use a password instead of a token, pass `--user NAME` on both sides with the
 password in the `QDP_PASSWORD` environment variable; it is checked with
 SCRAM-SHA-256-PLUS, so it never crosses the network.
 
+A client can also authenticate with a key of its own, with no secret to type:
+`qdp pin --client` prints the client's key pin (creating the key in
+`./qdp-client-identity`, or `--identity DIR`), the host accepts it with
+`qdp serve --client-key PIN`, and `qdp connect` given neither `--token` nor
+`--user` presents the key.
+
 If the connection drops, for example when the network changes, the client
 reconnects on its own without the token or password, with a single-use token
 the host gave it, which stays valid for five minutes after the connection ends;

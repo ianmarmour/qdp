@@ -19,8 +19,8 @@ use qdp::session::{AuthResponse, ClientEvent, HostConfig, HostEvent, Phase};
 use qdp::time::{ClockSync, SessionClock, answer_ping};
 use qdp::wire::{SignedVarInt, VarInt};
 use qdp_quic::{
-    ClientDriver, ClientEndpoint, DriverInput, HostDriver, HostEndpoint, HostIdentity,
-    HostVerification, KeyPin, StreamFailure, StreamLimit, StreamPolicy, TransportError,
+    ClientDriver, ClientEndpoint, DriverInput, HostDriver, HostEndpoint, HostVerification, KeyPin,
+    StreamFailure, StreamLimit, StreamPolicy, TlsIdentity, TransportError,
 };
 
 /// The longest a test may run before it is considered hung.
@@ -378,7 +378,7 @@ fn keyboard() -> ControlMessage {
 /// clock synchronization datagrams with the host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_over_quic() {
-    let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let pin = identity.key_pin().unwrap();
     let host = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = host.local_address().unwrap();
@@ -404,7 +404,7 @@ async fn session_over_quic() {
 /// A client refuses a host whose key does not match its pin.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_pin_is_refused() {
-    let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let host = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = host.local_address().unwrap();
     let host_task = tokio::spawn(async move {
@@ -412,7 +412,7 @@ async fn wrong_pin_is_refused() {
         Some(incoming.establish().await.is_ok())
     });
 
-    let other_pin = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()])
+    let other_pin = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()])
         .unwrap()
         .key_pin()
         .unwrap();
@@ -433,4 +433,51 @@ async fn wrong_pin_is_refused() {
         .expect("the host finishes in time")
         .unwrap();
     assert_eq!(accepted, Some(false));
+}
+
+/// The host learns the key of a client that presents a certificate, and of
+/// none for a client that does not (Section 4.4.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_sees_the_client_key() {
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let pin = identity.key_pin().unwrap();
+    let host = HostEndpoint::bind(loopback(), identity).unwrap();
+    let address = host.local_address().unwrap();
+    let host_task = tokio::spawn(async move {
+        let mut pins = Vec::new();
+        for _ in 0..2 {
+            let connection = host.accept().await.unwrap().establish().await.unwrap();
+            pins.push(connection.peer_key_pin());
+        }
+        pins
+    });
+
+    let client_identity = TlsIdentity::generate_self_signed(vec!["client".to_owned()]).unwrap();
+    let client_pin = client_identity.key_pin().unwrap();
+    let mut endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let verification = HostVerification::PinnedKeys(vec![pin]);
+    let mut clients = Vec::new();
+    for presents in [false, true] {
+        if presents {
+            endpoint.set_identity(client_identity.clone_key());
+        }
+        let connection = endpoint
+            .connect(address, SERVER_NAME, verification.clone())
+            .await
+            .unwrap();
+        assert_eq!(connection.peer_key_pin(), Some(pin));
+        // The host sees the control stream once CLIENT_HELLO is sent on it.
+        let mut driver = ClientDriver::client(connection, client_hello()).unwrap();
+        clients.push(tokio::spawn(async move {
+            let _ = driver.next_event().await;
+        }));
+    }
+    let pins = tokio::time::timeout(TEST_TIMEOUT, host_task)
+        .await
+        .expect("the host finishes in time")
+        .unwrap();
+    assert_eq!(pins, [None, Some(client_pin)]);
+    for client in clients {
+        client.abort();
+    }
 }

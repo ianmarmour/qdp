@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use qdp::message::ResumptionToken;
+use qdp_quic::KeyPin;
 use ring::digest::{SHA256, SHA256_OUTPUT_LEN, digest};
 
 use crate::RuntimeError;
@@ -32,6 +33,8 @@ pub(crate) enum ClientIdentity {
     Token(usize),
     /// One of the host's users, by prepared name.
     User(String),
+    /// A client presenting a certificate with one of the host's client keys.
+    Certificate(KeyPin),
 }
 
 /// A token the host issued.

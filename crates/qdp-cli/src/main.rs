@@ -40,6 +40,7 @@ use crate::args::{
     Audio, Command, ConnectArgs, LockPolicy, Presentation, ServeArgs, SourceKind, USAGE,
     format_pin, parse_args,
 };
+use crate::identity::Role;
 use crate::sink::CliSink;
 
 /// The environment variable that holds the password for `--user`.
@@ -111,7 +112,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             Ok(())
         }
-        Command::Pin { identity } => print_pin(&identity),
+        Command::Pin { identity, role } => print_pin(&identity, role),
         Command::Serve(args) => run_async(serve(args)),
         Command::Connect(args) => connect(args),
     };
@@ -153,9 +154,9 @@ fn run_async<T>(future: impl Future<Output = Result<T, String>>) -> Result<T, St
 }
 
 /// Prints the host's key pin, creating the identity if needed.
-fn print_pin(directory: &std::path::Path) -> CliResult {
-    let identity = identity::load_or_create(directory)
-        .map_err(|error| format!("cannot load the host identity: {error}"))?;
+fn print_pin(directory: &std::path::Path, role: Role) -> CliResult {
+    let identity = identity::load_or_create(directory, role)
+        .map_err(|error| format!("cannot load the identity: {error}"))?;
     let pin = identity.key_pin().map_err(|error| error.to_string())?;
     println!("{}", format_pin(pin));
     Ok(())
@@ -171,7 +172,7 @@ fn password() -> Result<String, String> {
 /// Runs `qdp serve`: accepts clients until interrupted, serving each one in its
 /// own task.
 async fn serve(args: ServeArgs) -> CliResult {
-    let identity = identity::load_or_create(&args.identity)
+    let identity = identity::load_or_create(&args.identity, Role::Host)
         .map_err(|error| format!("cannot load the host identity: {error}"))?;
     let pin = identity.key_pin().map_err(|error| error.to_string())?;
 
@@ -183,6 +184,9 @@ async fn serve(args: ServeArgs) -> CliResult {
         authenticator
             .add_password(user, &password()?)
             .map_err(|error| error.to_string())?;
+    }
+    for &pin in &args.client_keys {
+        authenticator.add_client_key(pin);
     }
     authenticator.set_resumption_lifetime(args.resumption);
     let options = Arc::new(HostOptions {
@@ -543,14 +547,27 @@ async fn receive(
             username: user.clone(),
             password: password()?,
         },
-        (None, None) => return Err("connect needs --token or --user".to_owned()),
+        (None, None) => ClientCredentials::Certificate,
     };
     let local = if args.address.is_ipv4() {
         SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
         SocketAddr::from(([0u16; 8], 0))
     };
-    let endpoint = ClientEndpoint::bind(local).map_err(|error| error.to_string())?;
+    let mut endpoint = ClientEndpoint::bind(local).map_err(|error| error.to_string())?;
+    // The client presents its certificate only when it authenticates with
+    // it, so that other hosts do not learn its key.
+    if credentials == ClientCredentials::Certificate {
+        let identity = identity::load_or_create(&args.identity, Role::Client)
+            .map_err(|error| format!("cannot load the client identity: {error}"))?;
+        let pin = identity.key_pin().map_err(|error| error.to_string())?;
+        info!(
+            pin = format_pin(pin),
+            "authenticating with this client's key; hosts accept it with --client-key {}",
+            format_pin(pin)
+        );
+        endpoint.set_identity(identity);
+    }
     let resumption = ResumptionSlot::default();
     let sessions = async {
         let mut credentials = credentials;

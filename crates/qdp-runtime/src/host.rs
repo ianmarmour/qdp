@@ -284,12 +284,13 @@ async fn serve_session(
     options: &HostOptions,
     desktop: HostDesktop,
 ) -> Result<HostSummary, RuntimeError> {
-    if options.authenticator.methods().is_empty() {
+    if !options.authenticator.accepts_anyone() {
         return Err(RuntimeError::Config(
             "the host accepts no authentication method",
         ));
     }
     let binding = connection.channel_binding()?;
+    let client_key = connection.peer_key_pin();
     let HostDesktop {
         input_classes: classes,
         clipboard,
@@ -301,7 +302,7 @@ async fn serve_session(
         host_hello: HostHello {
             minor_version: MinorVersion::CURRENT,
             host_name: options.host_name.clone(),
-            auth_methods: options.authenticator.methods(),
+            auth_methods: options.authenticator.methods(client_key),
             capabilities: capabilities(classes, directions, &audio),
         },
         failure_reason: FAILURE_REASON.to_owned(),
@@ -323,7 +324,7 @@ async fn serve_session(
             }
         }
     });
-    let mut auth = HostAuthExchange::new(&options.authenticator, binding);
+    let mut auth = HostAuthExchange::new(&options.authenticator, binding, client_key);
     loop {
         let Some(event) = next_setup_event(&mut driver).await? else {
             return Ok(HostSummary::default());

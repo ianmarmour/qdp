@@ -6,12 +6,13 @@ use bytes::Bytes;
 use qdp::auth::scram::{CHANNEL_BINDING_LENGTH, ChannelBinding, EXPORTER_LABEL};
 use qdp::registry::ErrorCode;
 use quinn::{Connection, RecvStream, SendStream};
+use rustls::pki_types::CertificateDer;
 
 use tracing::debug;
 
-use crate::TransportError;
 use crate::config::DATAGRAM_SEND_BUFFER;
 use crate::streams::{OutgoingStream, write_stream};
+use crate::{KeyPin, TransportError};
 
 /// The largest chunk read from the control stream at once.
 const CONTROL_READ_CHUNK: usize = 64 << 10;
@@ -120,6 +121,15 @@ impl QdpConnection {
     /// latency, so senders should skip frames rather than let this grow.
     pub fn queued_datagram_bytes(&self) -> usize {
         DATAGRAM_SEND_BUFFER.saturating_sub(self.connection.datagram_send_buffer_space())
+    }
+
+    /// Returns the pin of the certificate the peer presented in the TLS
+    /// handshake, if it presented one: on a host, the client's, for the
+    /// `CLIENT_CERTIFICATE` method (Section 4.4.2).
+    pub fn peer_key_pin(&self) -> Option<KeyPin> {
+        let identity = self.connection.peer_identity()?;
+        let chain = identity.downcast_ref::<Vec<CertificateDer<'static>>>()?;
+        KeyPin::of_certificate(chain.first()?).ok()
     }
 
     /// Returns the `tls-exporter` channel binding of the connection, for
