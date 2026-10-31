@@ -31,7 +31,6 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
 use crate::args::TouchpadMode;
@@ -656,6 +655,15 @@ impl WindowApp {
         self.input.send(UserInput::Pen(PenInput { x, y, ..pen }));
     }
 
+    /// Tells the session the window's display changed: its size, its scale
+    /// or the monitor it is on. The session requests a matching stream.
+    fn display_changed(&self) {
+        if let Some(display) = &self.display {
+            self.input
+                .send(UserInput::Display(display_size(&display.window)));
+        }
+    }
+
     /// Asks the window system to redraw the window.
     fn request_redraw(&self) {
         if let Some(display) = &self.display {
@@ -787,7 +795,11 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(_) => {
                 self.cursor_stale = true;
+                self.display_changed();
                 self.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Moved(_) => {
+                self.display_changed();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } if self.is_release_action(&event) => {
@@ -858,21 +870,13 @@ fn attach_pen(
     .ok()
 }
 
-/// Returns the display the session is shown on: the monitor the window is
-/// on, whose size the window can grow to, or the window itself if no
-/// monitor is known.
+/// Returns the display the session is shown on: the window's content area,
+/// at the refresh rate of the monitor it is on (Section 6.2).
 fn display_size(window: &Window) -> DisplaySize {
     let monitor = window
         .current_monitor()
-        .or_else(|| window.primary_monitor())
-        .or_else(|| {
-            window.available_monitors().max_by_key(|monitor| {
-                u64::from(monitor.size().width) * u64::from(monitor.size().height)
-            })
-        });
-    let size = monitor
-        .as_ref()
-        .map_or_else(|| window.inner_size(), MonitorHandle::size);
+        .or_else(|| window.primary_monitor());
+    let size = window.inner_size();
     DisplaySize {
         width: size.width,
         height: size.height,

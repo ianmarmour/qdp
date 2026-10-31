@@ -49,6 +49,8 @@ pub(crate) struct EncodedOutput {
     pub(crate) blocks: BlockSet,
     /// When the source frame was captured.
     pub(crate) captured_at: Instant,
+    /// The size of the captured frame, before it was scaled.
+    pub(crate) capture_size: (usize, usize),
     /// The pointer when the frame was captured, if the source reports it
     /// apart from the frames.
     pub(crate) cursor: Option<CursorState>,
@@ -176,7 +178,7 @@ fn run(
         let grid = BlockGrid::for_monitor(job.settings.width as u32, job.settings.height as u32);
         let captured_at = Instant::now();
         let outputs = encode_one(&mut *source, &mut opened, preference, job).map(
-            |(frame, cursor, encoded)| {
+            |(frame, capture_size, cursor, encoded)| {
                 let input_index = next_input_index;
                 next_input_index += 1;
                 let changed = previous
@@ -202,6 +204,7 @@ fn run(
                             frame,
                             blocks,
                             captured_at,
+                            capture_size,
                             cursor: cursor.clone(),
                         }
                     })
@@ -221,9 +224,15 @@ fn run(
     }
 }
 
-/// The output of [`encode_one`]: the frame as encoded, the pointer if the
-/// source reports it, and the encoded frames.
-type Encoded = (Yuv420Frame, Option<CursorState>, Vec<EncodedFrame>);
+/// The output of [`encode_one`]: the frame as encoded, the size it was
+/// captured at, the pointer if the source reports it, and the encoded
+/// frames.
+type Encoded = (
+    Yuv420Frame,
+    (usize, usize),
+    Option<CursorState>,
+    Vec<EncodedFrame>,
+);
 
 /// Captures one frame, with the pointer if the source reports it, scales it
 /// to the job's size and encodes it, first reopening the encoder if the job
@@ -247,12 +256,12 @@ fn encode_one(
             settings: job.settings,
         };
     }
-    let frame = source
-        .capture()?
-        .scaled(job.settings.width, job.settings.height);
+    let captured = source.capture()?;
+    let capture_size = (captured.width(), captured.height());
+    let frame = captured.scaled(job.settings.width, job.settings.height);
     let cursor = source.cursor();
     let encoded = opened.encoder.encode(&frame, job.request)?;
-    Ok((frame, cursor, encoded))
+    Ok((frame, capture_size, cursor, encoded))
 }
 
 #[cfg(test)]
@@ -324,6 +333,7 @@ mod tests {
         );
         let scaled = &outputs[2];
         assert!(scaled.frame.is_key_frame);
+        assert_eq!(scaled.capture_size, (width, height));
         let header = SequenceHeader::find(&scaled.frame.temporal_unit)
             .unwrap()
             .unwrap();

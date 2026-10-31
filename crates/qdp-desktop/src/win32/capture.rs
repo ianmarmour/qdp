@@ -265,6 +265,10 @@ impl DesktopDuplication {
         // SAFETY: the duplication is valid.
         self.rotation = rotation(unsafe { duplication.GetDesc() }.Rotation);
         self.duplication = Some(duplication.clone());
+        // The new duplication's first frame holds the whole desktop, perhaps
+        // at a new size: forgetting the old image makes sure it is taken.
+        // Until it arrives, the last frame is sent again.
+        self.desktop.data.clear();
         Ok(Some(duplication))
     }
 
@@ -427,11 +431,9 @@ impl FrameSource for DesktopDuplication {
 
     fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
         self.acquire(0).map_err(RuntimeError::Capture)?;
-        if (self.desktop.width, self.desktop.height) != self.size {
-            return Err(RuntimeError::Capture(
-                "the display's size changed".to_owned(),
-            ));
-        }
+        // A display that changes mode is duplicated again at its new size,
+        // which the host follows with a new stream.
+        self.size = (self.desktop.width, self.desktop.height);
         if self.frame.is_none() {
             let desktop = &self.desktop;
             self.frame = Yuv420Frame::from_rgb32(

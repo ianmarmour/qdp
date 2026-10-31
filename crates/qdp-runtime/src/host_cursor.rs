@@ -113,6 +113,13 @@ impl HostCursor {
         WarpId(VarInt::new(self.last_warp).unwrap_or(VarInt::MAX))
     }
 
+    /// Forgets the images sent, so that the next update sends the shown one
+    /// again, with a new serial and so a new `CURSOR_SET`: a new layout
+    /// changes the Scale images are sent with.
+    pub(crate) fn forget_images(&mut self) {
+        self.slots.clear();
+    }
+
     /// Notes where the client's input moves the pointer.
     pub(crate) fn input(&mut self, action: &InputAction, now: Instant) {
         match *action {

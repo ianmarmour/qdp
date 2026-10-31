@@ -5,22 +5,18 @@ use std::time::{Duration, Instant};
 
 use qdp::input::{InputEvent, InputReceiver};
 use qdp::message::{
-    Av1Profiles, Capability, Chroma, ClientMonitorFlags, ClientMonitorId, ControlMessage, CursorId,
-    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind,
-    DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequest,
-    DisplayRequestId, FeatureStatus, FeedbackRecord, FrameHeader, HostHello, HostMonitor,
-    HostMonitorFlags, ImageSerial, InputClasses, KeyboardOutput, MinorVersion, MonitorId,
-    NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamHeader, StreamId, VideoCodec,
-    VideoCodecCapability, VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
+    Av1Profiles, Capability, ControlMessage, CursorId, CursorSet, Datagram, DatagramPayload,
+    DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus, DeviceStatusCode,
+    FeatureStatus, FeedbackRecord, FrameHeader, HostHello, ImageSerial, InputClasses,
+    KeyboardOutput, MinorVersion, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamHeader,
+    VideoCodec, VideoCodecCapability, VideoCodecFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{AuthResponse, HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, VideoSender};
-use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{
-    CodecPreference, EncoderSettings, KeyFrameRequest, TileCount, frame_rate_within, tile_count,
-};
+use qdp::wire::VarInt;
+use qdp_codec::{CodecPreference, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportError};
 use tracing::{debug, info, warn};
 
@@ -33,6 +29,7 @@ use crate::clipboard::{
 };
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
 use crate::host_cursor::{CursorUpdate, HostCursor};
+use crate::host_display::{HostDisplay, StreamChange, VideoLimits};
 use crate::host_input::{InputAction, InputInjector, Positions, StandardInput};
 use crate::host_output::{DeviceOutputs, OutputReport};
 use crate::host_passthrough::{
@@ -41,35 +38,15 @@ use crate::host_passthrough::{
 use crate::layout::VideoLayout;
 use crate::media::{CursorState, FrameSource};
 use crate::send_stats::{SendStats, queue_delay};
+use crate::stream_ids::StreamIds;
 use crate::{HostAuthenticator, RuntimeError, close_on_error, is_normal_close};
 
-/// The Stream ID of the motion layer of the host's one monitor.
-const MOTION_STREAM_ID: StreamId = StreamId(VarInt::from_u32(1));
-
-/// The Monitor ID of the host's one monitor.
-const MONITOR_ID: MonitorId = MonitorId(VarInt::from_u32(1));
-
-/// The H.273 colour primaries of standard dynamic range streams (BT.709).
-const SDR_PRIMARIES: u8 = 1;
-
-/// The H.273 transfer characteristics of standard dynamic range streams (sRGB).
-const SDR_TRANSFER: u8 = 13;
-
-/// The H.273 matrix coefficients of BT.709 YUV streams.
-const BT709_MATRIX: u8 = 1;
-
 /// The bit depth of the streams this host sends.
-const BIT_DEPTH: u8 = 8;
-
-/// The AV1 profile of the streams this host sends: profile 0, 4:2:0.
-const AV1_PROFILE: u8 = 0;
+pub(crate) const BIT_DEPTH: u8 = 8;
 
 /// The interface scale the host reports, in percent, for its monitor and the
 /// cursor images drawn for it.
 pub(crate) const SCALE_PERCENT: u32 = 100;
-
-/// The millihertz in one hertz.
-const MILLIHERTZ_PER_HERTZ: u32 = 1000;
 
 /// The largest frame the host's AV1 capability advertises.
 const MAX_FRAME_DIMENSION: u32 = 8192;
@@ -177,11 +154,6 @@ fn capabilities(
     capabilities
 }
 
-/// Converts a size to a variable-length integer, saturating.
-fn varint(value: usize) -> VarInt {
-    VarInt::try_from(value).unwrap_or(VarInt::MAX)
-}
-
 /// One host session in the active phase.
 struct ActiveHost {
     /// The connection and session.
@@ -203,14 +175,12 @@ struct ActiveHost {
     devices: StandardInput,
     /// Performs the client's input on the host's desktop.
     injector: Box<dyn InputInjector>,
-    /// The Config ID of the last `DISPLAY_CONFIG`.
-    display_config_id: u64,
-    /// The display configuration, resent unchanged when the client asks again.
-    display_config: DisplayConfig,
-    /// How the video maps onto the captured monitor.
-    layout: VideoLayout,
-    /// The motion stream's encoder settings.
-    settings: EncoderSettings,
+    /// The display configuration and the motion stream it defines.
+    display: HostDisplay,
+    /// Hands out the Stream IDs of new video and audio streams.
+    stream_ids: StreamIds,
+    /// How the host encodes, whatever the stream's size.
+    tuning: EncoderTuning,
     /// The session's statistics.
     summary: HostSummary,
     /// The statistics logged every second.
@@ -362,25 +332,22 @@ async fn serve_session(
         }
     }
 
-    let client_video = driver
-        .session()
-        .negotiated()
-        .map(|negotiated| negotiated.client_video);
-    let plan = VideoPlan::new(
-        source.size(),
-        display_request.as_ref(),
-        options.frame_rate,
-        client_video.as_ref(),
-    )?;
-    let request_id = display_request.map_or(DisplayRequestId::NONE, |request| request.request_id);
-    let display_config = display_config(&plan, request_id);
+    let limits = VideoLimits {
+        frame_rate: options.frame_rate,
+        client: driver
+            .session()
+            .negotiated()
+            .map(|negotiated| negotiated.client_video),
+    };
+    let mut stream_ids = StreamIds::default();
+    let display = HostDisplay::new(source.size(), display_request, limits, &mut stream_ids)?;
     let clock = SessionClock::new(Instant::now());
     let mut audio = HostAudioStreams::new(audio);
     let quic = driver.connection().quic().clone();
     let session = driver.session();
-    session.send(&ControlMessage::DisplayConfig(display_config.clone()))?;
+    session.send(&ControlMessage::DisplayConfig(display.config().clone()))?;
     if let (Some(request), Some(negotiated)) = (audio_request, session.negotiated()) {
-        let config = audio.configure(&request, negotiated, &quic, clock)?;
+        let config = audio.configure(&request, negotiated, &quic, clock, &mut stream_ids)?;
         session.send(&ControlMessage::AudioConfig(config))?;
     }
     session.send(&ControlMessage::PointerMode(PointerMode {
@@ -407,6 +374,7 @@ async fn serve_session(
     // 3.7.3).
     let early = driver.connection().quic().clone();
     while let Ok(Ok(_)) = tokio::time::timeout(Duration::ZERO, early.read_datagram()).await {}
+    let plan = *display.plan();
     info!(
         capture_width = plan.layout.capture.0,
         capture_height = plan.layout.capture.1,
@@ -428,15 +396,14 @@ async fn serve_session(
         encoder,
         pending_since: None,
         frames_requested: 0,
-        sender: VideoSender::new(MOTION_STREAM_ID),
+        sender: VideoSender::new(display.stream_id()),
         input: InputReceiver::new(),
         clock,
         devices,
         injector,
-        display_config_id: 1,
-        display_config,
-        layout: plan.layout,
-        settings,
+        display,
+        stream_ids,
+        tuning: options.encoder,
         summary: HostSummary::default(),
         outputs: DeviceOutputs::default(),
         cursor: HostCursor::default(),
@@ -452,10 +419,10 @@ async fn serve_session(
         let outputs = link.start();
         active.apply_clipboard(outputs)?;
     }
-    let result = active.run(plan.frame_interval()).await;
+    let result = active.run().await;
     // Nothing the client held stays held on the host.
     let actions = active.devices.release_all();
-    active.inject(&actions);
+    active.inject(&actions, active.display.layout());
     result
 }
 
@@ -570,143 +537,12 @@ fn answer_attach(
     Ok(outcome.is_ok())
 }
 
-/// What the host streams of one monitor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct VideoPlan {
-    /// The sizes of the capture and of its video.
-    layout: VideoLayout,
-    /// The most motion frames per second, in millihertz.
-    refresh_millihertz: u32,
-    /// The client display area the monitor is meant for, or 0 if none.
-    client_monitor_id: ClientMonitorId,
-}
-
-impl VideoPlan {
-    /// Plans the video of a `capture`-sized monitor for the client's
-    /// display request: no larger than the client's display area or the
-    /// largest frame it decodes, no more frames per second than the area's
-    /// refresh rate or `frame_rate` (Sections 6.2 and 6.3), and within the
-    /// client's Max Level (Section 6.4.1, rule 8).
-    fn new(
-        capture: (usize, usize),
-        request: Option<&DisplayRequest>,
-        frame_rate: u32,
-        client: Option<&VideoCodecCapability>,
-    ) -> Result<Self, RuntimeError> {
-        let area = request.and_then(|request| {
-            request
-                .monitors
-                .iter()
-                .find(|monitor| monitor.flags.contains(ClientMonitorFlags::PRIMARY))
-                .or(request.monitors.first())
-        });
-        let side = |value: VarInt| usize::try_from(value.into_inner()).unwrap_or(usize::MAX);
-        let bounds: Vec<(usize, usize)> = client
-            .map(|client| (side(client.max_width), side(client.max_height)))
-            .into_iter()
-            .chain(area.map(|area| (side(area.width), side(area.height))))
-            .collect();
-        let layout = VideoLayout::fit(capture, &bounds);
-        let mut refresh_millihertz = frame_rate.max(1).saturating_mul(MILLIHERTZ_PER_HERTZ);
-        if let Some(requested) = area
-            .and_then(|area| u32::try_from(area.refresh_rate.into_inner()).ok())
-            .filter(|&requested| requested > 0)
-        {
-            refresh_millihertz = refresh_millihertz.min(requested);
-        }
-        let mut plan = Self {
-            layout,
-            refresh_millihertz,
-            client_monitor_id: area.map(|area| area.id).unwrap_or_default(),
-        };
-        if let Some(client) = client {
-            plan.fit_level(client.max_level)?;
-        }
-        Ok(plan)
-    }
-
-    /// Lowers the frame rate until the stream stays within `max_level`.
-    fn fit_level(&mut self, max_level: u8) -> Result<(), RuntimeError> {
-        let (width, height) = self.layout.video;
-        let tiles = TileCount::at_most_columns(tile_count(width, height) as u32);
-        let frame_rate = self.frame_rate();
-        let fitted = frame_rate_within(width as u32, height as u32, frame_rate, tiles, max_level)
-            .ok_or(RuntimeError::Config(
-            "the video is too large for the client's AV1 level",
-        ))?;
-        if fitted < frame_rate {
-            info!(
-                frame_rate = fitted,
-                max_level, "frame rate lowered to the client's AV1 level"
-            );
-            self.refresh_millihertz = fitted * MILLIHERTZ_PER_HERTZ;
-        }
-        Ok(())
-    }
-
-    /// Returns the frames per second, rounded up, as encoders and levels
-    /// count them.
-    fn frame_rate(&self) -> u32 {
-        self.refresh_millihertz.div_ceil(MILLIHERTZ_PER_HERTZ)
-    }
-
-    /// Returns the time between frames.
-    fn frame_interval(&self) -> Duration {
-        Duration::from_secs(MILLIHERTZ_PER_HERTZ.into()) / self.refresh_millihertz.max(1)
-    }
-
-    /// Returns the encoder settings of the video.
-    fn encoder_settings(&self, tuning: &EncoderTuning) -> EncoderSettings {
-        EncoderSettings {
-            width: self.layout.video.0,
-            height: self.layout.video.1,
-            frame_rate: self.frame_rate(),
-            speed: tuning.speed,
-            quantizer: tuning.quantizer,
-            threads: tuning.threads,
-        }
-    }
-}
-
-/// Returns the configuration of one monitor with one AV1 motion stream, as
-/// `plan` describes it, answering the requests up to `request_id`.
-fn display_config(plan: &VideoPlan, request_id: DisplayRequestId) -> DisplayConfig {
-    let (width, height) = plan.layout.video;
-    DisplayConfig {
-        config_id: DisplayConfigId(VarInt::from_u32(1)),
-        request_id,
-        monitors: vec![HostMonitor {
-            id: MONITOR_ID,
-            client_monitor_id: plan.client_monitor_id,
-            flags: HostMonitorFlags::PRIMARY,
-            x: SignedVarInt::ZERO,
-            y: SignedVarInt::ZERO,
-            width: varint(width),
-            height: varint(height),
-            refresh_rate: VarInt::from_u32(plan.refresh_millihertz),
-            scale: VarInt::from_u32(SCALE_PERCENT),
-        }],
-        streams: vec![VideoStreamConfig {
-            stream_id: MOTION_STREAM_ID,
-            monitor_id: MONITOR_ID,
-            layer: VideoLayer::Motion,
-            codec: VideoCodec::AV1,
-            profile: AV1_PROFILE,
-            bit_depth: BIT_DEPTH,
-            chroma: Chroma::Yuv420,
-            flags: VideoStreamFlags::default(),
-            color_primaries: SDR_PRIMARIES,
-            transfer_characteristics: SDR_TRANSFER,
-            matrix_coefficients: BT709_MATRIX,
-        }],
-    }
-}
-
 impl ActiveHost {
     /// Streams until the client disconnects.
-    async fn run(&mut self, frame_interval: Duration) -> Result<HostSummary, RuntimeError> {
+    async fn run(&mut self) -> Result<HostSummary, RuntimeError> {
         let mut next_frame_at = Instant::now();
         loop {
+            let frame_interval = self.display.plan().frame_interval();
             let smoothed_rtt = self.driver.connection().smoothed_rtt();
             let deadline = [
                 self.pending_since.is_none().then_some(next_frame_at),
@@ -754,7 +590,7 @@ impl ActiveHost {
             {
                 warn!("no input for a second while keys or buttons were held; releasing them");
                 let actions = self.devices.release_all();
-                self.inject(&actions);
+                self.inject(&actions, self.display.layout());
             }
             if let Some(link) = &mut self.clipboard {
                 let outputs = link.service(now);
@@ -816,23 +652,26 @@ impl ActiveHost {
     fn apply_input(&mut self, events: &[InputEvent]) {
         self.summary.input_reports += events.len() as u64;
         for event in events {
-            let positions = if event.warp_id < self.cursor.latest_warp() {
+            // Positions computed with a layout the host no longer keeps are
+            // ignored (Section 8.7, rule 6).
+            let layout = self.display.layout_for(event.display_config_id);
+            let positions = if event.warp_id < self.cursor.latest_warp() || layout.is_none() {
                 Positions::Ignore
             } else {
                 Positions::Apply
             };
             let actions = self.devices.apply(event, positions, self.pointer_mode);
-            self.inject(&actions);
+            self.inject(&actions, layout.unwrap_or(self.display.layout()));
         }
     }
 
-    /// Performs input actions, whose positions are in the host desktop,
-    /// logging the ones that fail.
-    fn inject(&mut self, actions: &[InputAction]) {
+    /// Performs input actions, whose positions are in the host desktop of
+    /// `layout`, logging the ones that fail.
+    fn inject(&mut self, actions: &[InputAction], layout: VideoLayout) {
         let now = Instant::now();
         for action in actions {
-            self.cursor.input(action, now);
-            let action = self.layout.action_in_capture(action.clone());
+            let action = layout.action_in_capture(action.clone());
+            self.cursor.input(&action, now);
             if let Err(error) = self.injector.inject(&action) {
                 warn!(?action, error, "input not applied");
             }
@@ -855,7 +694,10 @@ impl ActiveHost {
             confinement: None,
         }))?;
         if mode == PointerKind::Absolute {
-            let warp = self.cursor.warp_to_current();
+            let warp = self
+                .display
+                .layout()
+                .warp_in_video(self.cursor.warp_to_current());
             session.send(&ControlMessage::CursorWarp(warp))?;
         }
         Ok(())
@@ -896,11 +738,11 @@ impl ActiveHost {
     /// Tells the client about the pointer a capture saw: new images on
     /// streams of their own, and `CURSOR_SET` and `CURSOR_WARP` messages.
     fn send_cursor(&mut self, state: &CursorState, now: Instant) -> Result<(), RuntimeError> {
-        let state = self.layout.cursor_in_video(state);
-        for update in self.cursor.update(&state, now) {
+        let layout = self.display.layout();
+        for update in self.cursor.update(state, now) {
             match update {
                 CursorUpdate::Image(mut image) => {
-                    image.scale = self.layout.cursor_scale(image.scale);
+                    image.scale = layout.cursor_scale(image.scale);
                     let stream = [StreamHeader::CursorImage.to_bytes(), image.to_bytes()].concat();
                     self.driver.connection().send_stream(stream);
                 }
@@ -912,7 +754,7 @@ impl ActiveHost {
                 CursorUpdate::Warp(warp) => {
                     self.driver
                         .session()
-                        .send(&ControlMessage::CursorWarp(warp))?;
+                        .send(&ControlMessage::CursorWarp(layout.warp_in_video(warp)))?;
                 }
             }
         }
@@ -1015,11 +857,27 @@ impl ActiveHost {
         self.encoder.request(EncodeJob {
             request,
             recovery,
-            stream_id: MOTION_STREAM_ID,
-            settings: self.settings,
+            stream_id: self.display.stream_id(),
+            settings: self.display.plan().encoder_settings(&self.tuning),
         })?;
         self.pending_since = Some(now);
         self.frames_requested += 1;
+        Ok(())
+    }
+
+    /// Sends the display's new configuration, starting the stream that
+    /// replaces the motion stream if `change` says one does: its first frame
+    /// is a key frame, and the cursor images are sent again with the new
+    /// layout's Scale.
+    fn reconfigure(&mut self, change: StreamChange) -> Result<(), RuntimeError> {
+        if change == StreamChange::Replaced {
+            self.sender = VideoSender::new(self.display.stream_id());
+            self.frames_requested = 0;
+            self.cursor.forget_images();
+        }
+        self.driver.session().send(&ControlMessage::DisplayConfig(
+            self.display.config().clone(),
+        ))?;
         Ok(())
     }
 
@@ -1028,6 +886,18 @@ impl ActiveHost {
     fn send_encoded(&mut self, output: EncodedOutput, now: Instant) -> Result<(), RuntimeError> {
         if let Some(cursor) = &output.cursor {
             self.send_cursor(cursor, now)?;
+        }
+        if output.job.stream_id != self.display.stream_id() {
+            // Encoded for a stream a new configuration replaced.
+            return Ok(());
+        }
+        if output.capture_size != self.display.layout().capture {
+            // The monitor changed size: its frames need a new configuration,
+            // and this one is dropped.
+            let change = self
+                .display
+                .capture_resized(output.capture_size, &mut self.stream_ids)?;
+            return self.reconfigure(change);
         }
         let kind = match (output.frame.is_key_frame, output.job.recovery) {
             (true, true) => FrameKind::KeyRecovery,
@@ -1067,18 +937,13 @@ impl ActiveHost {
     fn handle_event(&mut self, event: HostEvent) -> Result<(), RuntimeError> {
         match event {
             HostEvent::Message(ControlMessage::KeyframeRequest(request)) => {
-                if request.stream_id == MOTION_STREAM_ID {
+                if request.stream_id == self.display.stream_id() {
                     self.sender.handle_keyframe_request();
                 }
             }
             HostEvent::Message(ControlMessage::DisplayRequest(request)) => {
-                // Resizing is not supported yet: answer with the same streams.
-                self.display_config_id += 1;
-                self.display_config.config_id = DisplayConfigId(varint_u64(self.display_config_id));
-                self.display_config.request_id = request.request_id;
-                self.driver
-                    .session()
-                    .send(&ControlMessage::DisplayConfig(self.display_config.clone()))?;
+                let change = self.display.handle_request(request, &mut self.stream_ids)?;
+                self.reconfigure(change)?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
                 if answer_attach(
@@ -1093,7 +958,7 @@ impl ActiveHost {
             }
             HostEvent::Message(ControlMessage::DeviceDetach(detach)) => {
                 let actions = self.devices.detach(detach.device_id);
-                self.inject(&actions);
+                self.inject(&actions, self.display.layout());
                 self.outputs.remove(detach.device_id);
                 for token in self.passthrough.remove(detach.device_id) {
                     self.injector
@@ -1118,9 +983,13 @@ impl ActiveHost {
                 let quic = self.driver.connection().quic().clone();
                 let session = self.driver.session();
                 if let Some(negotiated) = session.negotiated() {
-                    let config = self
-                        .audio
-                        .configure(&request, negotiated, &quic, self.clock)?;
+                    let config = self.audio.configure(
+                        &request,
+                        negotiated,
+                        &quic,
+                        self.clock,
+                        &mut self.stream_ids,
+                    )?;
                     session.send(&ControlMessage::AudioConfig(config))?;
                 }
             }
@@ -1179,102 +1048,20 @@ impl ActiveHost {
         now: Instant,
     ) -> Result<(), RuntimeError> {
         match record {
-            FeedbackRecord::Decoded(decoded) if decoded.stream_id == MOTION_STREAM_ID => {
+            FeedbackRecord::Decoded(decoded) if decoded.stream_id == self.display.stream_id() => {
                 self.sender.handle_decoded(decoded.last_decoded_frame);
             }
-            FeedbackRecord::Nack(nack) if nack.stream_id == MOTION_STREAM_ID => {
+            FeedbackRecord::Nack(nack) if nack.stream_id == self.display.stream_id() => {
                 for datagram in self.sender.handle_nack(nack, smoothed_rtt, now) {
                     self.summary.retransmissions += 1;
                     self.send(datagram)?;
                 }
             }
-            FeedbackRecord::Loss(loss) if loss.stream_id == MOTION_STREAM_ID => {
+            FeedbackRecord::Loss(loss) if loss.stream_id == self.display.stream_id() => {
                 self.sender.handle_loss(loss, smoothed_rtt, now);
             }
             _ => {}
         }
         Ok(())
-    }
-}
-
-/// Converts a counter to a variable-length integer, saturating.
-fn varint_u64(value: u64) -> VarInt {
-    VarInt::new(value).unwrap_or(VarInt::MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use qdp::message::{Av1Profiles, ClientMonitor};
-
-    /// Returns a request for one display area.
-    fn request(width: u32, height: u32, refresh_millihertz: u32) -> DisplayRequest {
-        DisplayRequest {
-            request_id: DisplayRequestId(VarInt::from_u32(3)),
-            monitors: vec![ClientMonitor {
-                id: ClientMonitorId(VarInt::from_u32(7)),
-                flags: ClientMonitorFlags::PRIMARY,
-                x: SignedVarInt::ZERO,
-                y: SignedVarInt::ZERO,
-                width: VarInt::from_u32(width),
-                height: VarInt::from_u32(height),
-                refresh_rate: VarInt::from_u32(refresh_millihertz),
-                scale: VarInt::from_u32(SCALE_PERCENT),
-                physical_width: VarInt::ZERO,
-                physical_height: VarInt::ZERO,
-                peak_luminance: VarInt::ZERO,
-            }],
-        }
-    }
-
-    /// Returns a client that decodes frames up to `max_side` at `max_level`.
-    fn client(max_side: u32, max_level: u8) -> VideoCodecCapability {
-        VideoCodecCapability {
-            codec: VideoCodec::AV1,
-            profiles: Av1Profiles::MAIN,
-            max_bit_depth: BIT_DEPTH,
-            max_width: VarInt::from_u32(max_side),
-            max_height: VarInt::from_u32(max_side),
-            max_pixel_rate: VarInt::ZERO,
-            flags: VideoCodecFlags::default(),
-            max_level,
-        }
-    }
-
-    /// The video fits the client's display area and decoder, at no more
-    /// frames than the area refreshes, for the area's Client Monitor ID.
-    #[test]
-    fn plans_video_for_the_request() {
-        let uhd = (3840, 2160);
-        let area = request(1920, 1200, 59_940);
-        let plan =
-            VideoPlan::new(uhd, Some(&area), 60, Some(&client(8192, NO_LEVEL_LIMIT))).unwrap();
-        assert_eq!(plan.layout.video, (1920, 1080));
-        assert_eq!(plan.refresh_millihertz, 59_940);
-        assert_eq!(plan.frame_rate(), 60);
-        assert_eq!(plan.frame_interval(), Duration::from_nanos(16_683_350));
-        assert_eq!(plan.client_monitor_id, ClientMonitorId(VarInt::from_u32(7)));
-        let config = display_config(&plan, area.request_id);
-        assert_eq!(config.monitors[0].width, VarInt::from_u32(1920));
-        assert_eq!(config.monitors[0].client_monitor_id, plan.client_monitor_id);
-
-        let small_decoder =
-            VideoPlan::new(uhd, Some(&area), 30, Some(&client(1280, NO_LEVEL_LIMIT))).unwrap();
-        assert_eq!(small_decoder.layout.video, (1280, 720));
-        assert_eq!(small_decoder.refresh_millihertz, 30_000);
-
-        let unknown_rate = VideoPlan::new(uhd, Some(&request(3840, 2160, 0)), 60, None).unwrap();
-        assert_eq!(unknown_rate.layout.video, uhd);
-        assert_eq!(unknown_rate.refresh_millihertz, 60_000);
-    }
-
-    /// The frame rate drops to fit the client's Max Level, and video too
-    /// large for it at any rate is refused.
-    #[test]
-    fn plans_within_the_level() {
-        let hd = (1920, 1080);
-        let plan = VideoPlan::new(hd, None, 60, Some(&client(8192, 8))).unwrap();
-        assert_eq!(plan.refresh_millihertz, 34_000);
-        assert!(VideoPlan::new(hd, None, 60, Some(&client(8192, 5))).is_err());
     }
 }
