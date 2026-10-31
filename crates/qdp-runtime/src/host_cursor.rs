@@ -104,6 +104,9 @@ pub(crate) struct HostCursor {
     /// Since when the pointer has shown an image over the captured monitor,
     /// if it does.
     shown_since: Option<Instant>,
+    /// The pointer mode the client is in: warps apply only in absolute mode
+    /// (Section 9.4).
+    mode: PointerKind,
 }
 
 impl Default for HostCursor {
@@ -123,11 +126,19 @@ impl Default for HostCursor {
             last_unfollowed_input: None,
             hidden_since: None,
             shown_since: None,
+            mode: PointerKind::Absolute,
         }
     }
 }
 
 impl HostCursor {
+    /// Notes the pointer mode the client was told: in relative mode the
+    /// pointer's moves are the application's own, as a game centring it, and
+    /// are not sent as warps.
+    pub(crate) fn set_pointer_mode(&mut self, mode: PointerKind) {
+        self.mode = mode;
+    }
+
     /// Returns the pointer mode the host's applications call for, where the
     /// platform does not tell, from the `current` mode, whether the client is
     /// `holding` a button, and how long the pointer has been hidden or shown
@@ -307,6 +318,10 @@ impl HostCursor {
             return None;
         }
         self.last_position = Some(position);
+        if self.mode == PointerKind::Relative {
+            // Switching back to absolute mode warps to where it is then.
+            return None;
+        }
         // A device the client cannot follow is moving the pointer: each
         // capture, once per display refresh, reports where it went.
         let following = self
@@ -545,6 +560,28 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// In relative mode the application's own moves of the captured pointer
+    /// send no warps, and switching back warps to where it ended up.
+    #[test]
+    fn warps_only_in_absolute_mode() {
+        let mut cursor = HostCursor::default();
+        let start = Instant::now();
+        let hidden = shape(8, 0);
+        cursor.update(&visible((10, 20), &hidden), start);
+        cursor.set_pointer_mode(PointerKind::Relative);
+        // A game centring the captured pointer sends no warp.
+        let later = start + Duration::from_secs(1);
+        assert!(warps(&cursor.update(&visible((640, 360), &hidden), later)).is_empty());
+        assert!(warps(&cursor.update(&visible((700, 360), &hidden), later)).is_empty());
+        // Switching back warps to where it ended up.
+        cursor.set_pointer_mode(PointerKind::Absolute);
+        let back = cursor.warp_to_current();
+        assert_eq!(
+            (back.x.into_inner(), back.y.into_inner()),
+            (700 * 256, 360 * 256)
+        );
     }
 
     /// The pointer warps when it moves without the client's input, and not
