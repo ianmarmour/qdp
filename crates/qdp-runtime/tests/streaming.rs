@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 use qdp::auth::scram::ScramCredentials;
 use qdp::hid::ReportDescriptor;
 use qdp::message::{
-    BusType, CursorImage, DeviceFeatures, DeviceId, FeatureOperation, FeatureStatus,
+    BusType, CursorImage, DesktopRect, DeviceFeatures, DeviceId, FeatureOperation, FeatureStatus,
     GamepadButtons, GamepadOutput, GamepadReport, KeyboardInfo, LayoutPlatform, PassthroughInfo,
     PenFlags, PenReport, PointerKind, PointerMode, TouchpadButtons, TouchpadContact,
     TouchpadContactFlags, TouchpadInfo, TouchpadReport,
 };
-use qdp::wire::VarInt;
+use qdp::wire::{SignedVarInt, VarInt};
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
@@ -25,7 +25,7 @@ use qdp_runtime::{
     DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource,
     GamepadFeedback, HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle,
     InputInjector, InputQueue, Microphone, NoInput, PassthroughDevice, PassthroughFeedback,
-    PassthroughPolicy, PenInput, Playout, PointerButton, PointerPosition, Presentation,
+    PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton, PointerPosition, Presentation,
     PresentationTiming, RefreshMode, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
     TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
 };
@@ -1308,6 +1308,107 @@ impl FrameSink for ModeWatcher {
             self.frames_since = Some(0);
         }
     }
+}
+
+/// An injector whose applications confine the visible pointer to a part of
+/// the monitor.
+#[derive(Debug, Clone, Default)]
+struct ConfinedPointer(Recorder);
+
+impl InputInjector for ConfinedPointer {
+    fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        self.0.inject(action)
+    }
+
+    fn description(&self) -> &str {
+        "confined pointer"
+    }
+
+    fn pointer_confinement(&mut self) -> Option<PixelRect> {
+        Some(PixelRect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        })
+    }
+}
+
+/// Stops once the host has confined the pointer.
+struct ConfinementWatcher {
+    /// The confinements the host announced.
+    confinements: Vec<Option<DesktopRect>>,
+    /// The frames presented.
+    frames: usize,
+}
+
+impl FrameSink for ConfinementWatcher {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        if self.confinements.iter().any(Option::is_some) || self.frames >= CLIPBOARD_FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+
+    fn set_pointer_mode(&mut self, mode: &PointerMode) {
+        assert_eq!(mode.mode, PointerKind::Absolute);
+        self.confinements.push(mode.confinement);
+    }
+}
+
+/// When an application confines the host's visible pointer, the client is
+/// told the area, in positions of the host desktop (Section 8.9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn confinement_reaches_the_client() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let (address, pin, _host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(ConfinedPointer::default()),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let mut watcher = ConfinementWatcher {
+        confinements: Vec::new(),
+        frames: 0,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut watcher,
+            None,
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("the session finishes in time")
+    .unwrap();
+    let position = |pixels: i64| SignedVarInt::new(pixels * 256).unwrap();
+    assert_eq!(
+        watcher.confinements.last().copied().flatten(),
+        Some(DesktopRect {
+            x: position(10),
+            y: position(20),
+            width: VarInt::from_u32(100 * 256),
+            height: VarInt::from_u32(50 * 256),
+        })
+    );
 }
 
 /// When an application captures the host's pointer, the client switches to

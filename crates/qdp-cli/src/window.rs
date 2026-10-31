@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use qdp::message::{CursorImage, FrameNumber, PointerKind, PointerMode, StreamId};
+use qdp::message::{CursorImage, DesktopRect, FrameNumber, PointerKind, PointerMode, StreamId};
 use qdp_codec::Yuv420Frame;
 use qdp_desktop::{DeviceSelector, Microphone, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
@@ -52,6 +52,9 @@ const UNITS_PER_PIXEL: f64 = 3.0;
 /// The shortest time between two warps of the user's pointer: at most 60 a
 /// second (Section 9.4).
 const MIN_WARP_INTERVAL: Duration = Duration::from_micros(16_667);
+
+/// Positions in pixels (Section 1.5.6).
+const POSITION_UNITS: f64 = 256.0;
 
 /// The interface scale, in percent, of an image drawn for no scaling.
 const DEFAULT_IMAGE_SCALE: f64 = 100.0;
@@ -339,6 +342,12 @@ pub struct WindowApp {
     pointer_mode: PointerKind,
     /// Whether the window has captured the pointer for relative mode.
     captured: bool,
+    /// The area of the host's monitor its applications confined the pointer
+    /// to, in absolute mode, in positions (Section 8.9).
+    confinement: Option<DesktopRect>,
+    /// Whether the user released the confinement with the local release
+    /// action, until the host's next pointer mode.
+    confinement_released: bool,
     /// The modifier keys held.
     modifiers: ModifiersState,
     /// The fingers touching the window.
@@ -404,6 +413,8 @@ impl WindowApp {
             last_warp: None,
             pointer_mode: PointerKind::Absolute,
             captured: false,
+            confinement: None,
+            confinement_released: false,
             modifiers: ModifiersState::empty(),
             fingers: HashSet::new(),
             proxy,
@@ -458,10 +469,34 @@ impl WindowApp {
     /// while the window has focus.
     fn set_pointer_mode(&mut self, mode: &PointerMode) {
         self.pointer_mode = mode.mode;
+        self.confinement = mode.confinement;
+        self.confinement_released = false;
         match mode.mode {
             PointerKind::Relative if self.focused => self.capture_pointer(),
             PointerKind::Relative => {}
-            _ => self.release_pointer(),
+            _ => {
+                self.release_pointer();
+                self.confine_pointer();
+            }
+        }
+    }
+
+    /// Returns the confinement that applies now: the host's, in absolute
+    /// mode, while the window has focus and the user has not released it.
+    fn active_confinement(&self) -> Option<DesktopRect> {
+        self.confinement.filter(|_| {
+            self.pointer_mode == PointerKind::Absolute && self.focused && !self.confinement_released
+        })
+    }
+
+    /// Keeps the pointer in the window while the host confines it: the
+    /// positions sent are kept within the host's area too.
+    fn confine_pointer(&self) {
+        let (Some(display), Some(_)) = (&self.display, self.active_confinement()) else {
+            return;
+        };
+        if let Err(error) = display.window.set_cursor_grab(CursorGrabMode::Confined) {
+            debug!(%error, "the pointer cannot be confined");
         }
     }
 
@@ -650,9 +685,14 @@ impl WindowApp {
         self.input.send(input);
     }
 
-    /// Sends the pointer's position on the monitor, if it is over the picture.
+    /// Sends the pointer's position on the monitor, if it is over the
+    /// picture, kept within the host's confinement while it applies.
     fn pointer_moved(&self, position: PhysicalPosition<f64>) {
         if let Some((x, y)) = self.monitor_position(position) {
+            let (x, y) = match self.active_confinement() {
+                Some(area) => confined(area, x, y),
+                None => (x, y),
+            };
             self.input.send(UserInput::PointerMoved { x, y });
         }
     }
@@ -964,6 +1004,7 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 match self.local_action(&event) {
                     Some(LocalAction::Release) => {
                         self.release_pointer();
+                        self.confinement_released = true;
                         self.input.send(UserInput::ReleaseAll);
                     }
                     Some(LocalAction::ToggleMicrophone) => self.toggle_microphone(),
@@ -1006,7 +1047,13 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 if let Some(touchpad) = &self.touchpad {
                     touchpad.set_focused(focused);
                 }
-                if !focused {
+                if focused {
+                    self.confine_pointer();
+                    // The host's lock keys follow the client's (Section 8.4.1).
+                    if let Some(lock_keys) = qdp_desktop::lock_keys() {
+                        self.input.send(UserInput::LockKeys(lock_keys));
+                    }
+                } else {
                     self.release_pointer();
                     self.fingers.clear();
                     self.input.send(UserInput::ReleaseAll);
@@ -1035,6 +1082,21 @@ fn attach_pen(
     .inspect(|_| debug!("reading the pen over the window"))
     .inspect_err(|error| warn!(error, "the pen is not sent"))
     .ok()
+}
+
+/// Returns a point of the host's monitor, in pixels, moved into `area`, in
+/// positions: 1/256 pixel (Section 1.5.6).
+fn confined(area: DesktopRect, x: f64, y: f64) -> (f64, f64) {
+    let pixels = |position: f64| position / POSITION_UNITS;
+    let left = pixels(area.x.into_inner() as f64);
+    let top = pixels(area.y.into_inner() as f64);
+    // The last position inside, a 1/256 pixel short of the far edges.
+    let right = pixels((area.x.into_inner() + area.width.into_inner() as i64 - 1) as f64);
+    let bottom = pixels((area.y.into_inner() + area.height.into_inner() as i64 - 1) as f64);
+    (
+        x.clamp(left, right.max(left)),
+        y.clamp(top, bottom.max(top)),
+    )
 }
 
 /// Returns the display the session is shown on: the window's content area,

@@ -88,6 +88,19 @@ pub struct TouchPoint {
     pub pressure: u16,
 }
 
+/// A rectangle of the captured monitor, in its pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PixelRect {
+    /// The left edge.
+    pub x: i32,
+    /// The top edge.
+    pub y: i32,
+    /// The width.
+    pub width: u32,
+    /// The height.
+    pub height: u32,
+}
+
 /// One thing the host's input injector does.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InputAction {
@@ -185,6 +198,13 @@ pub trait InputInjector: Send {
     /// accepts text devices.
     fn supports_text(&self) -> bool {
         false
+    }
+
+    /// Returns the area of the captured monitor the host's applications
+    /// confined the visible pointer to, in absolute mode, if they did
+    /// (Section 8.9).
+    fn pointer_confinement(&mut self) -> Option<PixelRect> {
+        None
     }
 
     /// Returns the pointer mode the host's applications call for (Section

@@ -30,6 +30,7 @@ mod keyboard_layout;
 mod latest_frame;
 #[cfg(target_os = "linux")]
 mod linux;
+mod lock_keys;
 #[cfg(target_os = "macos")]
 mod macos;
 mod passthrough;
@@ -49,6 +50,7 @@ pub use clipboard::SystemClipboard;
 #[cfg(feature = "gamepad")]
 pub use gamepad::GamepadCapture;
 pub use keyboard_layout::keyboard_info;
+pub use lock_keys::lock_keys;
 pub use passthrough::{DeviceSelector, PassthroughCapture};
 pub use touchpad::TouchpadCapture;
 
