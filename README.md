@@ -112,12 +112,13 @@ motion; Ctrl+Alt+Shift+Z releases it, and a click captures it again. The client
 also tells the host its keyboard layout, and Windows hosts switch to the same
 one. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write
-access to `/dev/uinput`. To allow it for members of the `input` group:
+access to `/dev/uinput`, and `/dev/uhid` for passed-through devices. To allow
+both for members of the `input` group:
 
 ```bash
-echo uinput | sudo tee /etc/modules-load.d/uinput.conf
-sudo modprobe uinput
-echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/60-qdp-uinput.rules
+printf 'uinput\nuhid\n' | sudo tee /etc/modules-load.d/qdp.conf
+sudo modprobe -a uinput uhid
+printf '%s\n' 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' 'KERNEL=="uhid", GROUP="input", MODE="0660", OPTIONS+="static_node=uhid"' | sudo tee /etc/udev/rules.d/60-qdp-uinput.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG input "$USER"
 ```
@@ -129,7 +130,11 @@ clients a pen's pressure, tilt, rotation, eraser and barrel button reach every
 host as a pen; on other clients a pen moves the pointer. The client also
 sends the gamepads connected to it while its window has focus, and plays the
 rumble the host's games set on them. A Linux host presents each as a virtual Xbox 360
-controller; hosts on other systems decline them. On Windows the host sends input with
+controller; hosts on other systems decline them. A client can also pass a HID
+device through as it is, which a Linux host recreates through uhid for its
+games; by default the host accepts only game controllers, and `qdp serve
+--passthrough all` or `--passthrough off` accepts every device or none. On
+Windows the host sends input with
 `SendInput`; Windows keeps it from reaching programs run as administrator unless
 the host runs as administrator too, and from the sign-in screen and elevation
 prompts entirely.
