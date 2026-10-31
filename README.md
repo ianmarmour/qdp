@@ -20,15 +20,16 @@ tools. On Windows, install NASM, for example with `winget install NASM.NASM`,
 alongside the Visual Studio C++ build tools that Rust uses there.
 
 On Linux, screen capture uses PipeWire, whose development files and libclang
-are needed to build it:
+are needed to build it, and gamepads use libudev:
 
 ```bash
-sudo dnf install pipewire-devel clang-devel
+sudo dnf install pipewire-devel clang-devel systemd-devel
 ```
 
-On Debian and Ubuntu that is `sudo apt install libpipewire-0.3-dev libclang-dev`,
-and on Arch `sudo pacman -S pipewire clang`. Audio uses PipeWire on Linux too.
-To build without screen capture and audio instead, pass
+On Debian and Ubuntu that is
+`sudo apt install libpipewire-0.3-dev libclang-dev libudev-dev`, and on Arch
+`sudo pacman -S pipewire clang systemd-libs`. Audio uses PipeWire on Linux too.
+To build without screen capture, audio and gamepads instead, pass
 `--no-default-features --features window`.
 
 Build the `qdp` command, which is both the host and the client:
@@ -122,9 +123,10 @@ sudo usermod -aG input "$USER"
 ```
 
 Log out and in again for the group change to apply. Without access the host
-logs a warning and ignores input. A Linux host also accepts the client's
-gamepads, each as a virtual Xbox 360 controller that games rumble; hosts on
-other systems decline them. On Windows the host sends input with
+logs a warning and ignores input. The client also sends the gamepads
+connected to it while its window has focus, and plays the rumble the host's
+games set on them. A Linux host presents each as a virtual Xbox 360
+controller; hosts on other systems decline them. On Windows the host sends input with
 `SendInput`; Windows keeps it from reaching programs run as administrator unless
 the host runs as administrator too, and from the sign-in screen and elevation
 prompts entirely.

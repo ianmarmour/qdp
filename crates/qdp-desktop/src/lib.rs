@@ -12,12 +12,14 @@
 //!   `SendInput`.
 //!
 //! [`SystemClipboard`] shares the system clipboard's text on each of them,
-//! and [`host_audio`] and [`client_audio`] open the audio devices sessions
-//! play and capture through.
+//! [`host_audio`] and [`client_audio`] open the audio devices sessions play
+//! and capture through, and `GamepadCapture` watches a client's gamepads.
 
 mod clipboard;
 #[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
 mod cpal_audio;
+#[cfg(feature = "gamepad")]
+mod gamepad;
 mod keyboard_layout;
 #[cfg(any(
     all(target_os = "linux", feature = "screen-capture"),
@@ -37,6 +39,8 @@ use qdp_runtime::{ClientAudio, Clipboard, FrameSource, HostAudio, InputInjector,
 use tracing::warn;
 
 pub use clipboard::SystemClipboard;
+#[cfg(feature = "gamepad")]
+pub use gamepad::GamepadCapture;
 pub use keyboard_layout::keyboard_info;
 
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
