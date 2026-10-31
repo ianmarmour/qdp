@@ -7,8 +7,9 @@
 //! pointer covering the desktop, as virtual machines' tablets do, and, when
 //! the client uses them, a touchscreen and a pen tablet covering the desktop
 //! and a gamepad for each one it attaches. While a button is held, each move
-//! of the absolute pointer also reports the motion it makes, as a mouse
-//! does: compositors give applications no motion for absolute moves, and
+//! of the absolute pointer also reports the motion it makes, in the
+//! desktop's own units, which its interface scale makes larger than pixels,
+//! as a mouse does: compositors give applications no motion for absolute moves, and
 //! games that follow the mouse's motion rather than the pointer's position,
 //! as many do to drag what is under the pointer, would not see a drag. Only
 //! while a button is held, because the compositor accelerates the motion,
@@ -29,7 +30,8 @@ use qdp::message::{
     DeviceId, FeatureStatus, GamepadOutput, GamepadReport, KeyboardLeds, PenReport,
 };
 use qdp_runtime::{
-    FeatureRequest, InputAction, InputInjector, PassthroughDevice, PointerButton, TouchPoint,
+    DesktopScale, FeatureRequest, InputAction, InputInjector, PassthroughDevice, PointerButton,
+    TouchPoint,
 };
 
 use super::gamepad::VirtualGamepad;
@@ -240,8 +242,12 @@ pub(super) struct Translator {
     /// Where the absolute pointer was last moved, in 1/256 pixel, from which
     /// the motion of its next move is measured.
     last_position: Option<(i32, i32)>,
-    /// The motion of absolute moves not yet sent, in 1/256 count.
-    position_remainder: (i32, i32),
+    /// The motion of absolute moves not yet sent, in 1/256 count times the
+    /// desktop's scale in thousandths.
+    position_remainder: (i64, i64),
+    /// The captured monitor's interface scale: the desktop measures motion
+    /// in its own units, which are this many pixels.
+    desktop_scale: DesktopScale,
     /// The pointer buttons held, by their codes.
     held_buttons: Vec<u16>,
     /// Scrolling not yet sent as whole detents, in 1/120 detent.
@@ -281,8 +287,7 @@ impl Translator {
                             && (x - last_x).abs() <= MAX_MOTION_PIXELS * SUBUNITS
                             && (y - last_y).abs() <= MAX_MOTION_PIXELS * SUBUNITS =>
                     {
-                        let (dx, dy) =
-                            whole_counts(&mut self.position_remainder, x - last_x, y - last_y);
+                        let (dx, dy) = self.desktop_counts(x - last_x, y - last_y);
                         push_motion(&mut events, dx, dy);
                     }
                     _ => self.position_remainder = (0, 0),
@@ -347,6 +352,18 @@ impl Translator {
             }
         };
         Some(events)
+    }
+
+    /// Returns the whole counts of the desktop's units a move of `dx` and
+    /// `dy`, in 1/256 pixel, makes, keeping the fractions for the next.
+    fn desktop_counts(&mut self, dx: i32, dy: i32) -> (i32, i32) {
+        let per_count = i64::from(SUBUNITS) * i64::from(self.desktop_scale.thousandths());
+        let unit = i64::from(DesktopScale::UNIT);
+        let x = self.position_remainder.0 + i64::from(dx) * unit;
+        let y = self.position_remainder.1 + i64::from(dy) * unit;
+        self.position_remainder = (x % per_count, y % per_count);
+        let narrow = |counts: i64| i32::try_from(counts).unwrap_or(0);
+        (narrow(x / per_count), narrow(y / per_count))
     }
 
     /// Adds scrolling to the detent remainder and returns the whole detents.
@@ -785,6 +802,10 @@ impl InputInjector for UinputInjector {
         device.emit(&events).map_err(|error| error.to_string())
     }
 
+    fn set_desktop_scale(&mut self, scale: DesktopScale) {
+        self.translator.desktop_scale = scale;
+    }
+
     fn description(&self) -> &str {
         "uinput"
     }
@@ -1004,6 +1025,37 @@ mod tests {
                 .1,
             position(20 * pixel, 10 * pixel)
         );
+    }
+
+    /// A drag's motion is in the desktop's units: at 150 %, three pixels
+    /// make two, and the fractions carry over.
+    #[test]
+    fn measures_motion_in_desktop_units() {
+        let mut translator = Translator {
+            desktop_scale: DesktopScale::from_widths(3, 2).unwrap(),
+            ..Translator::default()
+        };
+        translator
+            .events(&InputAction::ButtonDown(PointerButton::Left))
+            .unwrap();
+        let mut motion = |x: i32| {
+            translator
+                .events(&InputAction::PointerMoveTo {
+                    x: x * SUBUNITS,
+                    y: 0,
+                })
+                .unwrap()
+                .1
+                .into_iter()
+                .filter(|event| event.kind == EV_REL)
+                .map(|event| event.value)
+                .sum::<i32>()
+        };
+        motion(0);
+        assert_eq!(motion(3), 2);
+        assert_eq!(motion(4), 0);
+        assert_eq!(motion(5), 1);
+        assert_eq!(motion(6), 1);
     }
 
     /// Relative motion and scrolling keep their fractions until they add up to

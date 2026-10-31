@@ -17,6 +17,7 @@ use qdp::message::{
 use tracing::debug;
 
 use crate::host_passthrough::{FeatureRequest, PassthroughDevice};
+use crate::media::DesktopScale;
 
 /// The buttons a pointer or mouse report can hold, in report bit order.
 const BUTTONS: [PointerButton; 5] = [
@@ -187,6 +188,10 @@ pub trait InputInjector: Send {
 
     /// Returns which injector this is, for logs.
     fn description(&self) -> &str;
+
+    /// Notes the captured monitor's interface scale, for injectors that
+    /// measure the pointer's motion in the desktop's own units.
+    fn set_desktop_scale(&mut self, _scale: DesktopScale) {}
 
     /// Returns the host's keyboard LED state, for the keyboard output report
     /// (Section 8.4.1).

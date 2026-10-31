@@ -80,9 +80,9 @@ pub use host_input::{
 pub use host_passthrough::{FeatureRequest, PassthroughDevice, PassthroughPolicy};
 pub use lock_keys::LockKeys;
 pub use media::{
-    CursorShape, CursorState, CursorWarp, DisplayTiming, FrameInfo, FrameSink, FrameSource,
-    PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl, TestPattern,
-    WarpKind, changed_blocks,
+    CursorShape, CursorState, CursorWarp, DesktopScale, DisplayTiming, FrameInfo, FrameSink,
+    FrameSource, PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl,
+    TestPattern, WarpKind, changed_blocks,
 };
 pub use resumption::{DEFAULT_RESUMPTION_LIFETIME, ResumptionSlot};
 

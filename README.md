@@ -138,8 +138,10 @@ one. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write
 access to `/dev/uinput`, and `/dev/uhid` for passed-through devices. While a
 button is held, its pointer reports the motion of each move along with the
-position, as a mouse does, so that games which follow the mouse's motion, as
-many do to drag their interface's elements, see the drag. To allow
+position, as a mouse does and in the desktop's own units at its interface
+scale, which the screen cast portal tells, so that games which follow the
+mouse's motion, as many do to drag their interface's elements, see the drag
+as far as the pointer goes. To allow
 both for members of the `input` group:
 
 ```bash

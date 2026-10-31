@@ -15,8 +15,9 @@ use qdp_codec::{EncoderSettings, TileCount, frame_rate_within, tile_count};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::host::{BIT_DEPTH, EncoderTuning, SCALE_PERCENT};
+use crate::host::{BIT_DEPTH, EncoderTuning};
 use crate::layout::VideoLayout;
+use crate::media::DesktopScale;
 use crate::stream_ids::StreamIds;
 
 /// The Monitor ID of the host's one monitor.
@@ -73,15 +74,19 @@ pub(crate) struct HostDisplay {
     plan: VideoPlan,
     /// The current configuration.
     config: DisplayConfig,
+    /// The captured monitor's interface scale.
+    scale: DesktopScale,
     /// The layouts of the latest configurations, oldest first.
     layouts: VecDeque<(DisplayConfigId, VideoLayout)>,
 }
 
 impl HostDisplay {
-    /// Plans the first configuration, for a `capture`-sized monitor and the
-    /// client's display request, if it sent one.
+    /// Plans the first configuration, for a `capture`-sized monitor at
+    /// interface scale `scale` and the client's display request, if it sent
+    /// one.
     pub(crate) fn new(
         capture: (usize, usize),
+        scale: DesktopScale,
         request: Option<DisplayRequest>,
         limits: VideoLimits,
         stream_ids: &mut StreamIds,
@@ -95,13 +100,14 @@ impl HostDisplay {
         let request_id = request
             .as_ref()
             .map_or(DisplayRequestId::NONE, |request| request.request_id);
-        let config = display_config(&plan, FIRST_CONFIG_ID, request_id, stream_ids.next());
+        let config = display_config(&plan, scale, FIRST_CONFIG_ID, request_id, stream_ids.next());
         Ok(Self {
             limits,
             request,
             plan,
             layouts: VecDeque::from([(config.config_id, plan.layout)]),
             config,
+            scale,
         })
     }
 
@@ -182,7 +188,7 @@ impl HostDisplay {
         };
         let next_id = self.config.config_id.0.into_inner() + 1;
         let config_id = DisplayConfigId(VarInt::new(next_id).unwrap_or(VarInt::MAX));
-        self.config = display_config(&plan, config_id, request_id, stream_id);
+        self.config = display_config(&plan, self.scale, config_id, request_id, stream_id);
         self.plan = plan;
         self.layouts.push_back((config_id, plan.layout));
         while self.layouts.len() > KEPT_LAYOUTS {
@@ -306,11 +312,12 @@ impl VideoPlan {
     }
 }
 
-/// Returns the configuration `config_id` of one monitor with one AV1 motion
-/// stream, `stream_id`, as `plan` describes it, answering the requests up
-/// to `request_id`.
+/// Returns the configuration `config_id` of one monitor at interface scale
+/// `scale` with one AV1 motion stream, `stream_id`, as `plan` describes it,
+/// answering the requests up to `request_id`.
 fn display_config(
     plan: &VideoPlan,
+    scale: DesktopScale,
     config_id: DisplayConfigId,
     request_id: DisplayRequestId,
     stream_id: StreamId,
@@ -328,7 +335,7 @@ fn display_config(
             width: varint(width),
             height: varint(height),
             refresh_rate: VarInt::from_u32(plan.refresh_millihertz),
-            scale: VarInt::from_u32(SCALE_PERCENT),
+            scale: VarInt::from_u32(scale.percent()),
         }],
         streams: vec![VideoStreamConfig {
             stream_id,
@@ -354,6 +361,7 @@ fn varint(value: usize) -> VarInt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::SCALE_PERCENT;
     use qdp::message::{Av1Profiles, ClientMonitor, NO_LEVEL_LIMIT, VideoCodecFlags};
 
     /// Returns a request for one display area.
@@ -405,11 +413,13 @@ mod tests {
         assert_eq!(plan.client_monitor_id, ClientMonitorId(VarInt::from_u32(7)));
         let config = display_config(
             &plan,
+            DesktopScale::from_widths(3840, 2560).unwrap(),
             FIRST_CONFIG_ID,
             area.request_id,
             StreamId(VarInt::from_u32(1)),
         );
         assert_eq!(config.monitors[0].width, VarInt::from_u32(1920));
+        assert_eq!(config.monitors[0].scale, VarInt::from_u32(150));
         assert_eq!(config.monitors[0].client_monitor_id, plan.client_monitor_id);
 
         let small_decoder =
@@ -444,6 +454,7 @@ mod tests {
         };
         let mut display = HostDisplay::new(
             (3840, 2160),
+            DesktopScale::UNSCALED,
             Some(request(1920, 1080, 60_000)),
             limits,
             &mut ids,

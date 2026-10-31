@@ -48,8 +48,9 @@ use crate::{HostAuthenticator, RuntimeError, close_on_error, is_normal_close};
 /// The bit depth of the streams this host sends.
 pub(crate) const BIT_DEPTH: u8 = 8;
 
-/// The interface scale the host reports, in percent, for its monitor and the
-/// cursor images drawn for it.
+/// The interface scale the host reports, in percent, for the cursor images it
+/// sends: they are at the captured monitor's pixel size, the size of its
+/// video, whatever the desktop's own scale (Section 9.2).
 pub(crate) const SCALE_PERCENT: u32 = 100;
 
 /// The most devices the host accepts at once: at least 16 (Section 8.2.4).
@@ -366,6 +367,8 @@ async fn serve_session(
         mut injector,
         lock,
     } = open().await?;
+    let desktop_scale = source.desktop_scale().unwrap_or_default();
+    injector.set_desktop_scale(desktop_scale);
     let worker = clipboard
         .map(|shared| ClipboardWorker::spawn(shared.clipboard))
         .transpose()
@@ -413,7 +416,13 @@ async fn serve_session(
             .map(|negotiated| negotiated.client_video),
     };
     let mut stream_ids = StreamIds::default();
-    let display = HostDisplay::new(source.size(), display_request, limits, &mut stream_ids)?;
+    let display = HostDisplay::new(
+        source.size(),
+        desktop_scale,
+        display_request,
+        limits,
+        &mut stream_ids,
+    )?;
     let clock = SessionClock::new(Instant::now());
     let mut audio = HostAudioStreams::new(audio);
     let quic = driver.connection().quic().clone();
@@ -468,6 +477,7 @@ async fn serve_session(
         width = plan.layout.video.0,
         height = plan.layout.video.1,
         refresh_millihertz = plan.refresh_millihertz,
+        scale_percent = desktop_scale.percent(),
         input = injector.description(),
         "session active"
     );
