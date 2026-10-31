@@ -106,7 +106,9 @@ fn scale_plane(
 }
 
 /// Scales the target rows `rows` of a plane `source_width` samples wide,
-/// whose columns cover `columns`, into `band`.
+/// whose columns cover `columns`, into `band`. Each target row first adds
+/// up, column by column, the source rows it covers, then adds up the
+/// columns each target sample covers.
 fn scale_rows(
     plane: &[u8],
     source_width: usize,
@@ -118,29 +120,29 @@ fn scale_rows(
     // as halving a plane gives, each covers the next run of that many.
     let run = source_width / columns.len();
     let uniform = run * columns.len() == source_width;
-    let mut sums = vec![0_u32; columns.len()];
+    let mut column_sums = vec![0_u32; source_width];
     for (row, target) in rows.iter().zip(band.chunks_exact_mut(columns.len())) {
-        sums.fill(0);
+        column_sums.fill(0);
         for line in plane
             .chunks_exact(source_width)
             .skip(row.start)
             .take(row.len())
         {
-            if uniform {
-                for (sum, samples) in sums.iter_mut().zip(line.chunks_exact(run)) {
-                    *sum += samples.iter().map(|&sample| u32::from(sample)).sum::<u32>();
-                }
-                continue;
-            }
-            for (sum, column) in sums.iter_mut().zip(columns) {
-                *sum += line[column.clone()]
-                    .iter()
-                    .map(|&sample| u32::from(sample))
-                    .sum::<u32>();
+            for (sum, &sample) in column_sums.iter_mut().zip(line) {
+                *sum += u32::from(sample);
             }
         }
-        for ((sample, sum), column) in target.iter_mut().zip(&sums).zip(columns) {
-            let count = (column.len() * row.len()) as u32;
+        let rows_covered = row.len() as u32;
+        if uniform {
+            let count = run as u32 * rows_covered;
+            for (sample, sums) in target.iter_mut().zip(column_sums.chunks_exact(run)) {
+                *sample = ((sums.iter().sum::<u32>() + count / 2) / count) as u8;
+            }
+            continue;
+        }
+        for (sample, column) in target.iter_mut().zip(columns) {
+            let count = column.len() as u32 * rows_covered;
+            let sum: u32 = column_sums[column.clone()].iter().sum();
             *sample = ((sum + count / 2) / count) as u8;
         }
     }
