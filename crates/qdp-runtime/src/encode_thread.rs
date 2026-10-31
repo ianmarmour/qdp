@@ -8,8 +8,11 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use qdp::message::{BlockGrid, BlockSet};
-use qdp_codec::{Av1Encoder, EncodedFrame, KeyFrameRequest, Yuv420Frame};
-use tokio::sync::Notify;
+use qdp_codec::{
+    EncodedFrame, EncoderPreference, EncoderSettings, KeyFrameRequest, VideoEncoder, Yuv420Frame,
+    open_encoder,
+};
+use tokio::sync::{Notify, oneshot};
 
 use crate::RuntimeError;
 use crate::media::{FrameSource, changed_blocks};
@@ -53,27 +56,47 @@ pub(crate) struct EncoderThread {
 }
 
 impl EncoderThread {
-    /// Starts the thread with a source and an encoder for frames divided into
-    /// `grid`.
-    pub(crate) fn spawn(
+    /// Starts the thread with a source, and an encoder opened as `preference`
+    /// asks, for frames divided into `grid`. Returns the thread and the
+    /// encoder's description.
+    ///
+    /// The encoder is opened on the thread itself, because hardware encoders
+    /// hold driver state that must stay on the thread that created it.
+    pub(crate) async fn spawn(
         source: Box<dyn FrameSource>,
-        encoder: Av1Encoder,
+        settings: EncoderSettings,
+        preference: EncoderPreference,
         grid: BlockGrid,
-    ) -> Result<Self, RuntimeError> {
+    ) -> Result<(Self, String), RuntimeError> {
         let (job_sender, jobs) = mpsc::channel();
         let (result_sender, results) = mpsc::channel();
+        let (opened_sender, opened) = oneshot::channel();
         let ready = Arc::new(Notify::new());
         let notify = Arc::clone(&ready);
         let handle = std::thread::Builder::new()
             .name(THREAD_NAME.to_owned())
-            .spawn(move || run(source, encoder, grid, &jobs, &result_sender, &notify))
+            .spawn(move || {
+                let encoder = match open_encoder(settings, preference) {
+                    Ok(encoder) => encoder,
+                    Err(error) => {
+                        let _ = opened_sender.send(Err(error));
+                        return;
+                    }
+                };
+                let _ = opened_sender.send(Ok(encoder.description().to_owned()));
+                run(source, encoder, grid, &jobs, &result_sender, &notify);
+            })
             .map_err(|error| RuntimeError::Capture(error.to_string()))?;
-        Ok(Self {
+        let thread = Self {
             jobs: Some(job_sender),
             results,
             ready,
             handle: Some(handle),
-        })
+        };
+        let description = opened
+            .await
+            .map_err(|_| RuntimeError::Capture("the encoder thread stopped".to_owned()))??;
+        Ok((thread, description))
     }
 
     /// Asks the thread to capture and encode a frame.
@@ -115,7 +138,7 @@ impl Drop for EncoderThread {
 /// the result channel is dropped.
 fn run(
     mut source: Box<dyn FrameSource>,
-    mut encoder: Av1Encoder,
+    mut encoder: Box<dyn VideoEncoder>,
     grid: BlockGrid,
     jobs: &Receiver<EncodeJob>,
     results: &Sender<Result<EncodedOutput, RuntimeError>>,
@@ -125,7 +148,7 @@ fn run(
     let mut next_input_index = 0;
     while let Ok(job) = jobs.recv() {
         let captured_at = Instant::now();
-        let outputs = encode_one(&mut *source, &mut encoder, job).map(|(frame, encoded)| {
+        let outputs = encode_one(&mut *source, &mut *encoder, job).map(|(frame, encoded)| {
             let input_index = next_input_index;
             next_input_index += 1;
             let changed = previous
@@ -171,7 +194,7 @@ fn run(
 /// Captures one frame and encodes it.
 fn encode_one(
     source: &mut dyn FrameSource,
-    encoder: &mut Av1Encoder,
+    encoder: &mut dyn VideoEncoder,
     job: EncodeJob,
 ) -> Result<(Yuv420Frame, Vec<EncodedFrame>), RuntimeError> {
     let frame = source.capture()?;
@@ -183,23 +206,29 @@ fn encode_one(
 mod tests {
     use super::*;
     use crate::TestPattern;
-    use qdp_codec::EncoderSettings;
 
     /// The thread encodes requested frames and reports changed blocks.
-    #[test]
-    fn encodes_requested_frames() {
+    #[tokio::test]
+    async fn encodes_requested_frames() {
         let (width, height) = (256, 128);
-        let encoder = Av1Encoder::new(EncoderSettings {
+        let settings = EncoderSettings {
             width,
             height,
+            frame_rate: 60,
             speed: 10,
             quantizer: 100,
             threads: 1,
-        })
-        .unwrap();
+        };
         let grid = BlockGrid::for_monitor(width as u32, height as u32);
-        let thread =
-            EncoderThread::spawn(Box::new(TestPattern::new(width, height)), encoder, grid).unwrap();
+        let (thread, description) = EncoderThread::spawn(
+            Box::new(TestPattern::new(width, height)),
+            settings,
+            EncoderPreference::Software,
+            grid,
+        )
+        .await
+        .unwrap();
+        assert_eq!(description, "rav1e (software)");
         let jobs = [
             EncodeJob {
                 request: KeyFrameRequest::Force,

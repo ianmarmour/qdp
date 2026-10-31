@@ -16,6 +16,7 @@ qdp.workspace = true
 rav1d.workspace = true
 rav1e.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

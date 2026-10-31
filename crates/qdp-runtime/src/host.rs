@@ -17,7 +17,7 @@ use qdp::session::{HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, VideoSender};
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{Av1Encoder, EncoderSettings, KeyFrameRequest};
+use qdp_codec::{EncoderPreference, EncoderSettings, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, TransportError};
 use tracing::{debug, info, warn};
 
@@ -62,6 +62,8 @@ const FAILURE_REASON: &str = "authentication failed";
 /// How the host encodes video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderTuning {
+    /// Whether to encode in hardware or software.
+    pub preference: EncoderPreference,
     /// rav1e's speed preset, from 0 to 10.
     pub speed: u8,
     /// The quantizer, from 0 (best) to 255.
@@ -229,17 +231,21 @@ pub async fn serve(
     driver.flush().await?;
     info!(width, height, "session active");
 
-    let encoder = Av1Encoder::new(EncoderSettings {
+    let settings = EncoderSettings {
         width,
         height,
+        frame_rate: options.frame_rate,
         speed: options.encoder.speed,
         quantizer: options.encoder.quantizer,
         threads: options.encoder.threads,
-    })?;
+    };
     let grid = BlockGrid::for_monitor(width as u32, height as u32);
+    let (encoder, description) =
+        EncoderThread::spawn(source, settings, options.encoder.preference, grid).await?;
+    info!(encoder = description, "encoding");
     let mut active = ActiveHost {
         driver,
-        encoder: EncoderThread::spawn(source, encoder, grid)?,
+        encoder,
         encoding: false,
         frames_requested: 0,
         sender: VideoSender::new(MOTION_STREAM_ID),

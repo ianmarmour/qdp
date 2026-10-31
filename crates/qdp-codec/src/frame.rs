@@ -109,6 +109,33 @@ impl Yuv420Frame {
         &mut self.v
     }
 
+    /// Returns the top-left `width × height` pixels of the frame, or the frame
+    /// itself if it is no larger. Hardware encoders may pad frames to their
+    /// alignment, which this removes (Section 6.4.1).
+    pub fn cropped(self, width: usize, height: usize) -> Self {
+        if width >= self.width && height >= self.height {
+            return self;
+        }
+        let (width, height) = (width.min(self.width), height.min(self.height));
+        let (chroma_width, chroma_height) = chroma_size(width, height);
+        let crop = |plane: &[u8], stride: usize, width: usize, height: usize| -> Vec<u8> {
+            plane
+                .chunks_exact(stride)
+                .take(height)
+                .flat_map(|row| &row[..width])
+                .copied()
+                .collect()
+        };
+        let source_chroma_width = self.chroma_width();
+        Self {
+            width,
+            height,
+            y: crop(&self.y, self.width, width, height),
+            u: crop(&self.u, source_chroma_width, chroma_width, chroma_height),
+            v: crop(&self.v, source_chroma_width, chroma_width, chroma_height),
+        }
+    }
+
     /// Returns the peak signal-to-noise ratio of the luma plane against
     /// `reference`, in decibels, or `None` if the sizes differ. Identical planes
     /// give infinity.
@@ -143,6 +170,21 @@ mod tests {
         assert_eq!((frame.chroma_width(), frame.chroma_height()), (3, 2));
         assert_eq!(frame.u().len(), 6);
         assert!(Yuv420Frame::from_planes(5, 3, vec![0; 15], vec![0; 6], vec![0; 5]).is_none());
+    }
+
+    /// Cropping keeps the top-left pixels of every plane.
+    #[test]
+    fn crops_padding() {
+        let y = (0..4 * 4).map(|value| value as u8).collect();
+        let u = vec![1, 2, 3, 4];
+        let v = vec![5, 6, 7, 8];
+        let frame = Yuv420Frame::from_planes(4, 4, y, u, v).unwrap();
+        assert_eq!(frame.clone().cropped(4, 4), frame);
+        let cropped = frame.cropped(2, 3);
+        assert_eq!((cropped.width(), cropped.height()), (2, 3));
+        assert_eq!(cropped.y(), [0, 1, 4, 5, 8, 9]);
+        assert_eq!(cropped.u(), [1, 3]);
+        assert_eq!(cropped.v(), [5, 7]);
     }
 
     /// Identical frames have infinite PSNR.

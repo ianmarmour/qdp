@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use qdp::auth::scram::ScramCredentials;
-use qdp_codec::Yuv420Frame;
+use qdp_codec::{EncoderPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
     ClientCredentials, ClientOptions, DisplaySize, EncoderTuning, FrameInfo, FrameSink,
@@ -84,6 +84,7 @@ fn start_host(
         authenticator,
         frame_rate: 60,
         encoder: EncoderTuning {
+            preference: EncoderPreference::Software,
             speed: 10,
             quantizer: 60,
             threads: 2,

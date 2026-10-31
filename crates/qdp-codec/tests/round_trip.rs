@@ -24,6 +24,9 @@ const HEIGHT: usize = 192;
 /// The quantizer of the test encoder: good quality, to make PSNR meaningful.
 const QUANTIZER: u8 = 60;
 
+/// The frame rate the encoder is told of.
+const FRAME_RATE: u32 = 60;
+
 /// The lowest acceptable luma PSNR of a decoded frame, in decibels.
 const MIN_PSNR: f64 = 30.0;
 
@@ -57,6 +60,7 @@ fn encoder() -> Av1Encoder {
     Av1Encoder::new(EncoderSettings {
         width: WIDTH,
         height: HEIGHT,
+        frame_rate: FRAME_RATE,
         speed: FASTEST_SPEED,
         quantizer: QUANTIZER,
         threads: 2,
