@@ -15,7 +15,7 @@ use std::time::Duration;
 use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Repeat, Replay, Ticks};
 use gilrs::{Axis, Button, EventType, Gamepad, GamepadId, Gilrs};
 use qdp::message::{DeviceFeatures, GamepadButtons, GamepadOutput, GamepadReport};
-use qdp_runtime::{DeviceFeedback, InputHandle, UserInput};
+use qdp_runtime::{GamepadFeedback, InputHandle, UserInput};
 use tracing::{debug, info, warn};
 
 /// The name of the thread watching the gamepads.
@@ -250,8 +250,7 @@ impl Watcher {
             }
         }
         while !stop.load(Ordering::Relaxed) {
-            while let Some(feedback) = self.input.try_feedback() {
-                let DeviceFeedback::Gamepad { slot, output } = feedback;
+            while let Some(GamepadFeedback { slot, output }) = self.input.try_gamepad_feedback() {
                 self.rumble(slot, output);
             }
             let Some(event) = self.gilrs.next_event_blocking(Some(POLL_INTERVAL)) else {

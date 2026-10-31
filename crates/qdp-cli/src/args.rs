@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use qdp_codec::CodecPreference;
 use qdp_desktop::Microphone;
 use qdp_quic::KeyPin;
-use qdp_runtime::ClipboardDirections;
+use qdp_runtime::{ClipboardDirections, PassthroughPolicy};
 
 /// The usage text printed by `qdp help` and on errors.
 pub const USAGE: &str = "\
@@ -36,6 +36,10 @@ Serve options:
   --audio on|off       Stream this machine's sound, and present clients'
                        microphones to its applications where the platform
                        allows (default on)
+  --passthrough WHICH  games, all or off: which HID devices clients may pass
+                       through to this machine's applications (default games,
+                       game controllers only; all includes keyboards, mice
+                       and security keys)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -136,6 +140,8 @@ pub struct ServeArgs {
     pub clipboard: Option<ClipboardDirections>,
     /// Whether to stream sound.
     pub audio: Audio,
+    /// Which HID devices clients may pass through.
+    pub passthrough: PassthroughPolicy,
 }
 
 /// Whether a session carries sound.
@@ -308,6 +314,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         quantizer: DEFAULT_QUANTIZER,
         clipboard: Some(ClipboardDirections::Both),
         audio: Audio::On,
+        passthrough: PassthroughPolicy::GameControllers,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -338,6 +345,9 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                 serve.clipboard = parse_clipboard(&value("--clipboard", &mut arguments)?)?
             }
             "--audio" => serve.audio = parse_audio(&value("--audio", &mut arguments)?)?,
+            "--passthrough" => {
+                serve.passthrough = parse_passthrough(&value("--passthrough", &mut arguments)?)?;
+            }
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
@@ -358,6 +368,18 @@ fn parse_audio(text: &str) -> Result<Audio, ArgsError> {
         "on" => Ok(Audio::On),
         "off" => Ok(Audio::Off),
         other => Err(error(format!("--audio must be on or off, not {other}"))),
+    }
+}
+
+/// Parses the value of `--passthrough`.
+fn parse_passthrough(text: &str) -> Result<PassthroughPolicy, ArgsError> {
+    match text {
+        "games" => Ok(PassthroughPolicy::GameControllers),
+        "all" => Ok(PassthroughPolicy::Any),
+        "off" => Ok(PassthroughPolicy::Off),
+        other => Err(error(format!(
+            "--passthrough must be games, all or off, not {other}"
+        ))),
     }
 }
 
@@ -477,6 +499,13 @@ mod tests {
         };
         assert_eq!(serve.clipboard, Some(ClipboardDirections::ReceiveOnly));
         assert!(parse_line("serve --token abc --clipboard sideways").is_err());
+        assert_eq!(serve.passthrough, PassthroughPolicy::GameControllers);
+        let Command::Serve(serve) = parse_line("serve --token abc --passthrough off").unwrap()
+        else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.passthrough, PassthroughPolicy::Off);
+        assert!(parse_line("serve --token abc --passthrough keyboards").is_err());
         assert_eq!(serve.audio, Audio::On);
         let Command::Serve(serve) = parse_line("serve --token abc --audio off").unwrap() else {
             panic!("expected serve");

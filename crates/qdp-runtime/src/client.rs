@@ -10,9 +10,10 @@ use qdp::message::{
     Av1Profiles, Capability, ClientHello, ClientMonitor, ClientMonitorFlags, ClientMonitorId,
     ControlMessage, CursorImage, Datagram, DatagramPayload, DeviceAttach, DeviceDetach,
     DeviceFeatures, DeviceId, DeviceKind, DeviceOutput, DeviceStatusCode, DisplayConfig,
-    DisplayRequest, DisplayRequestId, FeedbackRecord, GamepadOutput, InputClasses, KeyboardInfo,
-    KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader, StreamId,
-    VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer, WarpFlags,
+    DisplayRequest, DisplayRequestId, FeatureStatus, FeedbackRecord, GamepadOutput,
+    HidFeatureRequest, HidFeatureResponse, InputClasses, KeyboardInfo, KeyframeRequest,
+    MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader, StreamId, VideoCodec,
+    VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer, WarpFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, Negotiated};
@@ -29,9 +30,10 @@ use crate::audio::{ClientAudio, ClientAudioStreams};
 use crate::auth::ClientAuthExchange;
 use crate::client_cursor::{ClientCursor, CursorChange};
 use crate::client_input::{
-    ClientDevices, DeviceFeedback, InputQueue, KEYBOARD_ID, MOUSE_ID, PEN_ID, POINTER_ID, TEXT_ID,
-    TOUCHSCREEN_ID, UserInput,
+    ClientDevices, GamepadFeedback, InputQueue, KEYBOARD_ID, MOUSE_ID, PEN_ID, POINTER_ID,
+    PassthroughFeedback, TEXT_ID, TOUCHSCREEN_ID, UserInput,
 };
+use crate::client_passthrough::HidOutputs;
 use crate::clipboard::{
     self, ClipboardDirections, ClipboardLink, ClipboardOutput, ClipboardWorker, SharedClipboard,
     Side,
@@ -160,6 +162,7 @@ fn input_classes() -> InputClasses {
         .union(InputClasses::TOUCHSCREEN)
         .union(InputClasses::PEN)
         .union(InputClasses::GAMEPAD)
+        .union(InputClasses::PASSTHROUGH)
 }
 
 /// Returns whether a session that negotiated `negotiated` can use devices
@@ -305,6 +308,8 @@ struct ActiveClient<'a> {
     output_sequences: HashMap<DeviceId, u64>,
     /// When each rumbling gamepad's output last arrived.
     rumbling: HashMap<DeviceId, Instant>,
+    /// The output reports arriving for passthrough devices.
+    hid_outputs: HidOutputs,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
@@ -407,6 +412,7 @@ pub async fn run(
         audio: ClientAudioStreams::new(audio),
         output_sequences: HashMap::new(),
         rumbling: HashMap::new(),
+        hid_outputs: HidOutputs::default(),
         cursor: ClientCursor::default(),
         monitor_origin: (0.0, 0.0),
         clipboard,
@@ -425,8 +431,8 @@ pub async fn run(
 }
 
 /// Returns what the client does with a stream the host opened (Section
-/// 3.5.2), given the clipboard data the client accepts. The client attaches
-/// no passthrough devices yet, so it expects no HID output.
+/// 3.5.2), given the clipboard data the client accepts. Passthrough devices'
+/// output streams are followed as their reports arrive.
 fn host_stream_policy(header: &StreamHeader, clipboard_limit: Option<usize>) -> StreamPolicy {
     match header {
         StreamHeader::CursorImage => StreamPolicy::Read(StreamLimit {
@@ -434,7 +440,7 @@ fn host_stream_policy(header: &StreamHeader, clipboard_limit: Option<usize>) -> 
             overflow: ErrorCode::PROTOCOL_VIOLATION,
         }),
         StreamHeader::ClipboardData { .. } => clipboard::data_stream_policy(clipboard_limit),
-        StreamHeader::HidOutput { .. } => StreamPolicy::Refuse(ErrorCode::REQUEST_CANCELLED),
+        StreamHeader::HidOutput { .. } => StreamPolicy::Follow,
         StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
     }
 }
@@ -493,7 +499,7 @@ impl ActiveClient<'_> {
         } else {
             self.rumbling.remove(&output.device_id);
         }
-        queue.send_feedback(DeviceFeedback::Gamepad {
+        queue.send_gamepad_feedback(GamepadFeedback {
             slot,
             output: gamepad,
         });
@@ -513,12 +519,49 @@ impl ActiveClient<'_> {
             if let (Some(slot), Some(queue)) =
                 (self.devices.gamepad_slot(device_id), &self.input_queue)
             {
-                queue.send_feedback(DeviceFeedback::Gamepad {
+                queue.send_gamepad_feedback(GamepadFeedback {
                     slot,
                     output: GamepadOutput::default(),
                 });
             }
         }
+    }
+
+    /// Passes the output reports on a passthrough device's stream to the
+    /// device (Section 8.8.2).
+    fn handle_output_chunk(&mut self, chunk: qdp_quic::StreamChunk) {
+        let Some(queue) = &self.input_queue else {
+            return;
+        };
+        for (device_id, report) in self.hid_outputs.chunk(chunk) {
+            if let Some(slot) = self.devices.passthrough_slot(device_id) {
+                queue.send_passthrough_feedback(PassthroughFeedback::Output { slot, report });
+            }
+        }
+    }
+
+    /// Passes a feature report request to its passthrough device, or fails
+    /// it at once for a device the client does not have (Section 8.8.3).
+    fn handle_feature_request(&mut self, request: HidFeatureRequest) -> Result<(), RuntimeError> {
+        let slot = self.devices.passthrough_slot(request.device_id);
+        if let (Some(slot), Some(queue)) = (slot, &self.input_queue) {
+            queue.send_passthrough_feedback(PassthroughFeedback::FeatureRequest {
+                slot,
+                request_id: request.request_id,
+                operation: request.operation,
+                report: request.report_data,
+            });
+            return Ok(());
+        }
+        let failed = HidFeatureResponse {
+            request_id: request.request_id,
+            status: FeatureStatus::Failed,
+            report_data: Vec::new(),
+        };
+        self.driver
+            .session()
+            .send(&ControlMessage::HidFeatureResponse(failed))?;
+        Ok(())
     }
 
     /// Acts on a unidirectional stream from the host.
@@ -561,16 +604,27 @@ impl ActiveClient<'_> {
                         .devices
                         .gamepad_slot(status.device_id)
                         .map(|_| DeviceClass::Standard);
-                    if let Some(class) = device_class(status.device_id).or(gamepad) {
+                    let passthrough = self
+                        .devices
+                        .passthrough_slot(status.device_id)
+                        .map(|_| DeviceClass::Passthrough);
+                    if let Some(class) = device_class(status.device_id).or(gamepad).or(passthrough)
+                    {
                         self.input.add_device(status.device_id, class);
                     }
-                    if let Some(report) = self.devices.gamepad_state(status.device_id) {
+                    let now = Instant::now();
+                    let held = self
+                        .devices
+                        .gamepad_state(status.device_id)
+                        .into_iter()
+                        .chain(self.devices.passthrough_state(status.device_id));
+                    for report in held {
                         self.input.push(
                             report.device_id,
                             report.data,
                             report.kind,
                             report.rest,
-                            Instant::now(),
+                            now,
                         );
                     }
                 } else {
@@ -599,6 +653,7 @@ impl ActiveClient<'_> {
                     show_cursor(self.sink, change);
                 }
             }
+            ControlMessage::HidFeatureRequest(request) => self.handle_feature_request(request)?,
             ControlMessage::CursorWarp(warp) => {
                 let coordinate = |value: SignedVarInt| value.into_inner() as f64 / SUBUNITS;
                 let kind = if warp.flags.contains(WarpFlags::FOLLOW) {
@@ -707,8 +762,7 @@ impl ActiveClient<'_> {
                 Ok(DriverInput::Event(_) | DriverInput::Deadline | DriverInput::Wake) => {}
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(datagram)?,
                 Ok(DriverInput::Stream(stream)) => self.handle_stream(stream)?,
-                // No stream is followed yet.
-                Ok(DriverInput::StreamChunk(_)) => {}
+                Ok(DriverInput::StreamChunk(chunk)) => self.handle_output_chunk(chunk),
                 Err(error) if crate::is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
             }
@@ -767,6 +821,41 @@ impl ActiveClient<'_> {
                                 .session()
                                 .send(&ControlMessage::DeviceDetach(DeviceDetach { device_id }))?;
                         }
+                    }
+                    UserInput::PassthroughConnected { .. }
+                        if !supports_kind(
+                            self.driver.session().negotiated(),
+                            DeviceKind::PASSTHROUGH,
+                        ) =>
+                    {
+                        debug!("the host does not take passthrough devices");
+                    }
+                    UserInput::PassthroughConnected { slot, name, info } => {
+                        let attach = self.devices.connect_passthrough(slot, name, info);
+                        self.driver
+                            .session()
+                            .send(&ControlMessage::DeviceAttach(attach))?;
+                    }
+                    UserInput::PassthroughDisconnected { slot } => {
+                        if let Some(device_id) = self.devices.disconnect_passthrough(slot) {
+                            self.input.remove_device(device_id);
+                            self.driver
+                                .session()
+                                .send(&ControlMessage::DeviceDetach(DeviceDetach { device_id }))?;
+                        }
+                    }
+                    UserInput::FeatureResponse {
+                        request_id,
+                        status,
+                        report,
+                    } => {
+                        self.driver
+                            .session()
+                            .send(&ControlMessage::HidFeatureResponse(HidFeatureResponse {
+                                request_id,
+                                status,
+                                report_data: report,
+                            }))?;
                     }
                     action => {
                         for report in self.devices.reports(action) {

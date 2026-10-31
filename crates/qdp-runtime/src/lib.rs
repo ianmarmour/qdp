@@ -26,6 +26,7 @@ mod auth;
 mod client;
 mod client_cursor;
 mod client_input;
+mod client_passthrough;
 mod client_touch;
 mod clipboard;
 mod encode_thread;
@@ -33,6 +34,7 @@ mod host;
 mod host_cursor;
 mod host_input;
 mod host_output;
+mod host_passthrough;
 mod media;
 mod send_stats;
 
@@ -50,11 +52,13 @@ pub use audio::{
 pub use auth::{ClientCredentials, HostAuthenticator};
 pub use client::{ClientOptions, ClientSummary, DisplaySize, run};
 pub use client_input::{
-    DeviceFeedback, InputHandle, InputQueue, PenInput, UserInput, input_channel,
+    GamepadFeedback, InputHandle, InputQueue, PassthroughFeedback, PenInput, UserInput,
+    input_channel,
 };
 pub use clipboard::{Clipboard, ClipboardDirections, SharedClipboard};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
 pub use host_input::{InputAction, InputInjector, NoInput, PointerButton, TouchPhase, TouchPoint};
+pub use host_passthrough::{FeatureRequest, PassthroughDevice, PassthroughPolicy};
 pub use media::{
     CursorShape, CursorState, CursorWarp, FrameInfo, FrameSink, FrameSource, SinkControl,
     TestPattern, WarpKind, changed_blocks,
