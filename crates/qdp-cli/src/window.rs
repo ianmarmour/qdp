@@ -11,21 +11,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use qdp_codec::Yuv420Frame;
-use qdp_runtime::{FrameInfo, FrameSink, SinkControl};
+use qdp_runtime::{FrameInfo, FrameSink, InputHandle, PointerButton, SinkControl, UserInput};
 use softbuffer::{Context, Surface};
 use tokio::sync::Notify;
 use tracing::warn;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-use crate::color::{RgbFrame, scale_into, yuv420_to_rgb};
+use crate::color::{Placement, RgbFrame, scale_into, yuv420_to_rgb};
+use crate::keymap::{HidKey, hid_key};
 use crate::sink::CliSink;
 
 /// The window's initial size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(1280.0, 720.0);
+
+/// Scroll units, 1/120 of a detent, per line of scrolling (Section 8.4.2).
+const UNITS_PER_LINE: f64 = 120.0;
+
+/// Scroll units per logical pixel of precise scrolling, as from a touchpad
+/// (Section 8.4.2).
+const UNITS_PER_PIXEL: f64 = 3.0;
 
 /// What the session thread tells the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,11 +153,20 @@ pub struct WindowApp {
     close: Arc<CloseSignal>,
     /// Why the window could not be shown, if it could not.
     error: Option<String>,
+    /// Sends the user's input to the session.
+    input: InputHandle,
+    /// Scrolling not yet sent, below one unit.
+    scroll_remainder: (f64, f64),
 }
 
 impl WindowApp {
     /// Creates the application.
-    pub fn new(title: String, slot: FrameSlot, close: Arc<CloseSignal>) -> Self {
+    pub fn new(
+        title: String,
+        slot: FrameSlot,
+        close: Arc<CloseSignal>,
+        input: InputHandle,
+    ) -> Self {
         Self {
             title,
             display: None,
@@ -156,6 +174,92 @@ impl WindowApp {
             current: None,
             close,
             error: None,
+            input,
+            scroll_remainder: (0.0, 0.0),
+        }
+    }
+
+    /// Sends a key press or release; key repeats are the host's to generate.
+    fn key(&self, event: &KeyEvent) {
+        if event.repeat {
+            return;
+        }
+        let PhysicalKey::Code(code) = event.physical_key else {
+            return;
+        };
+        let pressed = event.state == ElementState::Pressed;
+        let input = match hid_key(code) {
+            Some(HidKey::Keyboard(usage)) => UserInput::Key { usage, pressed },
+            Some(HidKey::Consumer(usage)) => UserInput::ConsumerKey { usage, pressed },
+            None => return,
+        };
+        self.input.send(input);
+    }
+
+    /// Sends the pointer's position on the monitor, if it is over the picture.
+    fn pointer_moved(&self, position: PhysicalPosition<f64>) {
+        let (Some(display), Some(frame)) = (&self.display, &self.current) else {
+            return;
+        };
+        let size = display.window.inner_size();
+        let Some(placement) = Placement::fit(
+            frame.width,
+            frame.height,
+            size.width as usize,
+            size.height as usize,
+        ) else {
+            return;
+        };
+        let (x, y) = placement.to_frame(position.x, position.y, frame.width, frame.height);
+        self.input.send(UserInput::PointerMoved { x, y });
+    }
+
+    /// Sends a button press or release.
+    fn button(&self, button: MouseButton, state: ElementState) {
+        let button = match button {
+            MouseButton::Left => PointerButton::Left,
+            MouseButton::Right => PointerButton::Right,
+            MouseButton::Middle => PointerButton::Middle,
+            MouseButton::Back => PointerButton::Back,
+            MouseButton::Forward => PointerButton::Forward,
+            MouseButton::Other(_) => return,
+        };
+        self.input.send(UserInput::Button {
+            button,
+            pressed: state == ElementState::Pressed,
+        });
+    }
+
+    /// Sends scrolling, in 1/120 of a detent. The window system's deltas
+    /// already follow the user's scrolling direction preference.
+    fn scroll(&mut self, delta: MouseScrollDelta) {
+        let (horizontal, vertical) = match delta {
+            // Positive deltas move the content right and down: scrolling left
+            // and up, away from the user.
+            MouseScrollDelta::LineDelta(x, y) => (
+                -f64::from(x) * UNITS_PER_LINE,
+                f64::from(y) * UNITS_PER_LINE,
+            ),
+            MouseScrollDelta::PixelDelta(position) => {
+                let scale = self
+                    .display
+                    .as_ref()
+                    .map_or(1.0, |display| display.window.scale_factor());
+                (
+                    -position.x / scale * UNITS_PER_PIXEL,
+                    position.y / scale * UNITS_PER_PIXEL,
+                )
+            }
+        };
+        let horizontal = self.scroll_remainder.0 + horizontal;
+        let vertical = self.scroll_remainder.1 + vertical;
+        let (whole_horizontal, whole_vertical) = (horizontal.trunc(), vertical.trunc());
+        self.scroll_remainder = (horizontal - whole_horizontal, vertical - whole_vertical);
+        if whole_horizontal != 0.0 || whole_vertical != 0.0 {
+            self.input.send(UserInput::Scroll {
+                vertical: whole_vertical as i32,
+                horizontal: whole_horizontal as i32,
+            });
         }
     }
 
@@ -266,6 +370,13 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             }
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(_) => self.request_redraw(),
+            WindowEvent::KeyboardInput { event, .. } => self.key(&event),
+            WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
+            WindowEvent::MouseInput { state, button, .. } => self.button(button, state),
+            WindowEvent::MouseWheel { delta, .. } => self.scroll(delta),
+            WindowEvent::Focused(false) => {
+                self.input.send(UserInput::ReleaseAll);
+            }
             _ => {}
         }
     }

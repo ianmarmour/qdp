@@ -76,37 +76,83 @@ pub fn yuv420_to_rgb(frame: &Yuv420Frame) -> RgbFrame {
     }
 }
 
+/// Where a scaled picture sits in a window: centred, with its aspect ratio
+/// kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    /// The picture's left edge in the window, in pixels.
+    pub left: usize,
+    /// The picture's top edge.
+    pub top: usize,
+    /// The picture's width in the window.
+    pub width: usize,
+    /// The picture's height in the window.
+    pub height: usize,
+}
+
+impl Placement {
+    /// Returns where a `frame_width × frame_height` picture is drawn in a
+    /// `target_width × target_height` window, or `None` if either is empty.
+    pub fn fit(
+        frame_width: usize,
+        frame_height: usize,
+        target_width: usize,
+        target_height: usize,
+    ) -> Option<Self> {
+        if frame_width == 0 || frame_height == 0 || target_width == 0 || target_height == 0 {
+            return None;
+        }
+        // Fit by the dimension that limits: compare the aspect ratios by
+        // cross-multiplying.
+        let (width, height) = if target_width * frame_height <= target_height * frame_width {
+            (
+                target_width,
+                (frame_height * target_width / frame_width).max(1),
+            )
+        } else {
+            (
+                (frame_width * target_height / frame_height).max(1),
+                target_height,
+            )
+        };
+        Some(Self {
+            left: (target_width - width) / 2,
+            top: (target_height - height) / 2,
+            width,
+            height,
+        })
+    }
+
+    /// Converts a window position to a position in the picture's pixels,
+    /// clamped to the picture.
+    pub fn to_frame(self, x: f64, y: f64, frame_width: usize, frame_height: usize) -> (f64, f64) {
+        let scale = |position: f64, start: usize, size: usize, frame: usize| {
+            let frame = frame as f64;
+            ((position - start as f64) * frame / size as f64).clamp(0.0, (frame - 1.0).max(0.0))
+        };
+        (
+            scale(x, self.left, self.width, frame_width),
+            scale(y, self.top, self.height, frame_height),
+        )
+    }
+}
+
 /// Draws `frame` into a `target_width × target_height` buffer, scaled to fit
 /// with its aspect ratio kept and black bars around it.
 pub fn scale_into(frame: &RgbFrame, target: &mut [u32], target_width: usize, target_height: usize) {
     target.fill(0);
-    if frame.width == 0 || frame.height == 0 || target_width == 0 || target_height == 0 {
+    let Some(placement) = Placement::fit(frame.width, frame.height, target_width, target_height)
+    else {
         return;
-    }
-    // Fit by the dimension that limits: compare the aspect ratios by
-    // cross-multiplying.
-    let (scaled_width, scaled_height) =
-        if target_width * frame.height <= target_height * frame.width {
-            (
-                target_width,
-                (frame.height * target_width / frame.width).max(1),
-            )
-        } else {
-            (
-                (frame.width * target_height / frame.height).max(1),
-                target_height,
-            )
-        };
-    let left = (target_width - scaled_width) / 2;
-    let top = (target_height - scaled_height) / 2;
-    let source_columns: Vec<usize> = (0..scaled_width)
-        .map(|column| column * frame.width / scaled_width)
+    };
+    let source_columns: Vec<usize> = (0..placement.width)
+        .map(|column| column * frame.width / placement.width)
         .collect();
-    for row in 0..scaled_height {
-        let source_row = row * frame.height / scaled_height;
+    for row in 0..placement.height {
+        let source_row = row * frame.height / placement.height;
         let source = &frame.pixels[source_row * frame.width..(source_row + 1) * frame.width];
-        let start = (top + row) * target_width + left;
-        let destination = &mut target[start..start + scaled_width];
+        let start = (placement.top + row) * target_width + placement.left;
+        let destination = &mut target[start..start + placement.width];
         for (pixel, &column) in destination.iter_mut().zip(&source_columns) {
             *pixel = source[column];
         }
@@ -174,6 +220,29 @@ mod tests {
             [0x00ff_0000, 0x00ff_0000, 0x0000_00ff, 0x0000_00ff]
         );
         assert_eq!(&target[12..16], [0; 4]);
+    }
+
+    /// Window positions map back to picture pixels, clamped to the picture.
+    #[test]
+    fn maps_window_positions() {
+        // A 1280 × 720 picture in a 1000 × 1000 window: 1000 × 562, 219 down.
+        let placement = Placement::fit(1280, 720, 1000, 1000).unwrap();
+        assert_eq!(
+            (
+                placement.left,
+                placement.top,
+                placement.width,
+                placement.height
+            ),
+            (0, 219, 1000, 562)
+        );
+        let (x, y) = placement.to_frame(500.0, 219.0 + 281.0, 1280, 720);
+        assert!(
+            (x - 640.0).abs() < 0.01 && (y - 360.0).abs() < 1.0,
+            "{x} {y}"
+        );
+        assert_eq!(placement.to_frame(-5.0, 2000.0, 1280, 720), (0.0, 719.0));
+        assert_eq!(Placement::fit(0, 10, 10, 10), None);
     }
 
     /// Empty sizes leave a black buffer and do not panic.
