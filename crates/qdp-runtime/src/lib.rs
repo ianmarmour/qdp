@@ -38,6 +38,7 @@ mod host_output;
 mod host_passthrough;
 mod media;
 mod send_stats;
+mod stream_format;
 
 use qdp::auth::scram::ScramError;
 use qdp::registry::ErrorCode;

@@ -28,11 +28,11 @@ use self::ffi::{
 use crate::headers::{
     ALL_REFERENCE_SLOTS, CDEF_DAMPING_MINUS_3, FrameHeader, FrameKind, INTERPOLATION_EIGHTTAP,
     ORDER_HINT_BITS, PREVIOUS_FRAME_SLOT, PRIMARY_REF_LAST, PRIMARY_REF_NONE, REFS_PER_FRAME,
-    StreamFormat, TileLayout, TxMode, frame_header_obu, level_for, sequence_header_obu,
+    StreamFormat, TileLayout, TxMode, frame_header_obu, sequence_header_obu,
 };
 use crate::{
     CodecError, EncodedFrame, EncoderSettings, KeyFrameRequest, VideoEncoder, Yuv420Frame,
-    tile_count, to_qdp_temporal_unit,
+    level_for, tile_count, to_qdp_temporal_unit,
 };
 
 /// The directory of the GPUs' device nodes.
@@ -379,7 +379,12 @@ impl VaapiEncoder {
         let format = StreamFormat {
             width,
             height,
-            level: level_for(width, height, settings.frame_rate, &tiles),
+            level: level_for(
+                width,
+                height,
+                settings.frame_rate,
+                tiles.count_and_columns(),
+            ),
         };
         let description = format!(
             "VA-API on {} ({})",

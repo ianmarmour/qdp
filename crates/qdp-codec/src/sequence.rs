@@ -95,8 +95,28 @@ pub struct SequenceHeader {
     pub max_width: u32,
     /// The tallest frame, in luma samples.
     pub max_height: u32,
+    /// The colour primaries, transfer characteristics and matrix, if the
+    /// header describes them (`color_description_present_flag`).
+    pub color_description: Option<ColorDescription>,
+    /// Whether samples use the full range rather than the limited one.
+    pub full_range: bool,
+    /// Whether super-resolution may be used (`enable_superres`).
+    pub superres: bool,
+    /// Whether frames may carry film grain (`film_grain_params_present`).
+    pub film_grain: bool,
     /// The whole sequence header OBU.
     obu: Vec<u8>,
+}
+
+/// The colour code points of a stream, from H.273.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ColorDescription {
+    /// `color_primaries`.
+    pub primaries: u8,
+    /// `transfer_characteristics`.
+    pub transfer: u8,
+    /// `matrix_coefficients`.
+    pub matrix: u8,
 }
 
 impl SequenceHeader {
@@ -173,10 +193,11 @@ impl SequenceHeader {
                 reader.bits(3)?; // order_hint_bits_minus_1
             }
         }
-        reader.bit()?; // enable_superres
+        let superres = reader.bit()?;
         reader.bit()?; // enable_cdef
         reader.bit()?; // enable_restoration
         let color = ColorConfig::parse(&mut reader, profile)?;
+        let film_grain = reader.bit()?;
         Ok(Self {
             profile: profile as u8,
             level: level as u8,
@@ -188,6 +209,10 @@ impl SequenceHeader {
             chroma_sample_position: color.chroma_sample_position,
             max_width: max_width as u32,
             max_height: max_height as u32,
+            color_description: color.description,
+            full_range: color.full_range,
+            superres,
+            film_grain,
             obu,
         })
     }
@@ -276,6 +301,10 @@ struct ColorConfig {
     subsampling_y: bool,
     /// `chroma_sample_position`.
     chroma_sample_position: u8,
+    /// The colour code points, if described.
+    description: Option<ColorDescription>,
+    /// Whether samples use the full range.
+    full_range: bool,
 }
 
 impl ColorConfig {
@@ -290,27 +319,45 @@ impl ColorConfig {
             8
         };
         let monochrome = profile != 1 && reader.bit()?;
-        let (primaries, transfer, matrix) = if reader.bit()? {
-            (reader.bits(8)?, reader.bits(8)?, reader.bits(8)?)
+        let description = if reader.bit()? {
+            Some(ColorDescription {
+                primaries: reader.bits(8)? as u8,
+                transfer: reader.bits(8)? as u8,
+                matrix: reader.bits(8)? as u8,
+            })
         } else {
-            (COLOR_UNSPECIFIED, COLOR_UNSPECIFIED, COLOR_UNSPECIFIED)
+            None
         };
+        let (primaries, transfer, matrix) = description.map_or(
+            (COLOR_UNSPECIFIED, COLOR_UNSPECIFIED, COLOR_UNSPECIFIED),
+            |description| {
+                (
+                    u64::from(description.primaries),
+                    u64::from(description.transfer),
+                    u64::from(description.matrix),
+                )
+            },
+        );
         let mut config = Self {
             bit_depth,
             monochrome,
             subsampling_x: true,
             subsampling_y: true,
             chroma_sample_position: 0,
+            description,
+            full_range: false,
         };
         if monochrome {
-            reader.bit()?; // color_range
+            config.full_range = reader.bit()?; // color_range
             return Ok(config);
         }
         if primaries == PRIMARIES_BT709 && transfer == TRANSFER_SRGB && matrix == MATRIX_IDENTITY {
+            // RGB is always full range.
             config.subsampling_x = false;
             config.subsampling_y = false;
+            config.full_range = true;
         } else {
-            reader.bit()?; // color_range
+            config.full_range = reader.bit()?; // color_range
             match profile {
                 0 => {}
                 1 => {
@@ -327,6 +374,7 @@ impl ColorConfig {
                 config.chroma_sample_position = reader.bits(2)? as u8;
             }
         }
+        reader.bit()?; // separate_uv_delta_q
         Ok(config)
     }
 }
@@ -350,6 +398,15 @@ mod tests {
         assert_eq!((header.max_width, header.max_height), (1920, 1080));
         assert_eq!(header.bit_depth, 8);
         assert!(!header.monochrome && header.subsampling_x && header.subsampling_y);
+        assert_eq!(
+            header.color_description,
+            Some(ColorDescription {
+                primaries: 1,
+                transfer: 13,
+                matrix: 1,
+            })
+        );
+        assert!(!header.full_range && !header.superres && !header.film_grain);
         assert_eq!(header.obu(), SEQUENCE_HEADER_1080P);
     }
 
