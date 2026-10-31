@@ -146,7 +146,7 @@ pub struct DesktopDuplication {
     /// The pointer, which the client draws (Section 9.1).
     pointer: Pointer,
     /// The newest frame, or `None` if the desktop changed since.
-    frame: Option<Yuv420Frame>,
+    frame: Option<Arc<Yuv420Frame>>,
 }
 
 impl std::fmt::Debug for DesktopDuplication {
@@ -429,7 +429,7 @@ impl FrameSource for DesktopDuplication {
         self.size
     }
 
-    fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError> {
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
         self.acquire(0).map_err(RuntimeError::Capture)?;
         // A display that changes mode is duplicated again at its new size,
         // which the host follows with a new stream.
@@ -442,7 +442,8 @@ impl FrameSource for DesktopDuplication {
                 desktop.stride(),
                 Rgb32Order::Bgr,
                 &desktop.data,
-            );
+            )
+            .map(Arc::new);
         }
         self.frame
             .clone()

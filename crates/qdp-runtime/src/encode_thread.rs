@@ -168,7 +168,8 @@ fn run(
     ready: &Notify,
 ) {
     let mut stream = None;
-    let mut previous: Option<Yuv420Frame> = None;
+    let mut previous: Option<Arc<Yuv420Frame>> = None;
+    let mut last_capture = None;
     let mut next_input_index = 0;
     while let Ok(job) = jobs.recv() {
         if stream != Some(job.stream_id) {
@@ -179,40 +180,45 @@ fn run(
         }
         let grid = BlockGrid::for_monitor(job.settings.width as u32, job.settings.height as u32);
         let captured_at = Instant::now();
-        let outputs = encode_one(&mut *source, &mut opened, preference, job).map(
-            |(frame, capture_size, cursor, encoded)| {
-                let input_index = next_input_index;
-                next_input_index += 1;
-                let changed = previous
-                    .as_ref()
-                    .map(|previous| changed_blocks(previous, &frame, grid));
-                previous = Some(frame);
-                encoded
-                    .into_iter()
-                    .map(|frame| {
-                        // The encoder returns each frame immediately; if it ever
-                        // returned an earlier one, marking every block changed is
-                        // always correct.
-                        let blocks = match &changed {
-                            Some(changed)
-                                if !frame.is_key_frame && frame.input_index == input_index =>
-                            {
-                                changed.clone()
-                            }
-                            _ => BlockSet::full(grid.len()),
-                        };
-                        EncodedOutput {
-                            job,
-                            frame,
-                            blocks,
-                            captured_at,
-                            capture_size,
-                            cursor: cursor.clone(),
+        let outputs = encode_one(
+            &mut *source,
+            &mut opened,
+            preference,
+            job,
+            &mut last_capture,
+        )
+        .map(|(frame, capture_size, cursor, encoded)| {
+            let input_index = next_input_index;
+            next_input_index += 1;
+            let changed = previous
+                .as_ref()
+                .map(|previous| changed_blocks(previous, &frame, grid));
+            previous = Some(frame);
+            encoded
+                .into_iter()
+                .map(|frame| {
+                    // The encoder returns each frame immediately; if it ever
+                    // returned an earlier one, marking every block changed is
+                    // always correct.
+                    let blocks = match &changed {
+                        Some(changed)
+                            if !frame.is_key_frame && frame.input_index == input_index =>
+                        {
+                            changed.clone()
                         }
-                    })
-                    .collect::<Vec<_>>()
-            },
-        );
+                        _ => BlockSet::full(grid.len()),
+                    };
+                    EncodedOutput {
+                        job,
+                        frame,
+                        blocks,
+                        captured_at,
+                        capture_size,
+                        cursor: cursor.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
         let delivered = match outputs {
             Ok(outputs) => outputs
                 .into_iter()
@@ -230,20 +236,25 @@ fn run(
 /// captured at, the pointer if the source reports it, and the encoded
 /// frames.
 type Encoded = (
-    Yuv420Frame,
+    Arc<Yuv420Frame>,
     (usize, usize),
     Option<CursorState>,
     Vec<EncodedFrame>,
 );
 
+/// The last frame captured, and the frame it was scaled to for encoding.
+type LastCapture = Option<(Arc<Yuv420Frame>, Arc<Yuv420Frame>)>;
+
 /// Captures one frame, with the pointer if the source reports it, scales it
 /// to the job's size and encodes it, first reopening the encoder if the job
-/// has other settings.
+/// has other settings. A capture that is `last`'s again, as a source holding
+/// an unchanged screen returns, is not scaled again.
 fn encode_one(
     source: &mut dyn FrameSource,
     opened: &mut OpenEncoder,
     preference: CodecPreference,
     job: EncodeJob,
+    last: &mut LastCapture,
 ) -> Result<Encoded, RuntimeError> {
     if opened.settings != job.settings {
         let encoder = open_encoder(job.settings, preference)?;
@@ -261,7 +272,24 @@ fn encode_one(
     opened.encoder.set_quantizer(job.quantizer);
     let captured = source.capture()?;
     let capture_size = (captured.width(), captured.height());
-    let frame = captured.scaled(job.settings.width, job.settings.height);
+    let size = (job.settings.width, job.settings.height);
+    let frame = match last {
+        Some((last_captured, scaled))
+            if Arc::ptr_eq(last_captured, &captured)
+                && (scaled.width(), scaled.height()) == size =>
+        {
+            Arc::clone(scaled)
+        }
+        _ => {
+            let scaled = if capture_size == size {
+                Arc::clone(&captured)
+            } else {
+                Arc::new(captured.to_scaled(size.0, size.1))
+            };
+            *last = Some((captured, Arc::clone(&scaled)));
+            scaled
+        }
+    };
     let cursor = source.cursor();
     let encoded = opened.encoder.encode(&frame, job.request)?;
     Ok((frame, capture_size, cursor, encoded))

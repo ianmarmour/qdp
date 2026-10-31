@@ -42,6 +42,21 @@ const CR_WEIGHTS: [i32; 3] = [28_784, -26_148, -2_636];
 /// The bytes of one 32-bit RGB pixel.
 const RGB32_PIXEL: usize = 4;
 
+/// The fewest pixels a frame has before converting or scaling it is split
+/// between threads: below it, starting them costs more than they save.
+const PARALLEL_PIXELS: usize = 1 << 20;
+
+/// The most threads converting or scaling one frame.
+const MAX_WORKERS: usize = 8;
+
+/// Returns how many threads should share work on `pixels` pixels.
+fn workers(pixels: usize) -> usize {
+    if pixels < PARALLEL_PIXELS {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |cores| cores.get().min(MAX_WORKERS))
+}
+
 /// The order of the colour bytes of a 32-bit pixel; the fourth byte, alpha
 /// or padding, is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,7 +80,8 @@ fn spans(source: usize, target: usize) -> Vec<Range<usize>> {
 }
 
 /// Scales a plane of `source` width and height to `target`, averaging the
-/// samples each target sample covers.
+/// samples each target sample covers. Large planes are scaled in bands of
+/// rows on several threads.
 fn scale_plane(
     plane: &[u8],
     (source_width, source_height): (usize, usize),
@@ -73,34 +89,144 @@ fn scale_plane(
 ) -> Vec<u8> {
     let columns = spans(source_width, target_width);
     let rows = spans(source_height, target_height);
-    let mut scaled = Vec::with_capacity(target_width * target_height);
-    let mut sums = vec![0_u32; target_width];
-    for row in &rows {
+    let mut scaled = vec![0; target_width * target_height];
+    let rows_per_band = target_height.div_ceil(workers(source_width * source_height));
+    std::thread::scope(|scope| {
+        for (band, rows) in scaled
+            .chunks_mut(rows_per_band * target_width)
+            .zip(rows.chunks(rows_per_band))
+        {
+            let columns = &columns;
+            scope.spawn(move || {
+                scale_rows(plane, source_width, columns, rows, band);
+            });
+        }
+    });
+    scaled
+}
+
+/// Scales the target rows `rows` of a plane `source_width` samples wide,
+/// whose columns cover `columns`, into `band`.
+fn scale_rows(
+    plane: &[u8],
+    source_width: usize,
+    columns: &[Range<usize>],
+    rows: &[Range<usize>],
+    band: &mut [u8],
+) {
+    // When every target column covers the same number of source columns,
+    // as halving a plane gives, each covers the next run of that many.
+    let run = source_width / columns.len();
+    let uniform = run * columns.len() == source_width;
+    let mut sums = vec![0_u32; columns.len()];
+    for (row, target) in rows.iter().zip(band.chunks_exact_mut(columns.len())) {
         sums.fill(0);
         for line in plane
             .chunks_exact(source_width)
             .skip(row.start)
             .take(row.len())
         {
-            for (sum, column) in sums.iter_mut().zip(&columns) {
+            if uniform {
+                for (sum, samples) in sums.iter_mut().zip(line.chunks_exact(run)) {
+                    *sum += samples.iter().map(|&sample| u32::from(sample)).sum::<u32>();
+                }
+                continue;
+            }
+            for (sum, column) in sums.iter_mut().zip(columns) {
                 *sum += line[column.clone()]
                     .iter()
                     .map(|&sample| u32::from(sample))
                     .sum::<u32>();
             }
         }
-        for (sum, column) in sums.iter().zip(&columns) {
+        for ((sample, sum), column) in target.iter_mut().zip(&sums).zip(columns) {
             let count = (column.len() * row.len()) as u32;
-            scaled.push(((sum + count / 2) / count) as u8);
+            *sample = ((sum + count / 2) / count) as u8;
         }
     }
-    scaled
 }
 
 /// Applies 16-bit fixed-point weights to red, green and blue, with rounding.
 fn weigh(weights: [i32; 3], [red, green, blue]: [i32; 3]) -> i32 {
     (weights[0] * red + weights[1] * green + weights[2] * blue + (1 << (FRACTION_BITS - 1)))
         >> FRACTION_BITS
+}
+
+/// A band of rows of a 32-bit RGB image, converted to YUV 4:2:0 on one
+/// thread.
+#[derive(Debug, Clone, Copy)]
+struct Rgb32Band<'a> {
+    /// The whole image.
+    data: &'a [u8],
+    /// The bytes per row of the image.
+    stride: usize,
+    /// The width in pixels.
+    width: usize,
+    /// The offsets of red, green and blue in each pixel.
+    channels: [usize; 3],
+    /// The first row of the band, an even one.
+    first_row: usize,
+}
+
+impl Rgb32Band<'_> {
+    /// Converts the band into its luma rows `y` and chroma rows `u` and
+    /// `v`. Each chroma sample is the average colour of the two-by-two
+    /// pixels it covers, or of those that exist at the right and bottom
+    /// edges.
+    fn convert(&self, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+        let width = self.width;
+        let chroma_width = width.div_ceil(2);
+        let neutral = i32::from(NEUTRAL_CHROMA);
+        let [red, green, blue] = self.channels;
+        let colour = |pixel: &[u8]| {
+            [
+                i32::from(pixel[red]),
+                i32::from(pixel[green]),
+                i32::from(pixel[blue]),
+            ]
+        };
+        for (pair, ((luma, u), v)) in y
+            .chunks_mut(2 * width)
+            .zip(u.chunks_exact_mut(chroma_width))
+            .zip(v.chunks_exact_mut(chroma_width))
+            .enumerate()
+        {
+            // The last pair of an odd-height image has one row.
+            let rows = luma.len() / width;
+            let top = self.first_row + 2 * pair;
+            let lines: [&[u8]; 2] = [0, rows - 1].map(|row| {
+                let start = (top + row) * self.stride;
+                &self.data[start..start + width * RGB32_PIXEL]
+            });
+            for (luma_row, line) in luma.chunks_exact_mut(width).zip(lines) {
+                for (sample, pixel) in luma_row.iter_mut().zip(line.chunks_exact(RGB32_PIXEL)) {
+                    *sample = (i32::from(LIMITED_BLACK) + weigh(LUMA_WEIGHTS, colour(pixel))) as u8;
+                }
+            }
+            let pairs = lines.map(|line| line.chunks(2 * RGB32_PIXEL));
+            let [top_pairs, bottom_pairs] = pairs;
+            for (((u, v), top), bottom) in u
+                .iter_mut()
+                .zip(v.iter_mut())
+                .zip(top_pairs)
+                .zip(bottom_pairs)
+            {
+                let mut sum = [0; 3];
+                let mut count = 0;
+                for pixels in [top, bottom].iter().take(rows) {
+                    for pixel in pixels.chunks_exact(RGB32_PIXEL) {
+                        for (total, value) in sum.iter_mut().zip(colour(pixel)) {
+                            *total += value;
+                        }
+                        count += 1;
+                    }
+                }
+                let average = sum.map(|total| total / count);
+                *u = (neutral + weigh(CB_WEIGHTS, average)).clamp(0, 255) as u8;
+                *v = (neutral + weigh(CR_WEIGHTS, average)).clamp(0, 255) as u8;
+            }
+        }
+    }
 }
 
 impl Yuv420Frame {
@@ -155,43 +281,33 @@ impl Yuv420Frame {
         if data.len() < stride * (height - 1) + width * RGB32_PIXEL {
             return None;
         }
-        let pixel = |x: usize, y: usize| -> [i32; 3] {
-            let start = y * stride + x * RGB32_PIXEL;
-            let bytes = &data[start..start + 3];
-            let [first, second, third] = [bytes[0], bytes[1], bytes[2]].map(i32::from);
-            match order {
-                Rgb32Order::Bgr => [third, second, first],
-                Rgb32Order::Rgb => [first, second, third],
-            }
+        // Where red, green and blue lie in each pixel.
+        let channels = match order {
+            Rgb32Order::Bgr => [2, 1, 0],
+            Rgb32Order::Rgb => [0, 1, 2],
         };
         let (chroma_width, chroma_height) = chroma_size(width, height);
         let mut frame = Self::black(width, height);
-        for y in 0..height {
-            for x in 0..width {
-                frame.y[y * width + x] =
-                    (i32::from(LIMITED_BLACK) + weigh(LUMA_WEIGHTS, pixel(x, y))) as u8;
+        // Each chroma row covers two luma rows; large frames convert in
+        // bands of them on several threads.
+        let chroma_rows_per_band = chroma_height.div_ceil(workers(width * height));
+        std::thread::scope(|scope| {
+            let bands = frame
+                .y
+                .chunks_mut(2 * chroma_rows_per_band * width)
+                .zip(frame.u.chunks_mut(chroma_rows_per_band * chroma_width))
+                .zip(frame.v.chunks_mut(chroma_rows_per_band * chroma_width));
+            for (index, ((y, u), v)) in bands.enumerate() {
+                let band = Rgb32Band {
+                    data,
+                    stride,
+                    width,
+                    channels,
+                    first_row: 2 * index * chroma_rows_per_band,
+                };
+                scope.spawn(move || band.convert(y, u, v));
             }
-        }
-        for chroma_y in 0..chroma_height {
-            for chroma_x in 0..chroma_width {
-                let mut sum = [0; 3];
-                let mut count = 0;
-                for y in (2 * chroma_y)..(2 * chroma_y + 2).min(height) {
-                    for x in (2 * chroma_x)..(2 * chroma_x + 2).min(width) {
-                        let rgb = pixel(x, y);
-                        for channel in 0..3 {
-                            sum[channel] += rgb[channel];
-                        }
-                        count += 1;
-                    }
-                }
-                let average = sum.map(|total| total / count);
-                let index = chroma_y * chroma_width + chroma_x;
-                let neutral = i32::from(NEUTRAL_CHROMA);
-                frame.u[index] = (neutral + weigh(CB_WEIGHTS, average)).clamp(0, 255) as u8;
-                frame.v[index] = (neutral + weigh(CR_WEIGHTS, average)).clamp(0, 255) as u8;
-            }
-        }
+        });
         Some(frame)
     }
 
@@ -279,6 +395,12 @@ impl Yuv420Frame {
         if (width, height) == (self.width, self.height) {
             return self;
         }
+        self.to_scaled(width, height)
+    }
+
+    /// Returns a copy of the frame scaled to `width × height` pixels, each
+    /// sample the average of the samples it covers.
+    pub fn to_scaled(&self, width: usize, height: usize) -> Self {
         let (chroma_width, chroma_height) = chroma_size(width, height);
         let source_chroma = (self.chroma_width(), self.chroma_height());
         Self {
@@ -316,6 +438,134 @@ fn chroma_size(width: usize, height: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Returns `length` bytes of varied content.
+    fn noise(length: usize) -> Vec<u8> {
+        (0..length)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect()
+    }
+
+    /// Converts as the first, single-threaded implementation did, pixel by
+    /// pixel: the reference the conversion must match exactly.
+    fn reference_from_rgb32(
+        width: usize,
+        height: usize,
+        stride: usize,
+        order: Rgb32Order,
+        data: &[u8],
+    ) -> Yuv420Frame {
+        let pixel = |x: usize, y: usize| -> [i32; 3] {
+            let start = y * stride + x * RGB32_PIXEL;
+            let [first, second, third] =
+                [data[start], data[start + 1], data[start + 2]].map(i32::from);
+            match order {
+                Rgb32Order::Bgr => [third, second, first],
+                Rgb32Order::Rgb => [first, second, third],
+            }
+        };
+        let (chroma_width, chroma_height) = chroma_size(width, height);
+        let mut frame = Yuv420Frame::black(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                frame.y[y * width + x] =
+                    (i32::from(LIMITED_BLACK) + weigh(LUMA_WEIGHTS, pixel(x, y))) as u8;
+            }
+        }
+        for chroma_y in 0..chroma_height {
+            for chroma_x in 0..chroma_width {
+                let mut sum = [0; 3];
+                let mut count = 0;
+                for y in (2 * chroma_y)..(2 * chroma_y + 2).min(height) {
+                    for x in (2 * chroma_x)..(2 * chroma_x + 2).min(width) {
+                        let rgb = pixel(x, y);
+                        for channel in 0..3 {
+                            sum[channel] += rgb[channel];
+                        }
+                        count += 1;
+                    }
+                }
+                let average = sum.map(|total| total / count);
+                let index = chroma_y * chroma_width + chroma_x;
+                let neutral = i32::from(NEUTRAL_CHROMA);
+                frame.u[index] = (neutral + weigh(CB_WEIGHTS, average)).clamp(0, 255) as u8;
+                frame.v[index] = (neutral + weigh(CR_WEIGHTS, average)).clamp(0, 255) as u8;
+            }
+        }
+        frame
+    }
+
+    /// Conversion matches the pixel-by-pixel reference exactly, for odd and
+    /// even sizes, padded rows, either byte order, and frames large enough
+    /// to be converted on several threads.
+    #[test]
+    fn conversion_matches_reference() {
+        for (width, height, padding) in [(1, 1, 0), (5, 3, 4), (64, 33, 0), (1283, 817, 12)] {
+            let stride = width * RGB32_PIXEL + padding;
+            let data = noise(stride * height);
+            for order in [Rgb32Order::Bgr, Rgb32Order::Rgb] {
+                assert_eq!(
+                    Yuv420Frame::from_rgb32(width, height, stride, order, &data).unwrap(),
+                    reference_from_rgb32(width, height, stride, order, &data),
+                    "{width}×{height}"
+                );
+            }
+        }
+    }
+
+    /// Scales a plane as the first, single-threaded implementation did,
+    /// column range by column range: the reference scaling must match.
+    fn reference_scale_plane(
+        plane: &[u8],
+        (source_width, source_height): (usize, usize),
+        (target_width, target_height): (usize, usize),
+    ) -> Vec<u8> {
+        let columns = spans(source_width, target_width);
+        let mut scaled = Vec::new();
+        for row in spans(source_height, target_height) {
+            for column in &columns {
+                let sum: u32 = plane
+                    .chunks_exact(source_width)
+                    .skip(row.start)
+                    .take(row.len())
+                    .flat_map(|line| &line[column.clone()])
+                    .map(|&sample| u32::from(sample))
+                    .sum();
+                let count = (column.len() * row.len()) as u32;
+                scaled.push(((sum + count / 2) / count) as u8);
+            }
+        }
+        scaled
+    }
+
+    /// Scaling matches the reference exactly, halving included, for planes
+    /// large enough to be scaled on several threads.
+    #[test]
+    fn scaling_matches_reference() {
+        for (width, height, target_width, target_height) in [
+            (1283, 817, 641, 408),
+            (1283, 817, 640, 360),
+            (1283, 817, 1000, 817),
+            (1280, 816, 640, 408),
+        ] {
+            let data = noise(width * height * 4);
+            let frame =
+                Yuv420Frame::from_rgb32(width, height, width * 4, Rgb32Order::Bgr, &data).unwrap();
+            let scaled = frame.to_scaled(target_width, target_height);
+            let size = (target_width, target_height);
+            assert_eq!(
+                scaled.y(),
+                reference_scale_plane(frame.y(), (width, height), size),
+                "{target_width}×{target_height}"
+            );
+            let chroma = (frame.chroma_width(), frame.chroma_height());
+            let target_chroma = (scaled.chroma_width(), scaled.chroma_height());
+            assert_eq!(
+                scaled.u(),
+                reference_scale_plane(frame.u(), chroma, target_chroma)
+            );
+        }
+    }
 
     /// Odd dimensions round the chroma planes up.
     #[test]
