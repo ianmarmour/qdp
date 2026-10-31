@@ -2,6 +2,7 @@
 //! feedback.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -19,10 +20,11 @@ use qdp::session::{ClientEvent, Negotiated};
 use qdp::time::{ClockSync, SessionClock, answer_ping};
 use qdp::video::VideoReceiver;
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{CodecPreference, VideoDecoder, open_decoder};
+use qdp_codec::{CodecPreference, open_decoder};
 use qdp_quic::{
     ClientDriver, DriverInput, QdpConnection, StreamLimit, StreamPolicy, TransportError,
 };
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::audio::{ClientAudio, ClientAudioStreams};
@@ -38,6 +40,7 @@ use crate::clipboard::{
     self, ClipboardDirections, ClipboardLink, ClipboardOutput, ClipboardWorker, SharedClipboard,
     Side,
 };
+use crate::decode_thread::DecodeThread;
 use crate::media::{CursorWarp, FrameInfo, FrameSink, SinkControl, WarpKind};
 use crate::stream_format::StreamFormat;
 use crate::{ClientCredentials, RuntimeError, close_on_error};
@@ -215,8 +218,8 @@ fn client_hello(
 struct ReceivedStream {
     /// Reassembly, decode ordering and feedback.
     receiver: VideoReceiver,
-    /// The decoder.
-    decoder: Box<dyn VideoDecoder>,
+    /// The decoder, on a thread of its own.
+    decoder: DecodeThread,
     /// The monitor's size, to which decoded frames are cropped.
     size: (usize, usize),
     /// The format its key frames are checked against.
@@ -287,6 +290,8 @@ struct ActiveClient<'a> {
     devices: ClientDevices,
     /// The user's input, if the client has a user interface.
     input_queue: Option<InputQueue>,
+    /// Notified when user input arrives or a decoder finishes a frame.
+    wake: Arc<Notify>,
     /// The host's cursor images and the one to draw.
     cursor: ClientCursor,
     /// The desktop position of the monitor's top-left corner, in pixels.
@@ -412,6 +417,9 @@ async fn run_session(
         summary: ClientSummary::default(),
         input: InputSender::new(clock),
         devices: ClientDevices::default(),
+        wake: input
+            .as_ref()
+            .map_or_else(|| Arc::new(Notify::new()), InputQueue::wake),
         input_queue: input,
         audio: ClientAudioStreams::new(audio),
         output_sequences: HashMap::new(),
@@ -741,7 +749,7 @@ impl ActiveClient<'_> {
                         monitor.block_grid(),
                         self.clock,
                     ),
-                    decoder,
+                    decoder: DecodeThread::spawn(decoder, Arc::clone(&self.wake))?,
                     size: (
                         monitor.width.into_inner() as usize,
                         monitor.height.into_inner() as usize,
@@ -777,8 +785,7 @@ impl ActiveClient<'_> {
                 .chain(self.clipboard.as_ref().map(ClipboardLink::poll_timeout))
                 .chain(self.rumbling.values().map(|last| *last + RUMBLE_TIMEOUT))
                 .min();
-            let wake = self.input_queue.as_ref().map(InputQueue::wake);
-            match self.driver.next_input(deadline, wake).await {
+            match self.driver.next_input(deadline, Some(&self.wake)).await {
                 Ok(DriverInput::Event(ClientEvent::Message(message))) => {
                     self.handle_message(message)?;
                 }
@@ -986,37 +993,35 @@ impl ActiveClient<'_> {
         Ok(())
     }
 
-    /// Decodes and presents every frame that is ready.
+    /// Presents the frames the decoders finished, and passes each stream's
+    /// next decodable frame to its decoder.
     fn decode_ready(&mut self) -> Result<SinkControl, RuntimeError> {
         let mut keyframe_requests = Vec::new();
         for (&stream_id, stream) in &mut self.streams {
-            while let Some(frame) = stream.receiver.poll_decodable() {
-                if frame.flags.contains(FragmentFlags::KEY_FRAME) {
-                    stream.format.check_key_frame(frame.temporal_unit())?;
-                }
-                match stream.decoder.decode(frame.temporal_unit()) {
+            while let Some(decoded) = stream.decoder.try_result()? {
+                let frame_number = decoded.frame.frame_number;
+                match decoded.picture {
                     Ok(picture) => {
                         // A hardware encoder may have padded the frame.
                         let picture = picture.cropped(stream.size.0, stream.size.1);
-                        let decoded_at = Instant::now();
                         stream
                             .receiver
-                            .frame_decoded(frame.frame_number, decoded_at);
+                            .frame_decoded(frame_number, decoded.decoded_at);
                         let latency = self
                             .sync
-                            .peer_to_local(frame.header.capture_timestamp)
-                            .map(|captured| decoded_at.saturating_duration_since(captured));
+                            .peer_to_local(decoded.frame.header.capture_timestamp)
+                            .map(|captured| decoded.decoded_at.saturating_duration_since(captured));
                         let info = FrameInfo {
-                            frame_number: frame.frame_number,
+                            frame_number,
                             latency,
-                            decoded_at,
+                            decoded_at: decoded.decoded_at,
                         };
                         self.summary.frames_presented += 1;
                         let control = self.sink.present(&picture, info);
                         self.input.set_display_config(stream.config_id);
                         stream
                             .receiver
-                            .frame_presented(frame.frame_number, Some(Instant::now()));
+                            .frame_presented(frame_number, Some(Instant::now()));
                         if control == SinkControl::Stop {
                             return Ok(SinkControl::Stop);
                         }
@@ -1026,9 +1031,16 @@ impl ActiveClient<'_> {
                         self.summary.decode_failures += 1;
                         stream.receiver.decode_failed();
                         keyframe_requests.push(stream_id);
-                        break;
                     }
                 }
+            }
+            // The receiver hands out one frame at a time, until the decoder
+            // reports on it.
+            if let Some(frame) = stream.receiver.poll_decodable() {
+                if frame.flags.contains(FragmentFlags::KEY_FRAME) {
+                    stream.format.check_key_frame(frame.temporal_unit())?;
+                }
+                stream.decoder.decode(frame)?;
             }
         }
         for stream_id in keyframe_requests {
