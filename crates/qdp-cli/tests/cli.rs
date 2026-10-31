@@ -72,7 +72,14 @@ impl Host {
             ])
             .arg(identity)
             .args(["--token", TOKEN, "--size", &format!("{WIDTH}x{HEIGHT}")])
-            .args(["--source", "test-pattern", "--clipboard", "off"])
+            .args([
+                "--source",
+                "test-pattern",
+                "--clipboard",
+                "off",
+                "--audio",
+                "off",
+            ])
             .env("QDP_LOG", "warn")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -104,6 +111,8 @@ fn connect(port: u16, pin: &str, token: &str, extra: &[&str]) -> Output {
                 token,
                 "--headless",
                 "--clipboard",
+                "off",
+                "--audio",
                 "off",
             ])
             .args(extra)

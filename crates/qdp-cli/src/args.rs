@@ -4,6 +4,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
 use qdp_codec::CodecPreference;
+use qdp_desktop::Microphone;
 use qdp_quic::KeyPin;
 use qdp_runtime::ClipboardDirections;
 
@@ -32,6 +33,9 @@ Serve options:
   --clipboard WAY      both, send, receive or off: share the clipboard's text
                        both ways, only this machine's, only the client's, or
                        not at all (default both)
+  --audio on|off       Stream this machine's sound, and present clients'
+                       microphones to its applications where the platform
+                       allows (default on)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -46,6 +50,8 @@ Connect options:
   --clipboard WAY      both, send, receive or off: share the clipboard's text
                        both ways, only this machine's, only the host's, or
                        not at all (default both)
+  --audio on|off       Play the host's sound (default on)
+  --microphone         Send this machine's microphone to the host
 
 Set QDP_LOG to error, warn, info, debug or trace to change the log level.";
 
@@ -128,6 +134,17 @@ pub struct ServeArgs {
     pub quantizer: u8,
     /// Which way to share the clipboard, if at all.
     pub clipboard: Option<ClipboardDirections>,
+    /// Whether to stream sound.
+    pub audio: Audio,
+}
+
+/// Whether a session carries sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Audio {
+    /// Sound plays.
+    On,
+    /// No sound.
+    Off,
 }
 
 /// Where `qdp connect` shows the stream.
@@ -163,6 +180,10 @@ pub struct ConnectArgs {
     pub decoder: CodecPreference,
     /// Which way to share the clipboard, if at all.
     pub clipboard: Option<ClipboardDirections>,
+    /// Whether to play the host's sound.
+    pub audio: Audio,
+    /// Whether the user turned the microphone on.
+    pub microphone: Microphone,
 }
 
 /// An error in the command line.
@@ -286,6 +307,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         speed: DEFAULT_SPEED,
         quantizer: DEFAULT_QUANTIZER,
         clipboard: Some(ClipboardDirections::Both),
+        audio: Audio::On,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -315,6 +337,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             "--clipboard" => {
                 serve.clipboard = parse_clipboard(&value("--clipboard", &mut arguments)?)?
             }
+            "--audio" => serve.audio = parse_audio(&value("--audio", &mut arguments)?)?,
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
@@ -327,6 +350,15 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         return Err(error("--fps must be above 0"));
     }
     Ok(serve)
+}
+
+/// Parses the value of `--audio`.
+fn parse_audio(text: &str) -> Result<Audio, ArgsError> {
+    match text {
+        "on" => Ok(Audio::On),
+        "off" => Ok(Audio::Off),
+        other => Err(error(format!("--audio must be on or off, not {other}"))),
+    }
 }
 
 /// Parses the value of `--clipboard`: `None` for `off`.
@@ -372,6 +404,8 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         presentation: Presentation::Window,
         decoder: CodecPreference::Auto,
         clipboard: Some(ClipboardDirections::Both),
+        audio: Audio::On,
+        microphone: Microphone::Off,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -389,6 +423,8 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--clipboard" => {
                 connect.clipboard = parse_clipboard(&value("--clipboard", &mut arguments)?)?
             }
+            "--audio" => connect.audio = parse_audio(&value("--audio", &mut arguments)?)?,
+            "--microphone" => connect.microphone = Microphone::On,
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
@@ -441,6 +477,12 @@ mod tests {
         };
         assert_eq!(serve.clipboard, Some(ClipboardDirections::ReceiveOnly));
         assert!(parse_line("serve --token abc --clipboard sideways").is_err());
+        assert_eq!(serve.audio, Audio::On);
+        let Command::Serve(serve) = parse_line("serve --token abc --audio off").unwrap() else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.audio, Audio::Off);
+        assert!(parse_line("serve --token abc --audio loud").is_err());
         assert!(parse_line("serve").is_err());
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }
@@ -481,6 +523,17 @@ mod tests {
             panic!("expected connect");
         };
         assert_eq!(connect.clipboard, None);
+        assert_eq!(connect.microphone, Microphone::Off);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --microphone --audio off"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(
+            (connect.audio, connect.microphone),
+            (Audio::Off, Microphone::On)
+        );
         assert!(parse_line(&format!("connect 192.0.2.7:4433 --pin {pin}")).is_err());
         assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
         assert!(parse_line("connect nowhere --pin x --token t").is_err());

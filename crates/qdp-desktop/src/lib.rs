@@ -11,9 +11,13 @@
 //!   Desktop Duplication, and `SendInputInjector` sends input with
 //!   `SendInput`.
 //!
-//! [`SystemClipboard`] shares the system clipboard's text on each of them.
+//! [`SystemClipboard`] shares the system clipboard's text on each of them,
+//! and [`host_audio`] and [`client_audio`] open the audio devices sessions
+//! play and capture through.
 
 mod clipboard;
+#[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
+mod cpal_audio;
 #[cfg(any(
     all(target_os = "linux", feature = "screen-capture"),
     target_os = "macos"
@@ -28,7 +32,7 @@ mod win32;
 
 use std::path::Path;
 
-use qdp_runtime::{Clipboard, FrameSource, InputInjector, NoInput};
+use qdp_runtime::{ClientAudio, Clipboard, FrameSource, HostAudio, InputInjector, NoInput};
 use tracing::warn;
 
 pub use clipboard::SystemClipboard;
@@ -90,6 +94,80 @@ pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, Stri
 )))]
 pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
     Err("screen capture is not supported on this platform yet".to_owned())
+}
+
+/// Whether the user turned the client's microphone on for a session (Section
+/// 7.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Microphone {
+    /// The microphone is off: nothing is captured.
+    Off,
+    /// The microphone is on: the host hears it.
+    On,
+}
+
+/// Returns a host's audio devices: the desktop's sound, which clients play,
+/// and, where the platform allows, a virtual microphone that plays the
+/// client's microphone to the host's applications.
+#[cfg(all(feature = "audio", target_os = "linux"))]
+pub fn host_audio() -> HostAudio {
+    HostAudio {
+        desktop: Some(Box::new(linux::PipeWireInput::desktop())),
+        microphone: Some(Box::new(linux::PipeWireOutput::virtual_microphone())),
+    }
+}
+
+/// Returns a host's audio devices: the desktop's sound, which clients play.
+/// Presenting the client's microphone to applications would need a virtual
+/// audio driver, so there is none.
+#[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
+pub fn host_audio() -> HostAudio {
+    HostAudio {
+        desktop: cpal_audio::desktop_input(),
+        microphone: None,
+    }
+}
+
+/// Returns a host's audio devices: none without the `audio` feature.
+#[cfg(not(all(
+    feature = "audio",
+    any(target_os = "linux", target_os = "macos", windows)
+)))]
+pub fn host_audio() -> HostAudio {
+    HostAudio::default()
+}
+
+/// Returns a client's audio devices: its speakers, and its microphone if the
+/// user turned it on.
+#[cfg(all(feature = "audio", target_os = "linux"))]
+pub fn client_audio(microphone: Microphone) -> ClientAudio {
+    ClientAudio {
+        speakers: Some(Box::new(linux::PipeWireOutput::speakers())),
+        microphone: (microphone == Microphone::On).then(|| {
+            Box::new(linux::PipeWireInput::microphone()) as Box<dyn qdp_runtime::AudioInput>
+        }),
+    }
+}
+
+/// Returns a client's audio devices: its speakers, and its microphone if the
+/// user turned it on.
+#[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
+pub fn client_audio(microphone: Microphone) -> ClientAudio {
+    ClientAudio {
+        speakers: cpal_audio::speakers(),
+        microphone: (microphone == Microphone::On)
+            .then(cpal_audio::microphone)
+            .flatten(),
+    }
+}
+
+/// Returns a client's audio devices: none without the `audio` feature.
+#[cfg(not(all(
+    feature = "audio",
+    any(target_os = "linux", target_os = "macos", windows)
+)))]
+pub fn client_audio(_microphone: Microphone) -> ClientAudio {
+    ClientAudio::default()
 }
 
 /// Opens the system clipboard for sharing, or returns `None`, with a warning,

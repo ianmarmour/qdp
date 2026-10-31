@@ -27,8 +27,9 @@ sudo dnf install pipewire-devel clang-devel
 ```
 
 On Debian and Ubuntu that is `sudo apt install libpipewire-0.3-dev libclang-dev`,
-and on Arch `sudo pacman -S pipewire clang`. To build without screen capture
-instead, pass `--no-default-features --features window`.
+and on Arch `sudo pacman -S pipewire clang`. Audio uses PipeWire on Linux too.
+To build without screen capture and audio instead, pass
+`--no-default-features --features window`.
 
 Build the `qdp` command, which is both the host and the client:
 
@@ -83,6 +84,17 @@ latency, and follows the host's pointer when an application moves it. Hosts
 report the pointer apart from the video on Windows, on macOS, and on Linux
 desktops whose ScreenCast portal offers cursor metadata, such as GNOME and KDE;
 on other Linux desktops it is part of the video.
+
+The host streams its sound, and the client plays it; `--audio off` on either
+side turns it off. `qdp connect --microphone` sends the client's microphone to
+the host, which on Linux presents it to its applications as a source named
+"QDP microphone"; the window's title says when the microphone is on. Sound is
+coded with Opus, in pure Rust, or sent as PCM. On Linux the host captures what
+plays on its default output through PipeWire; on Windows it captures the
+default output by loopback; on macOS 13 and later it captures the desktop's
+sound with ScreenCaptureKit, which needs Screen Recording to be allowed. Only
+Linux hosts can present a client's microphone, since macOS and Windows would
+need a virtual audio driver.
 
 Text copied on either side can be pasted on the other: the host and the client
 share their clipboards' text. Text a password manager marks as secret is never

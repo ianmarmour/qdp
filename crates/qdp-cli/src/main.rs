@@ -33,8 +33,10 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use qdp_desktop::Microphone;
+
 use crate::args::{
-    Command, ConnectArgs, Presentation, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
+    Audio, Command, ConnectArgs, Presentation, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
 };
 use crate::sink::CliSink;
 
@@ -182,6 +184,7 @@ async fn serve(args: ServeArgs) -> CliResult {
     let (width, height) = args.size;
     let source_kind = args.source;
     let clipboard_directions = args.clipboard;
+    let audio_setting = args.audio;
     let state_directory = Arc::new(args.identity.clone());
 
     loop {
@@ -213,7 +216,10 @@ async fn serve(args: ServeArgs) -> CliResult {
                     let injector =
                         qdp_desktop::input_injector(source_width as u32, source_height as u32);
                     let clipboard = shared_clipboard(clipboard_directions);
-                    let audio = HostAudio::default();
+                    let audio = match audio_setting {
+                        Audio::On => qdp_desktop::host_audio(),
+                        Audio::Off => HostAudio::default(),
+                    };
                     match qdp_runtime::serve(connection, &options, source, injector, clipboard, audio).await {
                         Ok(summary) => info!(
                             %peer,
@@ -233,6 +239,18 @@ async fn serve(args: ServeArgs) -> CliResult {
                 return Ok(());
             }
         }
+    }
+}
+
+/// Returns the client's audio devices, as the user asked for them.
+fn client_audio(args: &ConnectArgs) -> ClientAudio {
+    let devices = qdp_desktop::client_audio(args.microphone);
+    match args.audio {
+        Audio::On => devices,
+        Audio::Off => ClientAudio {
+            speakers: None,
+            microphone: devices.microphone,
+        },
     }
 }
 
@@ -317,7 +335,11 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
     let (input, input_queue) = qdp_runtime::input_channel();
     let slot = FrameSlot::default();
     let close = Arc::new(CloseSignal::default());
-    let title = format!("QDP: {}", args.address);
+    // The title shows while the microphone is on (Section 7.7).
+    let title = match args.microphone {
+        Microphone::On => format!("QDP: {} (microphone on)", args.address),
+        Microphone::Off => format!("QDP: {}", args.address),
+    };
     let proxy = event_loop.create_proxy();
     let mut sink = WindowSink::new(sink, Arc::clone(&slot), proxy.clone(), Arc::clone(&close));
     let session_close = Arc::clone(&close);
@@ -419,7 +441,7 @@ async fn receive(
             sink,
             input,
             shared_clipboard(args.clipboard),
-            ClientAudio::default(),
+            client_audio(args),
         ) => {
             result.map(Some)
         }

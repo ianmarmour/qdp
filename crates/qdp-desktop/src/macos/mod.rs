@@ -6,10 +6,20 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(feature = "audio")]
+mod audio;
 mod capture;
 mod cursor;
 mod input;
 mod keycodes;
 
+#[cfg(feature = "audio")]
+pub use audio::MacDesktopAudio;
 pub use capture::MacScreenCapture;
+
+/// Returns the desktop's sound, captured with ScreenCaptureKit.
+#[cfg(feature = "audio")]
+pub(crate) fn desktop_audio() -> Option<Box<dyn qdp_runtime::AudioInput>> {
+    Some(Box::new(MacDesktopAudio))
+}
 pub use input::QuartzInjector;
