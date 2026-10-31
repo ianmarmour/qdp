@@ -619,8 +619,7 @@ async fn wrong_password_is_refused() {
 }
 
 /// Keys, pointer, buttons (a drag among them), scrolling and text sent by
-/// the client are
-/// performed on the host, in order.
+/// the client are performed on the host, in order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn input_reaches_the_host() {
     let mut authenticator = HostAuthenticator::new().unwrap();
