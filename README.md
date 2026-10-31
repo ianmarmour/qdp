@@ -6,6 +6,18 @@ its design in [`doc/design-rationale.md`](doc/design-rationale.md).
 
 ## Trying it
 
+Building needs a Rust toolchain and a C compiler, which the codecs use for
+their hand-written assembly. On x86-64 it also needs NASM:
+
+```bash
+sudo dnf install nasm
+```
+
+On Debian and Ubuntu that is `sudo apt install nasm`, on Arch
+`sudo pacman -S nasm`, and on macOS with Homebrew `brew install nasm` (only
+needed on Intel Macs). Apple Silicon Macs need only the Xcode command line
+tools.
+
 Build the `qdp` command, which is both the host and the client:
 
 ```bash
