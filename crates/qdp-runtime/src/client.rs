@@ -10,7 +10,7 @@ use qdp::message::{
     Av1Profiles, Capability, ClientHello, ClientMonitor, ClientMonitorFlags, ClientMonitorId,
     ControlMessage, CursorImage, Datagram, DatagramPayload, DeviceAttach, DeviceDetach,
     DeviceFeatures, DeviceId, DeviceKind, DeviceOutput, DeviceStatusCode, DisplayConfig,
-    DisplayRequest, DisplayRequestId, FeatureStatus, FeedbackRecord, GamepadOutput,
+    DisplayRequest, DisplayRequestId, FeatureStatus, FeedbackRecord, FragmentFlags, GamepadOutput,
     HidFeatureRequest, HidFeatureResponse, InputClasses, KeyboardInfo, KeyframeRequest,
     MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader, StreamId, VideoCodec,
     VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer, WarpFlags,
@@ -39,6 +39,7 @@ use crate::clipboard::{
     Side,
 };
 use crate::media::{CursorWarp, FrameInfo, FrameSink, SinkControl, WarpKind};
+use crate::stream_format::StreamFormat;
 use crate::{ClientCredentials, RuntimeError, close_on_error};
 
 /// The client's identifier for its one display area.
@@ -49,6 +50,9 @@ const MAX_FRAME_DIMENSION: u32 = 8192;
 
 /// The bit depth the client decodes.
 const MAX_BIT_DEPTH: u8 = 8;
+
+/// The highest AV1 level the client decodes: its decoders take every level.
+const MAX_LEVEL: u8 = NO_LEVEL_LIMIT;
 
 /// The interface scale the client reports, in percent.
 const SCALE_PERCENT: u32 = 100;
@@ -194,7 +198,7 @@ fn client_hello(
                 max_height: VarInt::from_u32(MAX_FRAME_DIMENSION),
                 max_pixel_rate: VarInt::ZERO,
                 flags: VideoCodecFlags::default(),
-                max_level: NO_LEVEL_LIMIT,
+                max_level: MAX_LEVEL,
             }),
             Capability::Input(input_classes()),
         ],
@@ -234,6 +238,8 @@ struct ReceivedStream {
     decoder: Box<dyn VideoDecoder>,
     /// The monitor's size, to which decoded frames are cropped.
     size: (usize, usize),
+    /// The format its key frames are checked against.
+    format: StreamFormat,
 }
 
 /// Datagrams for streams whose `DISPLAY_CONFIG` has not arrived (Section 3.7.3).
@@ -752,6 +758,7 @@ impl ActiveClient<'_> {
                         monitor.width.into_inner() as usize,
                         monitor.height.into_inner() as usize,
                     ),
+                    format: StreamFormat::new(*stream, MAX_LEVEL),
                 },
             );
         }
@@ -983,6 +990,9 @@ impl ActiveClient<'_> {
         let mut keyframe_requests = Vec::new();
         for (&stream_id, stream) in &mut self.streams {
             while let Some(frame) = stream.receiver.poll_decodable() {
+                if frame.flags.contains(FragmentFlags::KEY_FRAME) {
+                    stream.format.check_key_frame(frame.temporal_unit())?;
+                }
                 match stream.decoder.decode(frame.temporal_unit()) {
                     Ok(picture) => {
                         // A hardware encoder may have padded the frame.
@@ -1030,26 +1040,44 @@ impl ActiveClient<'_> {
     }
 
     /// Sends the streams' feedback records in as few datagrams as fit.
+    /// Every datagram carries the `LOSS` record of each stream in the `LOSS`
+    /// or `KEY_ONLY` state, however the other records are split (Section
+    /// 6.8.3, rule 3).
     fn send_feedback(&mut self, now: Instant) -> Result<(), RuntimeError> {
-        let records: Vec<FeedbackRecord> = self
+        let polled: Vec<FeedbackRecord> = self
             .streams
             .values_mut()
             .flat_map(|stream| stream.receiver.poll_feedback(now))
             .collect();
-        if records.is_empty() {
+        if polled.is_empty() {
             return Ok(());
         }
+        let losses: Vec<FeedbackRecord> = self
+            .streams
+            .values()
+            .filter_map(|stream| stream.receiver.loss_record())
+            .collect();
+        let others: Vec<FeedbackRecord> = polled
+            .into_iter()
+            .filter(|record| !matches!(record, FeedbackRecord::Loss(_)))
+            .collect();
         let max_size = self.driver.connection().max_datagram_size();
-        let mut batch = VideoFeedback::default();
-        let mut batch_size = 1;
-        for record in records {
+        let losses_size = 1 + losses.iter().map(record_size).sum::<usize>();
+        let start = || VideoFeedback {
+            records: losses.clone(),
+        };
+        let mut batch = start();
+        let mut batch_size = losses_size;
+        let mut batch_has_others = false;
+        for record in others {
             let size = record_size(&record);
-            if !batch.records.is_empty() && batch_size + size > max_size {
-                self.send(std::mem::take(&mut batch).to_bytes())?;
-                batch_size = 1;
+            if batch_has_others && batch_size + size > max_size {
+                self.send(std::mem::replace(&mut batch, start()).to_bytes())?;
+                batch_size = losses_size;
             }
             batch_size += size;
             batch.records.push(record);
+            batch_has_others = true;
         }
         self.send(batch.to_bytes())
     }

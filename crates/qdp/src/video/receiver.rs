@@ -15,6 +15,14 @@ use crate::wire::VarInt;
 /// The number of incomplete frames kept per stream (Section 6.6.3).
 pub const MAX_INCOMPLETE_FRAMES: usize = 16;
 
+/// The most frames kept per stream, complete or not, while they wait for an
+/// earlier frame.
+pub const MAX_KEPT_FRAMES: usize = 128;
+
+/// The most bytes of frame data kept per stream: room for the largest frame
+/// and as much again.
+pub const MAX_KEPT_BYTES: usize = 2 * MAX_FRAME_PAYLOAD_LENGTH;
+
 /// The extra time, beyond one smoothed RTT, after a `NACK` before a frame without
 /// progress is declared lost (Section 6.8.2).
 const LOSS_MARGIN: Duration = Duration::from_millis(4);
@@ -87,6 +95,9 @@ struct PendingFrame {
     last_index: Option<u64>,
     /// The fragments received, by index.
     fragments: BTreeMap<u64, Vec<u8>>,
+    /// The bytes of the fragments received, which the payload keeps once
+    /// the frame is complete.
+    bytes: usize,
     /// When the first fragment arrived.
     first_arrival: Instant,
     /// When the latest new fragment arrived.
@@ -132,6 +143,7 @@ impl PendingFrame {
             piece_size: None,
             last_index: None,
             fragments: BTreeMap::new(),
+            bytes: 0,
             first_arrival: now,
             last_arrival: now,
             nacked_at: None,
@@ -179,6 +191,7 @@ impl PendingFrame {
             }
         }
         self.flags = Some(frame_flags);
+        self.bytes += length;
         self.fragments.insert(index, fragment.data.to_vec());
         Insertion::Added
     }
@@ -517,6 +530,17 @@ impl VideoReceiver {
         records
     }
 
+    /// Returns the stream's `LOSS` record while it is in the `LOSS` or
+    /// `KEY_ONLY` state, which every `VIDEO_FEEDBACK` datagram must carry
+    /// (Section 6.8.3, rule 3), without counting it as sent.
+    pub fn loss_record(&self) -> Option<FeedbackRecord> {
+        (self.state != ReceiverState::Decoding).then_some(FeedbackRecord::Loss(LossRecord {
+            stream_id: self.stream_id,
+            last_decoded_frame: self.last_decoded,
+            highest_frame_seen: self.highest_seen,
+        }))
+    }
+
     /// Returns when the next periodic feedback is due.
     fn next_feedback_due(&self) -> Option<Instant> {
         let loss = (self.state != ReceiverState::Decoding).then(|| {
@@ -682,8 +706,13 @@ impl VideoReceiver {
         }
     }
 
-    /// Drops the oldest incomplete frame, as lost, while too many are kept.
+    /// Limits the memory the stream's frames take: in the `LOSS` and
+    /// `KEY_ONLY` states, discards the frames that can never be decoded
+    /// (Section 6.8.3, rule 1); then drops the oldest incomplete frame while
+    /// too many are kept (Section 6.6.3), and the oldest frame while too many
+    /// frames or bytes are, each as lost.
     fn enforce_memory_limit(&mut self) {
+        self.discard_unusable();
         loop {
             let incomplete: Vec<FrameNumber> = self
                 .frames
@@ -692,10 +721,39 @@ impl VideoReceiver {
                 .map(|(&number, _)| number)
                 .collect();
             if incomplete.len() <= MAX_INCOMPLETE_FRAMES {
-                return;
+                break;
             }
             self.frames.remove(&incomplete[0]);
             self.declare_lost();
+        }
+        while self.frames.len() > MAX_KEPT_FRAMES
+            || self.frames.values().map(|frame| frame.bytes).sum::<usize>() > MAX_KEPT_BYTES
+        {
+            self.frames.pop_first();
+            self.declare_lost();
+        }
+    }
+
+    /// In the `LOSS` and `KEY_ONLY` states, discards the frames below the
+    /// first that may be acceptable: the decoder can only jump past them.
+    fn discard_unusable(&mut self) {
+        if self.state == ReceiverState::Decoding {
+            return;
+        }
+        let state = self.state;
+        let may_be_acceptable = |frame: &PendingFrame| {
+            frame.flags.is_none()
+                || frame.has_flag(FragmentFlags::KEY_FRAME)
+                || (state == ReceiverState::Loss && frame.has_flag(FragmentFlags::RECOVERY))
+        };
+        let first = self
+            .frames
+            .iter()
+            .find(|(_, frame)| may_be_acceptable(frame))
+            .map(|(&number, _)| number);
+        match first {
+            Some(first) => self.frames = self.frames.split_off(&first),
+            None => self.frames.clear(),
         }
     }
 }
@@ -800,6 +858,31 @@ mod tests {
         FrameNumber(VarInt::from_u32(number))
     }
 
+    /// A stream keeps a bounded number of frames waiting for a missing one,
+    /// and in the `LOSS` state discards those that can never be decoded.
+    #[test]
+    fn bounds_kept_frames() {
+        let mut harness = Harness::new();
+        let key = harness.send(FrameKind::Key, 100);
+        harness.deliver(&key);
+        assert_eq!(harness.decode_all(), [1]);
+        // Frame 2 never arrives, so later frames wait for it.
+        harness.send(FrameKind::Delta, 100);
+        for _ in 0..MAX_KEPT_FRAMES + 10 {
+            let delta = harness.send(FrameKind::Delta, 100);
+            harness.deliver(&delta);
+        }
+        assert!(harness.receiver.frames.len() <= MAX_KEPT_FRAMES);
+        assert_eq!(harness.receiver.state(), ReceiverState::Loss);
+        let delta = harness.send(FrameKind::Delta, 100);
+        harness.deliver(&delta);
+        assert!(harness.receiver.frames.is_empty());
+        let key = harness.send(FrameKind::KeyRecovery, 100);
+        harness.deliver(&key);
+        assert_eq!(harness.decode_all().len(), 1);
+        assert_eq!(harness.receiver.state(), ReceiverState::Decoding);
+    }
+
     /// Frames arriving out of order are reassembled and decoded in order.
     #[test]
     fn decodes_in_order() {
@@ -886,10 +969,17 @@ mod tests {
         )));
         assert_eq!(harness.sender.recovery_needed(), Some(frame(1)));
 
+        // Every feedback datagram carries the LOSS record while in LOSS.
+        assert!(matches!(
+            harness.receiver.loss_record(),
+            Some(FeedbackRecord::Loss(LossRecord { last_decoded_frame, .. })) if last_decoded_frame == frame(1)
+        ));
+
         let recovery = harness.send(FrameKind::Recovery { base: frame(1) }, 100);
         harness.deliver(&recovery);
         assert_eq!(harness.decode_all(), [4]);
         assert_eq!(harness.receiver.state(), ReceiverState::Decoding);
+        assert_eq!(harness.receiver.loss_record(), None);
     }
 
     /// In `KEY_ONLY` only key frames are decoded, and a decode failure returns

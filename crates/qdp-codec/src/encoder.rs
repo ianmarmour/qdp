@@ -9,7 +9,10 @@ use rav1e::config::{Config, EncoderConfig, SpeedSettings};
 use rav1e::data::{EncoderStatus, FrameType, Rational};
 use rav1e::prelude::{FrameParameters, FrameTypeOverride, SceneDetectionSpeed};
 
-use crate::{CodecError, SequenceHeader, VideoEncoder, Yuv420Frame, to_qdp_temporal_unit};
+use crate::{
+    CodecError, SequenceHeader, TileCount, VideoEncoder, Yuv420Frame, level_for,
+    to_qdp_temporal_unit,
+};
 
 /// The bit depth of the frames this encoder accepts.
 const BIT_DEPTH: usize = 8;
@@ -115,6 +118,15 @@ impl Av1Encoder {
     /// encoded. Streams signal BT.709 primaries, sRGB transfer and the BT.709
     /// matrix in limited range, as QDP requires for standard dynamic range.
     pub fn new(settings: EncoderSettings) -> Result<Self, CodecError> {
+        let tiles = tile_count(settings.width, settings.height);
+        // rav1e chooses the tile layout itself, so the level allows for the
+        // tiles lying in one row.
+        let level = level_for(
+            settings.width as u32,
+            settings.height as u32,
+            settings.frame_rate,
+            TileCount::at_most_columns(tiles as u32),
+        );
         let mut speed_settings = SpeedSettings::from_preset(settings.speed.min(FASTEST_SPEED));
         speed_settings.rdo_lookahead_frames = 0;
         speed_settings.scene_detection_mode = SceneDetectionSpeed::None;
@@ -136,7 +148,8 @@ impl Av1Encoder {
             reservoir_frame_delay: None,
             quantizer: usize::from(settings.quantizer),
             bitrate: 0,
-            tiles: tile_count(settings.width, settings.height),
+            tiles,
+            level_idx: Some(level),
             speed_settings,
             ..EncoderConfig::default()
         };
@@ -244,6 +257,9 @@ impl VideoEncoder for Av1Encoder {
 mod tests {
     use super::*;
 
+    /// The bits of a configuration record's second byte that hold the level.
+    const LEVEL_MASK: u8 = 0x1f;
+
     /// The sequence header parser builds the same configuration record as
     /// rav1e does for its own stream.
     #[test]
@@ -266,9 +282,23 @@ mod tests {
         .remove(0);
         let header = SequenceHeader::find(&key.temporal_unit).unwrap().unwrap();
         assert_eq!((header.max_width, header.max_height), (320, 192));
-        // rav1e's record carries only the four fixed bytes, not the OBU.
+        assert_eq!(header.level, 0);
+        let description = header.color_description.unwrap();
+        assert_eq!(
+            (
+                description.primaries,
+                description.transfer,
+                description.matrix
+            ),
+            (1, 13, 1)
+        );
+        assert!(!header.full_range && !header.superres && !header.film_grain);
+        // rav1e's record carries only the four fixed bytes, not the OBU, and
+        // always says level 31 whatever level the stream signals.
         let record = header.codec_configuration_record();
-        assert_eq!(record[..4], encoder.context.container_sequence_header());
+        let mut expected = encoder.context.container_sequence_header();
+        expected[1] = (expected[1] & !LEVEL_MASK) | header.level;
+        assert_eq!(record[..4], expected);
         assert_eq!(record[4..], *header.obu());
         assert_eq!(encoder.sequence_header, header.obu());
     }

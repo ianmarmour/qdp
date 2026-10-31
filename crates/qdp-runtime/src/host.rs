@@ -14,11 +14,13 @@ use qdp::message::{
     VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::registry::ErrorCode;
-use qdp::session::{AuthResponse, HostConfig, HostEvent};
+use qdp::session::{AuthResponse, HostConfig, HostEvent, Negotiated};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, VideoSender};
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{CodecPreference, EncoderSettings, KeyFrameRequest};
+use qdp_codec::{
+    CodecPreference, EncoderSettings, KeyFrameRequest, TileCount, frame_rate_within, tile_count,
+};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportError};
 use tracing::{debug, info, warn};
 
@@ -356,7 +358,11 @@ async fn serve_session(
     }
 
     let (width, height) = source.size();
-    let display_config = display_config(width, height, options.frame_rate, request_id);
+    let frame_rate = match driver.session().negotiated() {
+        Some(negotiated) => frame_rate_for(width, height, options.frame_rate, negotiated)?,
+        None => options.frame_rate,
+    };
+    let display_config = display_config(width, height, frame_rate, request_id);
     let clock = SessionClock::new(Instant::now());
     let mut audio = HostAudioStreams::new(audio);
     let quic = driver.connection().quic().clone();
@@ -400,7 +406,7 @@ async fn serve_session(
     let settings = EncoderSettings {
         width,
         height,
-        frame_rate: options.frame_rate,
+        frame_rate,
         speed: options.encoder.speed,
         quantizer: options.encoder.quantizer,
         threads: options.encoder.threads,
@@ -438,9 +444,7 @@ async fn serve_session(
         let outputs = link.start();
         active.apply_clipboard(outputs)?;
     }
-    let result = active
-        .run(Duration::from_secs(1) / options.frame_rate.max(1))
-        .await;
+    let result = active.run(Duration::from_secs(1) / frame_rate.max(1)).await;
     // Nothing the client held stays held on the host.
     let actions = active.devices.release_all();
     active.inject(&actions);
@@ -558,6 +562,46 @@ fn answer_attach(
     Ok(outcome.is_ok())
 }
 
+/// Returns the frame rate, up to `frame_rate`, at which a stream of
+/// `width × height` frames stays within the client's Max Level (Section 6.4.1,
+/// rule 8).
+fn frame_rate_for(
+    width: usize,
+    height: usize,
+    frame_rate: u32,
+    negotiated: &Negotiated,
+) -> Result<u32, RuntimeError> {
+    let client = &negotiated.client_video;
+    if varint(width) > client.max_width || varint(height) > client.max_height {
+        warn!(
+            width,
+            height,
+            max_width = client.max_width.into_inner(),
+            max_height = client.max_height.into_inner(),
+            "the desktop is larger than the client decodes"
+        );
+    }
+    let tiles = TileCount::at_most_columns(tile_count(width, height) as u32);
+    let fitted = frame_rate_within(
+        width as u32,
+        height as u32,
+        frame_rate,
+        tiles,
+        client.max_level,
+    )
+    .ok_or(RuntimeError::Config(
+        "the desktop is too large for the client's AV1 level",
+    ))?;
+    if fitted < frame_rate {
+        info!(
+            frame_rate = fitted,
+            max_level = client.max_level,
+            "frame rate lowered to the client's AV1 level"
+        );
+    }
+    Ok(fitted)
+}
+
 /// Returns the configuration of one monitor of `width × height` with one AV1
 /// motion stream.
 fn display_config(
@@ -665,15 +709,22 @@ impl ActiveHost {
             {
                 self.update_outputs(now)?;
             }
-            if self.pending_since.is_none() && now >= next_frame_at {
+            // A recovery frame goes out as soon as possible: between frame
+            // times, and even when the network is behind (Section 6.8.4).
+            let recovery = self.sender.recovery_needed().is_some();
+            if self.pending_since.is_none() && (now >= next_frame_at || recovery) {
                 self.follow_pointer_mode()?;
                 self.update_outputs(now)?;
-                if self.network_behind(frame_interval) {
-                    self.stats.frame_skipped();
-                } else {
+                if recovery || !self.network_behind(frame_interval) {
                     self.request_frame(now)?;
+                } else {
+                    self.stats.frame_skipped();
                 }
-                next_frame_at += frame_interval;
+                next_frame_at = if now >= next_frame_at {
+                    next_frame_at + frame_interval
+                } else {
+                    now + frame_interval
+                };
                 if next_frame_at < now {
                     // Encoding fell behind: skip ahead rather than send a burst.
                     next_frame_at = now + frame_interval;

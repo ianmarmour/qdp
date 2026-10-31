@@ -28,6 +28,7 @@ mod encoder;
 mod frame;
 #[cfg(target_os = "linux")]
 mod headers;
+mod level;
 mod obu;
 mod sequence;
 #[cfg(target_os = "linux")]
@@ -47,8 +48,9 @@ pub use encoder::{
     Av1Encoder, EncodedFrame, EncoderSettings, FASTEST_SPEED, KeyFrameRequest, tile_count,
 };
 pub use frame::{Rgb32Order, Yuv420Frame};
+pub use level::{NO_LEVEL, TileCount, frame_rate_within, level_for};
 pub use obu::{Obu, ObuType, parse_obus, to_qdp_temporal_unit};
-pub use sequence::SequenceHeader;
+pub use sequence::{ColorDescription, SequenceHeader};
 #[cfg(target_os = "linux")]
 pub use vaapi::VaapiEncoder;
 
