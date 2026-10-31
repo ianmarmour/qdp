@@ -96,9 +96,13 @@ logs a warning and ignores input.
 The host streams its screen. On Linux it asks the desktop, through the
 ScreenCast portal that GNOME, KDE and wlroots compositors provide, which
 monitor to share; the first time, the desktop shows a dialog, and the choice is
-remembered in the identity directory for later sessions. If the screen cannot
-be captured the host streams a test pattern instead, and `--source screen` or
-`--source test-pattern` forces one. Run `qdp help` for every option, and set `QDP_LOG=debug`
+remembered in the identity directory for later sessions. On macOS the host
+captures the main display with ScreenCaptureKit; the first time, macOS asks to
+allow Screen Recording for the terminal or app running `qdp`, and performing
+the client's input needs Accessibility to be allowed for it as well, both under
+System Settings, Privacy & Security. If the screen cannot be captured the host
+streams a test pattern instead, and `--source screen` or `--source
+test-pattern` forces one. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail.
 
 ## Crates

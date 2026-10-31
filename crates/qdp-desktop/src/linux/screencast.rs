@@ -7,7 +7,7 @@
 //! passes back, so later sessions start without asking.
 
 use std::os::fd::OwnedFd;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ use qdp_codec::{Rgb32Order, Yuv420Frame};
 use qdp_runtime::{FrameSource, RuntimeError};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
+
+use crate::latest_frame::LatestFrame;
 
 /// The name of the thread that holds the portal session.
 const PORTAL_THREAD: &str = "qdp-portal";
@@ -44,43 +46,6 @@ const MAX_FRAME_RATE: u32 = 360;
 /// The bytes of one 32-bit pixel.
 const PIXEL_BYTES: u32 = 4;
 
-/// The newest captured frame, shared between the PipeWire thread and the
-/// encoder thread.
-#[derive(Debug, Default)]
-struct Shared {
-    /// The newest frame, or why capture stopped.
-    latest: Mutex<Latest>,
-    /// Notified when the first frame or an error arrives.
-    arrived: Condvar,
-}
-
-/// The state of [`Shared`].
-#[derive(Debug, Default)]
-struct Latest {
-    /// The newest frame.
-    frame: Option<Yuv420Frame>,
-    /// Why capture stopped, if it did.
-    error: Option<String>,
-}
-
-impl Shared {
-    /// Stores a new frame.
-    fn store(&self, frame: Yuv420Frame) {
-        if let Ok(mut latest) = self.latest.lock() {
-            latest.frame = Some(frame);
-        }
-        self.arrived.notify_all();
-    }
-
-    /// Records that capture stopped.
-    fn fail(&self, error: String) {
-        if let Ok(mut latest) = self.latest.lock() {
-            latest.error.get_or_insert(error);
-        }
-        self.arrived.notify_all();
-    }
-}
-
 /// What the portal returned for the chosen monitor.
 struct PortalStream {
     /// The PipeWire remote to read from.
@@ -96,7 +61,7 @@ pub struct ScreenCapture {
     /// The monitor's size.
     size: (usize, usize),
     /// The newest frame.
-    shared: Arc<Shared>,
+    shared: Arc<LatestFrame>,
     /// Stops the PipeWire thread.
     stop_pipewire: Option<pw::channel::Sender<()>>,
     /// The PipeWire thread.
@@ -144,7 +109,7 @@ impl ScreenCapture {
     /// Starts the PipeWire thread reading `node_id`, through the portal's
     /// `remote` if given, or the user's PipeWire daemon otherwise.
     fn start(remote: Option<OwnedFd>, node_id: u32) -> Result<Self, String> {
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(LatestFrame::default());
         let (stop_pipewire, stop_receiver) = pw::channel::channel();
         let thread_shared = Arc::clone(&shared);
         let pipewire = std::thread::Builder::new()
@@ -186,25 +151,7 @@ impl ScreenCapture {
 
     /// Waits up to `timeout` for a frame and returns the newest.
     fn wait_for_frame(&self, timeout: Duration) -> Result<Yuv420Frame, String> {
-        let latest = self
-            .shared
-            .latest
-            .lock()
-            .map_err(|_| "the capture thread panicked".to_owned())?;
-        let (latest, _) = self
-            .shared
-            .arrived
-            .wait_timeout_while(latest, timeout, |latest| {
-                latest.frame.is_none() && latest.error.is_none()
-            })
-            .map_err(|_| "the capture thread panicked".to_owned())?;
-        if let Some(error) = &latest.error {
-            return Err(error.clone());
-        }
-        latest
-            .frame
-            .clone()
-            .ok_or_else(|| "no frame arrived from the screen".to_owned())
+        self.shared.wait(timeout)
     }
 }
 
@@ -352,7 +299,7 @@ struct StreamFormat {
 fn run_pipewire(
     remote: Option<OwnedFd>,
     node_id: u32,
-    shared: &Arc<Shared>,
+    shared: &Arc<LatestFrame>,
     stop: pw::channel::Receiver<()>,
 ) -> Result<(), String> {
     pw::init();
