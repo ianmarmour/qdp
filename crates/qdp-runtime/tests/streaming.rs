@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qdp::auth::scram::ScramCredentials;
 use qdp::hid::ReportDescriptor;
@@ -22,11 +22,12 @@ use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, Key
 use qdp_runtime::{
     ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
-    DisplaySize, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource, GamepadFeedback,
-    HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue,
-    NoInput, PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, Playout,
-    PointerButton, PointerPosition, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
-    TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
+    DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource,
+    GamepadFeedback, HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle,
+    InputInjector, InputQueue, NoInput, PassthroughDevice, PassthroughFeedback, PassthroughPolicy,
+    PenInput, Playout, PointerButton, PointerPosition, Presentation, PresentationTiming,
+    RefreshMode, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, TouchPhase,
+    TouchPoint, UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -1860,6 +1861,113 @@ impl FrameSink for Endless {
         self.frames.fetch_add(1, Ordering::Relaxed);
         SinkControl::Continue
     }
+}
+
+/// A sink that shows frames later, as a window does: every other frame is
+/// replaced before it is shown. It reports a display's refresh timing.
+#[derive(Default)]
+struct LaterSink {
+    /// The frames given, oldest first, not yet reported.
+    given: Vec<FrameInfo>,
+    /// The frames given so far.
+    count: usize,
+    /// The presentations reported.
+    reported: Vec<Presentation>,
+}
+
+impl FrameSink for LaterSink {
+    fn present(&mut self, _frame: &Yuv420Frame, info: FrameInfo) -> SinkControl {
+        self.given.push(info);
+        self.count += 1;
+        if self.count >= FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+
+    fn presentation_timing(&self) -> PresentationTiming {
+        PresentationTiming::Deferred
+    }
+
+    fn take_presentations(&mut self) -> Vec<Presentation> {
+        let now = Instant::now();
+        let presentations: Vec<Presentation> = self
+            .given
+            .drain(..)
+            .map(|info| Presentation {
+                stream_id: info.stream_id,
+                frame_number: info.frame_number,
+                presented_at: (info.frame_number.0.into_inner() % 2 == 0).then_some(now),
+            })
+            .collect();
+        self.reported.extend(&presentations);
+        presentations
+    }
+
+    fn display_timing(&mut self) -> Option<DisplayTiming> {
+        Some(DisplayTiming {
+            refresh_period: Duration::from_nanos(16_666_667),
+            vsync: Instant::now(),
+            mode: RefreshMode::Fixed,
+        })
+    }
+}
+
+/// A sink that shows frames later reports each of them, shown or replaced,
+/// and the session runs to the end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deferred_presentations_are_reported() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    let mut sink = LaterSink::default();
+    let summary = tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut sink,
+            None,
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("streaming finishes in time")
+    .unwrap();
+    assert_eq!(summary.frames_presented, FRAMES as u64);
+    endpoint.wait_idle().await;
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    // Every frame but the last few, given after the last report, was
+    // reported in order.
+    let numbers: Vec<u64> = sink
+        .reported
+        .iter()
+        .map(|presentation| presentation.frame_number.0.into_inner())
+        .collect();
+    assert!(numbers.len() + sink.given.len() == FRAMES);
+    assert_eq!(numbers, (1..=numbers.len() as u64).collect::<Vec<_>>());
 }
 
 /// A client that authenticates replaces the desktop's current session,

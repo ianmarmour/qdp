@@ -16,7 +16,8 @@ use crate::wire::VarInt;
 pub const MAX_INCOMPLETE_FRAMES: usize = 16;
 
 /// The most frames kept per stream, complete or not, while they wait for an
-/// earlier frame.
+/// earlier, missing frame. Complete frames that wait only for the decoder are
+/// limited by [`MAX_KEPT_BYTES`] alone.
 pub const MAX_KEPT_FRAMES: usize = 128;
 
 /// The most bytes of frame data kept per stream: room for the largest frame
@@ -726,12 +727,57 @@ impl VideoReceiver {
             self.frames.remove(&incomplete[0]);
             self.declare_lost();
         }
-        while self.frames.len() > MAX_KEPT_FRAMES
-            || self.frames.values().map(|frame| frame.bytes).sum::<usize>() > MAX_KEPT_BYTES
-        {
+        while self.frames.len() - self.ready_frames() > MAX_KEPT_FRAMES {
+            // The missing frame they wait for is lost.
+            let missing = self
+                .frames
+                .iter()
+                .find(|(_, frame)| frame.complete.is_none())
+                .map(|(&number, _)| number);
+            match missing {
+                Some(number) if self.state == ReceiverState::Decoding => {
+                    self.frames.remove(&number);
+                }
+                _ => {
+                    self.frames.pop_first();
+                }
+            }
+            self.declare_lost();
+        }
+        while self.frames.values().map(|frame| frame.bytes).sum::<usize>() > MAX_KEPT_BYTES {
             self.frames.pop_first();
             self.declare_lost();
         }
+    }
+
+    /// Returns how many kept frames wait only for the decoder: the complete
+    /// frames that follow, in order, the frame last decoded or being decoded
+    /// in the `DECODING` state, or the newest frame the decoder can jump to
+    /// in the others.
+    fn ready_frames(&self) -> usize {
+        let first = match self.state {
+            ReceiverState::Decoding => {
+                Some(self.decoding.unwrap_or(self.last_decoded).0.into_inner() + 1)
+            }
+            ReceiverState::Loss | ReceiverState::KeyOnly => self
+                .frames
+                .iter()
+                .rev()
+                .find(|(_, frame)| self.is_jump_target(frame))
+                .map(|(number, _)| number.0.into_inner()),
+        };
+        let Some(first) = first.and_then(|first| VarInt::new(first).ok()) else {
+            return 0;
+        };
+        let mut next = first.into_inner();
+        self.frames
+            .range(FrameNumber(first)..)
+            .take_while(|(number, frame)| {
+                let ready = number.0.into_inner() == next && frame.complete.is_some();
+                next += 1;
+                ready
+            })
+            .count()
     }
 
     /// In the `LOSS` and `KEY_ONLY` states, discards the frames below the
@@ -856,6 +902,25 @@ mod tests {
     /// Returns a frame number.
     fn frame(number: u32) -> FrameNumber {
         FrameNumber(VarInt::from_u32(number))
+    }
+
+    /// Complete frames waiting for a slow decoder are all kept, in order.
+    #[test]
+    fn keeps_frames_for_a_slow_decoder() {
+        let mut harness = Harness::new();
+        let key = harness.send(FrameKind::Key, 100);
+        harness.deliver(&key);
+        for _ in 0..MAX_KEPT_FRAMES * 2 {
+            let delta = harness.send(FrameKind::Delta, 100);
+            harness.deliver(&delta);
+        }
+        assert_eq!(harness.receiver.state(), ReceiverState::KeyOnly);
+        let decoded = harness.decode_all();
+        assert_eq!(
+            decoded,
+            (1..=MAX_KEPT_FRAMES as u64 * 2 + 1).collect::<Vec<_>>()
+        );
+        assert_eq!(harness.receiver.state(), ReceiverState::Decoding);
     }
 
     /// A stream keeps a bounded number of frames waiting for a missing one,

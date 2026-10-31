@@ -12,8 +12,9 @@ use qdp::message::{
     DeviceAttach, DeviceDetach, DeviceFeatures, DeviceId, DeviceKind, DeviceOutput,
     DeviceStatusCode, DisplayConfig, DisplayConfigId, FeatureStatus, FeedbackRecord, FragmentFlags,
     GamepadOutput, HidFeatureRequest, HidFeatureResponse, InputClasses, KeyboardInfo,
-    KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader, StreamId,
-    VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer, WarpFlags,
+    KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, MonitorId, NO_LEVEL_LIMIT, StreamHeader,
+    StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer,
+    WarpFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, Negotiated};
@@ -30,7 +31,7 @@ use tracing::{debug, info, warn};
 use crate::audio::{ClientAudio, ClientAudioStreams};
 use crate::auth::ClientAuthExchange;
 use crate::client_cursor::{ClientCursor, CursorChange};
-use crate::client_display::DisplayRequests;
+use crate::client_display::{DisplayRequests, DisplayTimingReports};
 use crate::client_input::{
     ClientDevices, GamepadFeedback, InputQueue, KEYBOARD_ID, MOUSE_ID, PEN_ID, POINTER_ID,
     PassthroughFeedback, TEXT_ID, TOUCHSCREEN_ID, UserInput,
@@ -41,7 +42,7 @@ use crate::clipboard::{
     Side,
 };
 use crate::decode_thread::DecodeThread;
-use crate::media::{CursorWarp, FrameInfo, FrameSink, SinkControl, WarpKind};
+use crate::media::{CursorWarp, FrameInfo, FrameSink, PresentationTiming, SinkControl, WarpKind};
 use crate::stream_format::StreamFormat;
 use crate::{ClientCredentials, RuntimeError, close_on_error};
 
@@ -308,6 +309,10 @@ struct ActiveClient<'a> {
     hid_outputs: HidOutputs,
     /// The display the session is shown on, and the requests describing it.
     display: DisplayRequests,
+    /// The reports of the display's refresh timing.
+    display_timing: DisplayTimingReports,
+    /// The host monitor the client shows, once configured.
+    monitor_id: Option<MonitorId>,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
@@ -429,6 +434,8 @@ async fn run_session(
         monitor_origin: (0.0, 0.0),
         clipboard,
         display,
+        display_timing: DisplayTimingReports::default(),
+        monitor_id: None,
     };
     if let Some(config) = display_config {
         active.configure(&config)?;
@@ -703,6 +710,7 @@ impl ActiveClient<'_> {
 
     /// Replaces the video streams with those of `config` (Section 6.3.1).
     fn configure(&mut self, config: &DisplayConfig) -> Result<(), RuntimeError> {
+        self.monitor_id = config.monitors.first().map(|monitor| monitor.id);
         if let Some(monitor) = config.monitors.first() {
             let coordinate =
                 |value: SignedVarInt| i32::try_from(value.into_inner()).unwrap_or_default();
@@ -1012,6 +1020,7 @@ impl ActiveClient<'_> {
                             .peer_to_local(decoded.frame.header.capture_timestamp)
                             .map(|captured| decoded.decoded_at.saturating_duration_since(captured));
                         let info = FrameInfo {
+                            stream_id,
                             frame_number,
                             latency,
                             decoded_at: decoded.decoded_at,
@@ -1019,9 +1028,11 @@ impl ActiveClient<'_> {
                         self.summary.frames_presented += 1;
                         let control = self.sink.present(&picture, info);
                         self.input.set_display_config(stream.config_id);
-                        stream
-                            .receiver
-                            .frame_presented(frame_number, Some(Instant::now()));
+                        if self.sink.presentation_timing() == PresentationTiming::Immediate {
+                            stream
+                                .receiver
+                                .frame_presented(frame_number, Some(Instant::now()));
+                        }
                         if control == SinkControl::Stop {
                             return Ok(SinkControl::Stop);
                         }
@@ -1058,11 +1069,25 @@ impl ActiveClient<'_> {
     /// or `KEY_ONLY` state, however the other records are split (Section
     /// 6.8.3, rule 3).
     fn send_feedback(&mut self, now: Instant) -> Result<(), RuntimeError> {
-        let polled: Vec<FeedbackRecord> = self
+        for presentation in self.sink.take_presentations() {
+            if let Some(stream) = self.streams.get_mut(&presentation.stream_id) {
+                stream
+                    .receiver
+                    .frame_presented(presentation.frame_number, presentation.presented_at);
+            }
+        }
+        let mut polled: Vec<FeedbackRecord> = self
             .streams
             .values_mut()
             .flat_map(|stream| stream.receiver.poll_feedback(now))
             .collect();
+        if let (Some(timing), Some(monitor_id)) = (self.sink.display_timing(), self.monitor_id) {
+            polled.extend(
+                self.display_timing
+                    .poll(timing, monitor_id, &self.clock, now)
+                    .map(FeedbackRecord::DisplayTiming),
+            );
+        }
         if polled.is_empty() {
             return Ok(());
         }

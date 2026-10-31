@@ -4,7 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use qdp::message::{BLOCK_SIZE, BlockGrid, BlockSet, CursorImage, FrameNumber, PointerMode};
+use qdp::message::{
+    BLOCK_SIZE, BlockGrid, BlockSet, CursorImage, FrameNumber, PointerMode, StreamId,
+};
 use qdp_codec::Yuv420Frame;
 
 use crate::RuntimeError;
@@ -244,6 +246,8 @@ pub enum SinkControl {
 /// What the client knows about a presented frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
+    /// The frame's stream.
+    pub stream_id: StreamId,
     /// The frame's number in its stream.
     pub frame_number: FrameNumber,
     /// The time from capture on the host to decoding on the client, once the
@@ -251,6 +255,51 @@ pub struct FrameInfo {
     pub latency: Option<Duration>,
     /// When the frame finished decoding.
     pub decoded_at: Instant,
+}
+
+/// When a sink shows the frames it is given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum PresentationTiming {
+    /// Each frame is shown as [`FrameSink::present`] returns.
+    #[default]
+    Immediate,
+    /// Frames are shown later, and [`FrameSink::take_presentations`] says
+    /// when, or that a newer frame replaced one first.
+    Deferred,
+}
+
+/// When a frame a sink was given reached the screen, for its `FRAME_TIMING`
+/// record (Section 6.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Presentation {
+    /// The frame's stream.
+    pub stream_id: StreamId,
+    /// The frame's number in its stream.
+    pub frame_number: FrameNumber,
+    /// When it was shown, or `None` if a newer frame replaced it first.
+    pub presented_at: Option<Instant>,
+}
+
+/// Whether a display shows frames at a fixed refresh rate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum RefreshMode {
+    /// The display refreshes at its fixed period.
+    #[default]
+    Fixed,
+    /// The display is in variable refresh mode, and shows a frame as soon as
+    /// it is presented.
+    Variable,
+}
+
+/// The refresh timing of the display a sink shows frames on (Section 5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DisplayTiming {
+    /// The time between refreshes.
+    pub refresh_period: Duration,
+    /// A recent start of vertical blanking.
+    pub vsync: Instant,
+    /// Whether the display is in variable refresh mode.
+    pub mode: RefreshMode,
 }
 
 /// How a warp moves the client's pointer (Section 9.4).
@@ -277,6 +326,24 @@ pub struct CursorWarp {
 pub trait FrameSink {
     /// Shows a decoded frame and says whether to keep streaming.
     fn present(&mut self, frame: &Yuv420Frame, info: FrameInfo) -> SinkControl;
+
+    /// Returns when the sink shows the frames it is given.
+    fn presentation_timing(&self) -> PresentationTiming {
+        PresentationTiming::Immediate
+    }
+
+    /// Returns when the frames given since the last call reached the
+    /// screen, oldest first, for a sink whose timing is
+    /// [`PresentationTiming::Deferred`].
+    fn take_presentations(&mut self) -> Vec<Presentation> {
+        Vec::new()
+    }
+
+    /// Returns the refresh timing of the display the frames are shown on,
+    /// if the sink knows it.
+    fn display_timing(&mut self) -> Option<DisplayTiming> {
+        None
+    }
 
     /// Shows the host's cursor image at the user's pointer, or hides the
     /// pointer when `None` (Section 9.3). The image is the size it has on the

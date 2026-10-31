@@ -12,8 +12,10 @@ mod input;
 mod keycodes;
 mod pen;
 mod pen_capture;
+mod timing;
 mod touch;
 
 pub use capture::DesktopDuplication;
 pub use input::SendInputInjector;
 pub use pen_capture::WindowPen;
+pub use timing::display_timing;

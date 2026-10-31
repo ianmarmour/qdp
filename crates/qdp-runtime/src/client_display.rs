@@ -1,15 +1,22 @@
 //! The client's display requests: the first during configuration, then one
 //! whenever the display changes, at most one every 250 ms while it keeps
-//! changing and one once it stops (Section 6.2).
+//! changing and one once it stops (Section 6.2); and its reports of the
+//! display's refresh timing (Section 5.3).
 
 use std::time::{Duration, Instant};
 
 use qdp::message::{
     ClientMonitor, ClientMonitorFlags, ClientMonitorId, DisplayRequest, DisplayRequestId,
+    DisplayTimingFlags, DisplayTimingRecord, MonitorId,
 };
+use qdp::time::SessionClock;
 use qdp::wire::{SignedVarInt, VarInt};
 
 use crate::client::DisplaySize;
+use crate::media::{DisplayTiming, RefreshMode};
+
+/// The longest time between two `DISPLAY_TIMING` records (Section 5.3).
+const TIMING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The shortest time between two `DISPLAY_REQUEST`s (Section 6.2).
 const REQUEST_INTERVAL: Duration = Duration::from_millis(250);
@@ -65,6 +72,47 @@ impl DisplayRequests {
         self.requested = display;
         self.sent_at = now;
         Some(display_request(display, self.last_id))
+    }
+}
+
+/// The client's `DISPLAY_TIMING` records: one as soon as the timing is
+/// known, one whenever it changes, and one at least every second (Section
+/// 5.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DisplayTimingReports {
+    /// When the last record was sent, the monitor it was for, and the period
+    /// and mode it reported.
+    last: Option<(Instant, MonitorId, Duration, RefreshMode)>,
+}
+
+impl DisplayTimingReports {
+    /// Returns the record to send at `now` about `timing`, the display that
+    /// shows `monitor_id`, if one is due. Times are on `clock`.
+    pub(crate) fn poll(
+        &mut self,
+        timing: DisplayTiming,
+        monitor_id: MonitorId,
+        clock: &SessionClock,
+        now: Instant,
+    ) -> Option<DisplayTimingRecord> {
+        let due = self.last.is_none_or(|(sent_at, monitor, period, mode)| {
+            (monitor, period, mode) != (monitor_id, timing.refresh_period, timing.mode)
+                || now.saturating_duration_since(sent_at) >= TIMING_INTERVAL
+        });
+        if !due {
+            return None;
+        }
+        self.last = Some((now, monitor_id, timing.refresh_period, timing.mode));
+        let nanos = u64::try_from(timing.refresh_period.as_nanos()).unwrap_or(u64::MAX);
+        Some(DisplayTimingRecord {
+            monitor_id,
+            refresh_period_nanos: VarInt::new(nanos).unwrap_or(VarInt::MAX),
+            vsync_timestamp: clock.timestamp(timing.vsync),
+            flags: match timing.mode {
+                RefreshMode::Fixed => DisplayTimingFlags::default(),
+                RefreshMode::Variable => DisplayTimingFlags::VRR_ACTIVE,
+            },
+        })
     }
 }
 
@@ -125,5 +173,38 @@ mod tests {
         requests.display_changed(display(1500));
         requests.display_changed(display(1400));
         assert_eq!(requests.poll_timeout(), None);
+    }
+
+    /// Timing is reported at once, again when it changes, and at least
+    /// every second.
+    #[test]
+    fn reports_display_timing() {
+        let start = Instant::now();
+        let clock = SessionClock::new(start);
+        let monitor = MonitorId(VarInt::from_u32(1));
+        let timing = DisplayTiming {
+            refresh_period: Duration::from_nanos(16_683_350),
+            vsync: start + Duration::from_millis(5),
+            mode: RefreshMode::Fixed,
+        };
+        let mut reports = DisplayTimingReports::default();
+        let first = reports.poll(timing, monitor, &clock, start).unwrap();
+        assert_eq!(first.refresh_period_nanos, VarInt::from_u32(16_683_350));
+        assert_eq!(first.vsync_timestamp.as_micros(), 5_000);
+        assert_eq!(first.flags, DisplayTimingFlags::default());
+        let soon = start + TIMING_INTERVAL / 2;
+        assert!(reports.poll(timing, monitor, &clock, soon).is_none());
+        let variable = DisplayTiming {
+            mode: RefreshMode::Variable,
+            ..timing
+        };
+        let changed = reports.poll(variable, monitor, &clock, soon).unwrap();
+        assert_eq!(changed.flags, DisplayTimingFlags::VRR_ACTIVE);
+        assert!(reports.poll(variable, monitor, &clock, soon).is_none());
+        assert!(
+            reports
+                .poll(variable, monitor, &clock, soon + TIMING_INTERVAL)
+                .is_some()
+        );
     }
 }
