@@ -5,9 +5,18 @@
 //!   and PipeWire, and [`UinputInjector`] creates virtual keyboard, mouse and
 //!   pointer devices through uinput, which works under every Wayland
 //!   compositor and X11 server.
+//! - macOS: `MacScreenCapture` captures the main display with
+//!   ScreenCaptureKit, and `QuartzInjector` posts Quartz events.
 
+#[cfg(any(
+    all(target_os = "linux", feature = "screen-capture"),
+    target_os = "macos"
+))]
+mod latest_frame;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 
 use std::path::Path;
 
@@ -18,6 +27,8 @@ use tracing::warn;
 pub use linux::ScreenCapture;
 #[cfg(target_os = "linux")]
 pub use linux::UinputInjector;
+#[cfg(target_os = "macos")]
+pub use macos::{MacScreenCapture, QuartzInjector};
 
 /// The file, in the host's state directory, that keeps the token restoring the
 /// user's choice of monitor.
@@ -46,8 +57,17 @@ pub fn open_screen(state_directory: &Path) -> Result<Box<dyn FrameSource>, Strin
     Ok(Box::new(capture))
 }
 
+/// Starts capturing the main display. Blocks until the first frame arrives.
+#[cfg(target_os = "macos")]
+pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
+    Ok(Box::new(MacScreenCapture::open()?))
+}
+
 /// Starts capturing the screen; this platform cannot yet.
-#[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
+#[cfg(not(any(
+    all(target_os = "linux", feature = "screen-capture"),
+    target_os = "macos"
+)))]
 pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
     Err("screen capture is not supported on this platform yet".to_owned())
 }
@@ -78,8 +98,14 @@ fn platform_injector(width: u32, height: u32) -> Result<Box<dyn InputInjector>, 
         })
 }
 
+/// Opens the platform's input injector: Quartz events on macOS.
+#[cfg(target_os = "macos")]
+fn platform_injector(width: u32, height: u32) -> Result<Box<dyn InputInjector>, String> {
+    Ok(Box::new(QuartzInjector::new(width, height)))
+}
+
 /// Opens the platform's input injector; this platform has none yet.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn platform_injector(_width: u32, _height: u32) -> Result<Box<dyn InputInjector>, String> {
     Err("input injection is not supported on this platform yet".to_owned())
 }
