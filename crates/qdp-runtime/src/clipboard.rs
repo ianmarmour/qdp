@@ -124,11 +124,28 @@ pub(crate) enum Side {
     Client,
 }
 
+/// Whether the session has focus on the client: clipboard offers are sent
+/// only while it has (Section 10.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Focus {
+    /// The session has focus.
+    #[default]
+    Focused,
+    /// Another application has focus.
+    Unfocused,
+}
+
 /// What the clipboard logic asks the endpoint to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClipboardOutput {
     /// Send a control message.
     Message(ControlMessage),
+    /// Abort reading the data answering a request that is no longer needed,
+    /// with STOP_SENDING carrying `QDP_REQUEST_CANCELLED` (Section 10.4).
+    Cancel {
+        /// The request.
+        request_id: ClipboardRequestId,
+    },
     /// Answer a request with data on a `CLIPBOARD_DATA` stream.
     Data {
         /// The request answered.
@@ -201,6 +218,12 @@ pub(crate) struct ClipboardSync {
     last_request_id: u64,
     /// The requests waiting for an answer, and when they were sent.
     requests: HashMap<ClipboardRequestId, Instant>,
+    /// Whether the session has focus on the client; a host treats it as
+    /// always focused, since it cannot tell.
+    focus: Focus,
+    /// Whether the local clipboard changed while the session was unfocused,
+    /// so that it is offered once focus returns.
+    offer_waiting: bool,
 }
 
 impl ClipboardSync {
@@ -227,7 +250,20 @@ impl ClipboardSync {
             highest_peer_offer: OfferId::NONE,
             last_request_id: 0,
             requests: HashMap::new(),
+            focus: Focus::Focused,
+            offer_waiting: false,
         }
+    }
+
+    /// Notes whether the session has focus, offering the local clipboard
+    /// if it changed while it had not.
+    pub(crate) fn set_focus(&mut self, focus: Focus) -> Vec<ClipboardOutput> {
+        self.focus = focus;
+        if focus == Focus::Focused && self.offer_waiting {
+            self.offer_waiting = false;
+            return self.offer_if_open();
+        }
+        Vec::new()
     }
 
     /// Returns whether the session shares the clipboard in either direction.
@@ -272,6 +308,12 @@ impl ClipboardSync {
             return Vec::new();
         };
         if !(self.started && self.offers_open) || self.send_limit.is_none() {
+            return Vec::new();
+        }
+        // The client's initial offer goes out whatever the focus; later ones
+        // wait for it (Section 10.2).
+        if self.focus == Focus::Unfocused && self.last_offer_id > 0 {
+            self.offer_waiting = true;
             return Vec::new();
         }
         self.last_offer_id += 1;
@@ -322,6 +364,13 @@ impl ClipboardSync {
                 outputs.extend(self.offer_if_open());
             }
         }
+        // The new offer replaces the one earlier requests were for, so
+        // their data is no longer needed.
+        outputs.extend(
+            self.requests
+                .drain()
+                .map(|(request_id, _)| ClipboardOutput::Cancel { request_id }),
+        );
         let Some(format) = offer.formats.iter().find(|format| is_plain_text(format)) else {
             return outputs;
         };
@@ -415,10 +464,23 @@ impl ClipboardSync {
             .map(|sent| *sent + REQUEST_TIMEOUT)
     }
 
-    /// Gives up on requests that waited too long.
-    pub(crate) fn handle_timeout(&mut self, now: Instant) {
-        self.requests
-            .retain(|_, sent| now.saturating_duration_since(*sent) < REQUEST_TIMEOUT);
+    /// Gives up on requests that waited too long, cancelling their data
+    /// should it still come (Section 10.4).
+    pub(crate) fn handle_timeout(&mut self, now: Instant) -> Vec<ClipboardOutput> {
+        let expired: Vec<ClipboardRequestId> = self
+            .requests
+            .iter()
+            .filter(|(_, sent)| now.saturating_duration_since(**sent) >= REQUEST_TIMEOUT)
+            .map(|(&request_id, _)| request_id)
+            .collect();
+        expired
+            .into_iter()
+            .map(|request_id| {
+                self.requests.remove(&request_id);
+                debug!("clipboard request given up");
+                ClipboardOutput::Cancel { request_id }
+            })
+            .collect()
     }
 }
 
@@ -547,15 +609,20 @@ impl ClipboardLink {
 
     /// Takes changes of the system clipboard and expires requests.
     pub(crate) fn service(&mut self, now: Instant) -> Vec<ClipboardOutput> {
-        self.sync.handle_timeout(now);
+        let mut outputs = self.sync.handle_timeout(now);
         if now < self.next_check {
-            return Vec::new();
+            return outputs;
         }
         self.next_check = ClipboardWorker::next_check(now);
-        match self.worker.latest_change() {
-            Some(text) => self.sync.local_changed(text),
-            None => Vec::new(),
+        if let Some(text) = self.worker.latest_change() {
+            outputs.extend(self.sync.local_changed(text));
         }
+        outputs
+    }
+
+    /// Notes whether the session has focus on the client (Section 10.2).
+    pub(crate) fn set_focus(&mut self, focus: Focus) -> Vec<ClipboardOutput> {
+        self.sync.set_focus(focus)
     }
 
     /// Acts on a clipboard message from the peer; other messages are
@@ -760,7 +827,12 @@ mod tests {
         };
         let asked = request(&client.handle_offer(&offer, now));
         assert_eq!(client.poll_timeout(), Some(now + REQUEST_TIMEOUT));
-        client.handle_timeout(now + REQUEST_TIMEOUT);
+        assert_eq!(
+            client.handle_timeout(now + REQUEST_TIMEOUT),
+            [ClipboardOutput::Cancel {
+                request_id: asked.request_id
+            }]
+        );
         assert_eq!(client.poll_timeout(), None);
         assert!(
             client
@@ -773,6 +845,67 @@ mod tests {
             client
                 .handle_data(asked.request_id, Ok(vec![0xff]))
                 .is_empty()
+        );
+    }
+
+    /// A newer offer supersedes the requests for older ones, whose data is
+    /// cancelled.
+    #[test]
+    fn cancels_superseded_requests() {
+        let now = Instant::now();
+        let mut client = ClipboardSync::new(Side::Client, LIMIT, LIMIT);
+        client.local_changed(None);
+        client.start();
+        let offer = |offer_id| ClipboardOffer {
+            offer_id: OfferId(VarInt::from_u32(offer_id)),
+            peer_offer_id: OfferId(VarInt::from_u32(1)),
+            formats: vec![PLAIN_TEXT_FORMAT.to_owned()],
+        };
+        let first = request(&client.handle_offer(&offer(1), now));
+        let outputs = client.handle_offer(&offer(2), now);
+        assert!(outputs.contains(&ClipboardOutput::Cancel {
+            request_id: first.request_id
+        }));
+        let second = request(&outputs);
+        assert_ne!(second.request_id, first.request_id);
+        assert!(
+            client
+                .handle_data(first.request_id, Ok(b"old".to_vec()))
+                .is_empty()
+        );
+        assert_eq!(
+            client.handle_data(second.request_id, Ok(b"new".to_vec())),
+            [ClipboardOutput::Publish("new".to_owned())]
+        );
+    }
+
+    /// The client's initial offer goes out unfocused; later changes wait
+    /// for focus, and the newest is offered when it returns.
+    #[test]
+    fn offers_only_with_focus() {
+        let mut client = ClipboardSync::new(Side::Client, LIMIT, LIMIT);
+        client.set_focus(Focus::Unfocused);
+        client.local_changed(Some("first".to_owned()));
+        assert_eq!(
+            offer(&client.start()).offer_id,
+            OfferId(VarInt::from_u32(1))
+        );
+        assert!(client.local_changed(Some("second".to_owned())).is_empty());
+        assert!(client.local_changed(Some("third".to_owned())).is_empty());
+        let resumed = offer(&client.set_focus(Focus::Focused));
+        assert_eq!(resumed.offer_id, OfferId(VarInt::from_u32(2)));
+        assert!(client.set_focus(Focus::Focused).is_empty());
+        let asked = ClipboardRequest {
+            request_id: ClipboardRequestId(VarInt::from_u32(1)),
+            offer_id: resumed.offer_id,
+            format: PLAIN_TEXT_FORMAT.to_owned(),
+        };
+        assert_eq!(
+            client.handle_request(&asked),
+            ClipboardOutput::Data {
+                request_id: asked.request_id,
+                data: b"third".to_vec()
+            }
         );
     }
 

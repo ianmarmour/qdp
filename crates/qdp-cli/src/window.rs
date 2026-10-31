@@ -17,7 +17,7 @@ use qdp::message::{CursorImage, FrameNumber, PointerKind, PointerMode, StreamId}
 use qdp_codec::Yuv420Frame;
 use qdp_desktop::{DeviceSelector, Microphone, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
-    CursorWarp, DisplaySize, DisplayTiming, FrameInfo, FrameSink, InputHandle, PenInput,
+    CursorWarp, DisplaySize, DisplayTiming, Focus, FrameInfo, FrameSink, InputHandle, PenInput,
     PointerButton, Presentation, PresentationTiming, SinkControl, TouchPhase, UserInput, WarpKind,
 };
 use softbuffer::{Context, Surface};
@@ -985,6 +985,11 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             WindowEvent::MouseWheel { delta, .. } => self.scroll(delta),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                self.input.send(UserInput::Focus(if focused {
+                    Focus::Focused
+                } else {
+                    Focus::Unfocused
+                }));
                 #[cfg(feature = "gamepad")]
                 if let Some(gamepads) = &self.gamepads {
                     gamepads.set_focused(focused);

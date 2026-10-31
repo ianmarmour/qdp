@@ -3,12 +3,13 @@
 //! peer's streams, each read to its end before the application sees it or
 //! followed as its data arrives.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use qdp::message::StreamHeader;
 use qdp::registry::ErrorCode;
 use quinn::{Connection, RecvStream};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tracing::debug;
 
 use crate::TransportError;
@@ -20,6 +21,57 @@ const READ_CHUNK: usize = 64 << 10;
 /// The complete streams and chunks waiting for the application. When it
 /// falls behind, reading further streams waits.
 const RECEIVED_QUEUE: usize = 16;
+
+/// The most cancellations kept for streams that have not arrived: the
+/// oldest are forgotten first.
+const MAX_CANCELLATIONS: usize = 64;
+
+/// The streams the application no longer wants, by header, with the code
+/// that aborts each, shared with the tasks that read them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Cancellations(Arc<CancellationState>);
+
+/// What [`Cancellations`] share.
+#[derive(Debug, Default)]
+struct CancellationState {
+    /// The cancelled headers, oldest first.
+    headers: Mutex<VecDeque<(StreamHeader, ErrorCode)>>,
+    /// Notified when a stream is cancelled.
+    changed: Notify,
+}
+
+impl Cancellations {
+    /// Cancels the stream with `header`, being read or still to arrive: it
+    /// is aborted with STOP_SENDING carrying `code`, and its data is not
+    /// delivered.
+    pub(crate) fn cancel(&self, header: StreamHeader, code: ErrorCode) {
+        {
+            let mut headers = self
+                .0
+                .headers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if headers.len() == MAX_CANCELLATIONS {
+                headers.pop_front();
+            }
+            headers.push_back((header, code));
+        }
+        self.0.changed.notify_waiters();
+    }
+
+    /// Takes the cancellation of the stream with `header`, if there is one.
+    fn take(&self, header: &StreamHeader) -> Option<ErrorCode> {
+        let mut headers = self
+            .0
+            .headers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let index = headers
+            .iter()
+            .position(|(cancelled, _)| cancelled == header)?;
+        headers.remove(index).map(|(_, code)| code)
+    }
+}
 
 /// How much of a stream's data to read, and the code that aborts a stream
 /// with more.
@@ -148,25 +200,28 @@ pub(crate) async fn write_stream(
 async fn accept_streams(
     connection: Connection,
     policy: Arc<dyn Fn(&StreamHeader) -> StreamPolicy + Send + Sync>,
+    cancellations: Cancellations,
     received: mpsc::Sender<Incoming>,
 ) {
     while let Ok(stream) = connection.accept_uni().await {
         let connection = connection.clone();
         let policy = Arc::clone(&policy);
+        let cancellations = cancellations.clone();
         let received = received.clone();
         tokio::spawn(async move {
-            read_stream(&connection, stream, &*policy, &received).await;
+            read_stream(&connection, stream, &*policy, &cancellations, &received).await;
         });
     }
 }
 
 /// Reads one stream: its header, then its data as `policy` directs, queued
 /// on `received`. Streams that end before their header does are ignored, as
-/// are streams that are refused or forbidden.
+/// are streams that are refused, forbidden or among `cancellations`.
 async fn read_stream(
     connection: &Connection,
     mut stream: RecvStream,
     policy: &(dyn Fn(&StreamHeader) -> StreamPolicy + Send + Sync),
+    cancellations: &Cancellations,
     received: &mpsc::Sender<Incoming>,
 ) {
     let mut buffer = Vec::new();
@@ -202,13 +257,26 @@ async fn read_stream(
             let _ = stream.stop(quic_code(limit.overflow));
             break Err(StreamFailure::TooLong);
         }
-        match stream.read_chunk(READ_CHUNK, true).await {
-            Ok(Some(chunk)) => buffer.extend_from_slice(&chunk.bytes),
-            Ok(None) => break Ok(buffer),
-            Err(quinn::ReadError::Reset(code)) => {
-                break Err(StreamFailure::Reset(code.into_inner()));
-            }
-            Err(_) => break Err(StreamFailure::ConnectionLost),
+        // Listening before looking means a cancellation in between is not
+        // missed.
+        let cancelled = cancellations.0.changed.notified();
+        tokio::pin!(cancelled);
+        cancelled.as_mut().enable();
+        if let Some(code) = cancellations.take(&header) {
+            debug!(?header, "stream cancelled");
+            let _ = stream.stop(quic_code(code));
+            return;
+        }
+        tokio::select! {
+            chunk = stream.read_chunk(READ_CHUNK, true) => match chunk {
+                Ok(Some(chunk)) => buffer.extend_from_slice(&chunk.bytes),
+                Ok(None) => break Ok(buffer),
+                Err(quinn::ReadError::Reset(code)) => {
+                    break Err(StreamFailure::Reset(code.into_inner()));
+                }
+                Err(_) => break Err(StreamFailure::ConnectionLost),
+            },
+            () = &mut cancelled => {}
         }
     };
     let _ = received
@@ -262,8 +330,9 @@ async fn follow_stream(
 pub(crate) fn receive_streams(
     connection: Connection,
     policy: Arc<dyn Fn(&StreamHeader) -> StreamPolicy + Send + Sync>,
+    cancellations: Cancellations,
 ) -> mpsc::Receiver<Incoming> {
     let (sender, receiver) = mpsc::channel(RECEIVED_QUEUE);
-    tokio::spawn(accept_streams(connection, policy, sender));
+    tokio::spawn(accept_streams(connection, policy, cancellations, sender));
     receiver
 }

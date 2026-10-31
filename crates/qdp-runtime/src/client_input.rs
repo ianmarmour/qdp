@@ -20,6 +20,7 @@ use crate::audio::Microphone;
 use crate::client::DisplaySize;
 use crate::client_passthrough::PassthroughDevices;
 use crate::client_touch::Touchscreen;
+use crate::clipboard::Focus;
 use crate::host_input::{PointerButton, TouchPhase};
 
 /// The keyboard's Device ID.
@@ -232,6 +233,8 @@ pub enum UserInput {
     Display(DisplaySize),
     /// The user turned the microphone on or off (Section 7.7).
     Microphone(Microphone),
+    /// The session gained or lost focus on the client (Section 10.2).
+    Focus(Focus),
 }
 
 /// A gamepad's rumble and LED, from the host's applications (Section 8.4.7).
@@ -869,7 +872,8 @@ impl ClientDevices {
             | UserInput::PassthroughDisconnected { .. }
             | UserInput::FeatureResponse { .. }
             | UserInput::Display(_)
-            | UserInput::Microphone(_) => Vec::new(),
+            | UserInput::Microphone(_)
+            | UserInput::Focus(_) => Vec::new(),
         }
     }
 

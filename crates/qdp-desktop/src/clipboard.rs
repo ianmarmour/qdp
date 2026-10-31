@@ -205,7 +205,8 @@ mod secret {
             Self { x11: None }
         }
 
-        /// Returns whether the clipboard holds content marked secret.
+        /// Returns whether the clipboard holds content marked secret. If its
+        /// types cannot be read, the content is treated as secret.
         pub(super) fn marked(&mut self) -> bool {
             if std::env::var_os("WAYLAND_DISPLAY").is_some() {
                 if let Ok(types) = get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
@@ -218,7 +219,7 @@ mod secret {
             self.x11
                 .as_ref()
                 .and_then(|x11| x11.offers(SECRET_HINT))
-                .unwrap_or(false)
+                .unwrap_or(true)
         }
     }
 }
@@ -245,12 +246,13 @@ mod secret {
             Self
         }
 
-        /// Returns whether the pasteboard holds content marked secret.
+        /// Returns whether the pasteboard holds content marked secret. If
+        /// its types cannot be read, the content is treated as secret.
         pub(super) fn marked(&mut self) -> bool {
             autoreleasepool(|_| {
                 NSPasteboard::generalPasteboard()
                     .types()
-                    .is_some_and(|types| {
+                    .is_none_or(|types| {
                         types
                             .iter()
                             .any(|kind| SECRET_TYPES.contains(&kind.to_string().as_str()))
