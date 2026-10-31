@@ -10,7 +10,7 @@
 use std::io;
 
 use qdp::message::{KeyboardInfo, KeyboardLeds, LayoutPlatform, PointerKind};
-use qdp_runtime::{InputAction, InputInjector, PointerButton};
+use qdp_runtime::{InputAction, InputInjector, PixelRect, PointerButton};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ACTIVATE_KEYBOARD_LAYOUT_FLAGS, GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
@@ -370,22 +370,49 @@ impl InputInjector for SendInputInjector {
     /// Returns relative mode while an application has both hidden the pointer
     /// and confined it, as games that read raw mouse motion do.
     fn pointer_mode(&mut self) -> PointerKind {
-        let mut cursor = CURSORINFO {
-            cbSize: size_of::<CURSORINFO>() as u32,
-            ..CURSORINFO::default()
-        };
-        // SAFETY: the structure's size is set as the call requires.
-        let hidden =
-            unsafe { GetCursorInfo(&mut cursor) }.is_ok() && cursor.flags.0 & CURSOR_SHOWING.0 == 0;
-        let mut clip = RECT::default();
-        // SAFETY: the rectangle is written before the call returns.
-        let clipped = unsafe { GetClipCursor(&mut clip) }.is_ok() && clip != virtual_screen();
-        if hidden && clipped {
+        if !cursor_shown() && cursor_clip().is_some() {
             PointerKind::Relative
         } else {
             PointerKind::Absolute
         }
     }
+
+    fn pointer_confinement(&mut self) -> Option<PixelRect> {
+        if !cursor_shown() {
+            return None;
+        }
+        // The part of the clip on the captured primary monitor.
+        let clip = cursor_clip()?;
+        let (width, height) = self.translator.size;
+        let clamp = |value: i32, size: i64| i64::from(value).clamp(0, size);
+        let (left, right) = (clamp(clip.left, width), clamp(clip.right, width));
+        let (top, bottom) = (clamp(clip.top, height), clamp(clip.bottom, height));
+        (right > left && bottom > top).then(|| PixelRect {
+            x: left as i32,
+            y: top as i32,
+            width: (right - left) as u32,
+            height: (bottom - top) as u32,
+        })
+    }
+}
+
+/// Returns whether the pointer is shown.
+fn cursor_shown() -> bool {
+    let mut cursor = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..CURSORINFO::default()
+    };
+    // SAFETY: the structure's size is set as the call requires.
+    unsafe { GetCursorInfo(&mut cursor) }.is_err() || cursor.flags.0 & CURSOR_SHOWING.0 != 0
+}
+
+/// Returns the area an application confined the pointer to, in screen
+/// pixels, or `None` while nothing confines it.
+fn cursor_clip() -> Option<RECT> {
+    let mut clip = RECT::default();
+    // SAFETY: the rectangle is written before the call returns.
+    unsafe { GetClipCursor(&mut clip) }.ok()?;
+    (clip != virtual_screen()).then_some(clip)
 }
 
 /// Returns the area of all monitors, which the pointer moves in when nothing

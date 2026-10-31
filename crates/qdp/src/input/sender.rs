@@ -80,6 +80,19 @@ struct RetainedReport {
     produced_at: Instant,
     /// When it was last sent, if it has been.
     last_sent: Option<Instant>,
+    /// The layout and warp its positions were computed with, which the
+    /// datagram carrying it names (Section 8.3).
+    labels: Labels,
+}
+
+/// The `DISPLAY_CONFIG` whose layout a report's positions use, and the
+/// latest `CURSOR_WARP` processed when it was produced (Section 8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Labels {
+    /// The Display Config ID.
+    display_config_id: DisplayConfigId,
+    /// The Warp ID.
+    warp_id: WarpId,
 }
 
 /// The newest report of one device.
@@ -164,6 +177,19 @@ impl InputSender {
         self.warp_id = self.warp_id.max(warp_id);
     }
 
+    /// Returns the labels of reports produced now.
+    fn labels(&self) -> Labels {
+        Labels {
+            display_config_id: self.display_config_id,
+            warp_id: self.warp_id,
+        }
+    }
+
+    /// Returns the highest sequence number the host acknowledged, or 0.
+    pub fn acknowledged(&self) -> InputSequence {
+        InputSequence(VarInt::new(self.acknowledged).unwrap_or(VarInt::MAX))
+    }
+
     /// Returns Oldest Retained.
     pub fn oldest_retained(&self) -> InputSequence {
         InputSequence(VarInt::new(self.oldest_retained).unwrap_or(VarInt::MAX))
@@ -183,6 +209,7 @@ impl InputSender {
         rest: DeviceRest,
         now: Instant,
     ) -> Option<InputSequence> {
+        let labels = self.labels();
         let device = self.devices.get_mut(&device_id)?;
         device.rest = rest;
         let mergeable = device.newest.as_ref().and_then(|(sequence, _)| {
@@ -196,6 +223,7 @@ impl InputSender {
             Some(sequence) => {
                 if let Some(report) = self.retained.get_mut(&sequence) {
                     report.data.clone_from(&data);
+                    report.labels = labels;
                 }
                 sequence
             }
@@ -210,6 +238,7 @@ impl InputSender {
                         kind,
                         produced_at: now,
                         last_sent: None,
+                        labels,
                     },
                 );
                 sequence
@@ -276,6 +305,16 @@ impl InputSender {
             .map(|(&sequence, _)| sequence);
         let anything_due = self.retained.values().any(is_due);
         let candidates: Vec<u64> = new.chain(due).chain(filler).collect();
+        // One datagram names one layout and warp, so it carries only the
+        // reports computed with the first candidate's; the next carries
+        // the others.
+        let labels = candidates
+            .first()
+            .map_or(self.labels(), |sequence| self.retained[sequence].labels);
+        let candidates: Vec<u64> = candidates
+            .into_iter()
+            .filter(|sequence| self.retained[sequence].labels == labels)
+            .collect();
 
         let header_budget = DatagramType::INPUT.0.encoded_len() + HEADER_FIELDS * MAX_VARINT_LENGTH;
         let mut budget = max_datagram_size.saturating_sub(header_budget);
@@ -323,8 +362,8 @@ impl InputSender {
         let datagram = Input {
             timestamp,
             oldest_retained: self.oldest_retained(),
-            display_config_id: self.display_config_id,
-            warp_id: self.warp_id,
+            display_config_id: labels.display_config_id,
+            warp_id: labels.warp_id,
             reports,
         }
         .to_bytes();
@@ -491,6 +530,42 @@ mod tests {
             repeat_at,
         );
         assert_eq!(sender.oldest_retained().0.into_inner(), 2);
+    }
+
+    /// Each datagram names the layout and warp its reports were computed
+    /// with: reports from before and after a new layout go in separate
+    /// datagrams.
+    #[test]
+    fn labels_reports() {
+        let now = Instant::now();
+        let mut sender = sender(now);
+        let push = |sender: &mut InputSender, data| {
+            sender.push(
+                device(1),
+                vec![data],
+                ReportKind::Transition,
+                DeviceRest::Active,
+                now,
+            );
+        };
+        sender.set_display_config(DisplayConfigId(VarInt::from_u32(1)));
+        push(&mut sender, 1);
+        sender.set_display_config(DisplayConfigId(VarInt::from_u32(2)));
+        sender.set_warp(WarpId(VarInt::from_u32(4)));
+        push(&mut sender, 2);
+        let labels = |datagram: &[u8]| {
+            let input = Input::decode(&mut Reader::new(&datagram[1..])).unwrap();
+            (
+                input.display_config_id.0.into_inner(),
+                input.warp_id.0.into_inner(),
+                input.reports.len(),
+            )
+        };
+        let first = sender.poll_transmit(RTT, DATAGRAM_SIZE, now).unwrap();
+        assert_eq!(labels(&first), (1, 0, 1));
+        let second = sender.poll_transmit(RTT, DATAGRAM_SIZE, now).unwrap();
+        assert_eq!(labels(&second), (2, 4, 1));
+        assert!(sender.poll_transmit(RTT, DATAGRAM_SIZE, now).is_none());
     }
 
     /// Unsent motion reports are merged, and sent motion reports are superseded

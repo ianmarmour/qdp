@@ -4,10 +4,13 @@
 //! the video, and the host converts them to its operating system's pixels
 //! (Section 1.5.6).
 
-use qdp::message::CursorWarp;
+use qdp::message::{CursorWarp, DesktopRect};
 use qdp::wire::{SignedVarInt, VarInt};
 
-use crate::host_input::{InputAction, TouchPoint};
+use crate::host_input::{InputAction, PixelRect, TouchPoint};
+
+/// Positions are in 1/256 pixel (Section 1.5.6).
+const POSITION_UNITS: i64 = 256;
 
 /// The smallest monitor side QDP allows (Section 6.3).
 const MIN_SIDE: usize = 16;
@@ -102,6 +105,29 @@ impl VideoLayout {
             x: convert(warp.x, self.video.0, self.capture.0),
             y: convert(warp.y, self.video.1, self.capture.1),
             ..warp
+        }
+    }
+
+    /// Converts a rectangle of the capture to positions of the host desktop
+    /// (Section 1.5.6).
+    pub(crate) fn rect_in_video(&self, rect: PixelRect) -> DesktopRect {
+        let convert = |value: i64, to: usize, from: usize| {
+            value * POSITION_UNITS * to as i64 / from.max(1) as i64
+        };
+        let (x, y) = (i64::from(rect.x), i64::from(rect.y));
+        let (width, height) = (i64::from(rect.width), i64::from(rect.height));
+        let signed = |value: i64| SignedVarInt::new(value).unwrap_or_default();
+        let unsigned = |value: i64| {
+            u64::try_from(value)
+                .ok()
+                .and_then(|value| VarInt::new(value).ok())
+                .unwrap_or_default()
+        };
+        DesktopRect {
+            x: signed(convert(x, self.video.0, self.capture.0)),
+            y: signed(convert(y, self.video.1, self.capture.1)),
+            width: unsigned(convert(width, self.video.0, self.capture.0)),
+            height: unsigned(convert(height, self.video.1, self.capture.1)),
         }
     }
 

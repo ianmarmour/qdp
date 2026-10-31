@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 use qdp::input::{InputEvent, InputReceiver};
 use qdp::message::{
     Av1Profiles, Capability, ControlMessage, CursorId, CursorSet, Datagram, DatagramPayload,
-    DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus, DeviceStatusCode,
-    FeatureStatus, FeedbackRecord, FrameHeader, HostHello, ImageSerial, InputClasses,
-    KeyboardOutput, MinorVersion, NO_LEVEL_LIMIT, PassthroughInfo, PointerKind, PointerMode,
-    StreamHeader, VideoCodec, VideoCodecCapability, VideoCodecFlags,
+    DesktopRect, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus,
+    DeviceStatusCode, FeatureStatus, FeedbackRecord, FrameHeader, HostHello, ImageSerial,
+    InputClasses, KeyboardOutput, MinorVersion, NO_LEVEL_LIMIT, PassthroughInfo, PointerKind,
+    PointerMode, StreamHeader, VideoCodec, VideoCodecCapability, VideoCodecFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{AuthResponse, HostConfig, HostEvent};
@@ -203,6 +203,8 @@ struct ActiveHost {
     audio: HostAudioStreams,
     /// The pointer mode the client was last told.
     pointer_mode: PointerKind,
+    /// The confinement the client was last told, in absolute mode.
+    confinement: Option<DesktopRect>,
     /// When the last `INPUT` datagram arrived.
     last_input_at: Instant,
     /// Which passthrough devices the host accepts.
@@ -421,6 +423,7 @@ async fn serve_session(
         clipboard,
         audio,
         pointer_mode: PointerKind::Absolute,
+        confinement: None,
         last_input_at: Instant::now(),
         passthrough_policy: options.passthrough,
         passthrough: PassthroughLink::default(),
@@ -704,17 +707,26 @@ impl ActiveHost {
     /// client's cursor to where the pointer is.
     fn follow_pointer_mode(&mut self) -> Result<(), RuntimeError> {
         let mode = self.injector.pointer_mode();
-        if mode == self.pointer_mode {
+        let confinement = match mode {
+            PointerKind::Absolute => self
+                .injector
+                .pointer_confinement()
+                .map(|rect| self.display.layout().rect_in_video(rect)),
+            _ => None,
+        };
+        if (mode, confinement) == (self.pointer_mode, self.confinement) {
             return Ok(());
         }
+        let switched = mode != self.pointer_mode;
         self.pointer_mode = mode;
-        info!(?mode, "pointer mode");
+        self.confinement = confinement;
+        info!(?mode, ?confinement, "pointer mode");
         let session = self.driver.session();
         session.send(&ControlMessage::PointerMode(PointerMode {
             mode,
-            confinement: None,
+            confinement,
         }))?;
-        if mode == PointerKind::Absolute {
+        if switched && mode == PointerKind::Absolute {
             let warp = self
                 .display
                 .layout()

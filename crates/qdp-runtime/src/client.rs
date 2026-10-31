@@ -12,9 +12,9 @@ use qdp::message::{
     DeviceAttach, DeviceDetach, DeviceFeatures, DeviceId, DeviceKind, DeviceOutput,
     DeviceStatusCode, DisplayConfig, DisplayConfigId, FeatureStatus, FeedbackRecord, FragmentFlags,
     GamepadOutput, HidFeatureRequest, HidFeatureResponse, InputClasses, KeyboardInfo,
-    KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, MonitorId, NO_LEVEL_LIMIT, StreamHeader,
-    StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer,
-    WarpFlags,
+    KeyboardOutput, KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, MonitorId, NO_LEVEL_LIMIT,
+    StreamHeader, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback,
+    VideoLayer, WarpFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{ClientEvent, Negotiated};
@@ -42,6 +42,7 @@ use crate::clipboard::{
     Side,
 };
 use crate::decode_thread::DecodeThread;
+use crate::lock_keys::LockSync;
 use crate::media::{CursorWarp, FrameInfo, FrameSink, PresentationTiming, SinkControl, WarpKind};
 use crate::stream_format::StreamFormat;
 use crate::{ClientCredentials, RuntimeError, close_on_error};
@@ -307,6 +308,8 @@ struct ActiveClient<'a> {
     rumbling: HashMap<DeviceId, Instant>,
     /// The output reports arriving for passthrough devices.
     hid_outputs: HidOutputs,
+    /// Brings the host's lock keys to the client's.
+    lock_keys: LockSync,
     /// The display the session is shown on, and the requests describing it.
     display: DisplayRequests,
     /// The reports of the display's refresh timing.
@@ -430,6 +433,7 @@ async fn run_session(
         output_sequences: HashMap::new(),
         rumbling: HashMap::new(),
         hid_outputs: HidOutputs::default(),
+        lock_keys: LockSync::default(),
         cursor: ClientCursor::default(),
         monitor_origin: (0.0, 0.0),
         clipboard,
@@ -502,6 +506,10 @@ impl ActiveClient<'_> {
     /// Passes a gamepad's output to its device, if it is newer than the last
     /// applied (Section 8.8.1).
     fn handle_device_output(&mut self, output: &DeviceOutput<'_>, now: Instant) {
+        if output.device_id == KEYBOARD_ID {
+            self.handle_keyboard_output(output, now);
+            return;
+        }
         let (Some(slot), Some(queue)) = (
             self.devices.gamepad_slot(output.device_id),
             &self.input_queue,
@@ -527,6 +535,45 @@ impl ActiveClient<'_> {
             slot,
             output: gamepad,
         });
+    }
+
+    /// Takes the host keyboard's LEDs from its output report, if it is newer
+    /// than the last applied, bringing the host's lock keys to the client's
+    /// if the session gained focus before they were known (Section 8.4.1).
+    fn handle_keyboard_output(&mut self, output: &DeviceOutput<'_>, now: Instant) {
+        let sequence = output.output_sequence.into_inner();
+        let last = self.output_sequences.entry(output.device_id).or_default();
+        if sequence <= *last {
+            return;
+        }
+        *last = sequence;
+        let Ok(keyboard) = KeyboardOutput::decode(output.data) else {
+            debug!("malformed keyboard output ignored");
+            return;
+        };
+        let toggles = self
+            .lock_keys
+            .host_leds(keyboard.leds, self.input.acknowledged());
+        self.toggle_lock_keys(&toggles, now);
+    }
+
+    /// Presses and releases the lock keys with these usages on the host.
+    fn toggle_lock_keys(&mut self, usages: &[u8], now: Instant) {
+        for &usage in usages {
+            for pressed in [true, false] {
+                for report in self.devices.reports(UserInput::Key { usage, pressed }) {
+                    if let Some(sequence) = self.input.push(
+                        report.device_id,
+                        report.data,
+                        report.kind,
+                        report.rest,
+                        now,
+                    ) {
+                        self.lock_keys.sent(sequence);
+                    }
+                }
+            }
+        }
     }
 
     /// Stops the rumble of gamepads whose output has not been repeated for
@@ -840,6 +887,7 @@ impl ActiveClient<'_> {
     /// datagrams that are due.
     fn send_input(&mut self, smoothed_rtt: Duration, now: Instant) -> Result<(), RuntimeError> {
         let mut clipboard_outputs = Vec::new();
+        let mut lock_toggles = Vec::new();
         if let Some(queue) = &self.input_queue {
             while let Some(action) = queue.try_next() {
                 match action {
@@ -925,6 +973,12 @@ impl ActiveClient<'_> {
                             clipboard_outputs.extend(link.set_focus(focus));
                         }
                     }
+                    UserInput::LockKeys(local) => {
+                        lock_toggles.extend(
+                            self.lock_keys
+                                .focus_gained(local, self.input.acknowledged()),
+                        );
+                    }
                     UserInput::Microphone(microphone) => {
                         if let Some(request) = self.audio.set_microphone(microphone) {
                             self.driver
@@ -960,6 +1014,7 @@ impl ActiveClient<'_> {
             }
         }
         self.apply_clipboard(clipboard_outputs)?;
+        self.toggle_lock_keys(&lock_toggles, now);
         let max_datagram_size = self.driver.connection().max_datagram_size();
         while let Some(datagram) = self
             .input

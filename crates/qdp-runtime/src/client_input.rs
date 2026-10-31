@@ -22,6 +22,7 @@ use crate::client_passthrough::PassthroughDevices;
 use crate::client_touch::Touchscreen;
 use crate::clipboard::Focus;
 use crate::host_input::{PointerButton, TouchPhase};
+use crate::lock_keys::LockKeys;
 
 /// The keyboard's Device ID.
 pub(crate) const KEYBOARD_ID: DeviceId = DeviceId(VarInt::from_u32(1));
@@ -235,6 +236,9 @@ pub enum UserInput {
     Microphone(Microphone),
     /// The session gained or lost focus on the client (Section 10.2).
     Focus(Focus),
+    /// The session gained keyboard focus, with the client's lock keys as
+    /// they are now, so that the host's follow them (Section 8.4.1).
+    LockKeys(LockKeys),
 }
 
 /// A gamepad's rumble and LED, from the host's applications (Section 8.4.7).
@@ -873,7 +877,8 @@ impl ClientDevices {
             | UserInput::FeatureResponse { .. }
             | UserInput::Display(_)
             | UserInput::Microphone(_)
-            | UserInput::Focus(_) => Vec::new(),
+            | UserInput::Focus(_)
+            | UserInput::LockKeys(_) => Vec::new(),
         }
     }
 

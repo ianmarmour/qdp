@@ -40,6 +40,7 @@ mod host_input;
 mod host_output;
 mod host_passthrough;
 mod layout;
+mod lock_keys;
 mod media;
 mod rate_control;
 mod send_stats;
@@ -67,8 +68,11 @@ pub use client_input::{
 };
 pub use clipboard::{Clipboard, ClipboardDirections, Focus, SharedClipboard};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
-pub use host_input::{InputAction, InputInjector, NoInput, PointerButton, TouchPhase, TouchPoint};
+pub use host_input::{
+    InputAction, InputInjector, NoInput, PixelRect, PointerButton, TouchPhase, TouchPoint,
+};
 pub use host_passthrough::{FeatureRequest, PassthroughDevice, PassthroughPolicy};
+pub use lock_keys::LockKeys;
 pub use media::{
     CursorShape, CursorState, CursorWarp, DisplayTiming, FrameInfo, FrameSink, FrameSource,
     PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl, TestPattern,
