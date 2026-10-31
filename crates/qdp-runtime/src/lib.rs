@@ -20,6 +20,7 @@
 //! [`TestPattern`] is a synthetic source for hosts without a screen capture
 //! backend, and for tests.
 
+mod admission;
 mod audio;
 mod audio_receiver;
 mod auth;
@@ -45,6 +46,7 @@ use qdp_codec::CodecError;
 use qdp_quic::TransportError;
 use thiserror::Error;
 
+pub use admission::{Admission, AdmissionLimits, AdmissionTicket, Refusal};
 pub use audio::{
     ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, HostAudio, Playout,
     SAMPLE_RATE,

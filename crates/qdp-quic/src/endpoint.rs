@@ -2,6 +2,7 @@
 //! 3.5.1).
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use qdp::registry::ErrorCode;
 use quinn::Endpoint;
@@ -28,19 +29,18 @@ impl HostEndpoint {
         Ok(self.endpoint.local_addr()?)
     }
 
-    /// Waits for the next client, completes its handshake and accepts its control
-    /// stream, the first bidirectional stream, on which it sends `CLIENT_HELLO`.
-    /// Returns `None` once the endpoint is closed.
-    pub async fn accept(&self) -> Option<Result<QdpConnection, TransportError>> {
+    /// Waits for the next client's first packet, returning its connection
+    /// before the handshake, so that the host can refuse it or establish it
+    /// on a task of its own: one slow client then delays no other. Returns
+    /// `None` once the endpoint is closed.
+    pub async fn accept(&self) -> Option<IncomingConnection> {
         let incoming = self.endpoint.accept().await?;
-        Some(Self::establish(incoming).await)
+        Some(IncomingConnection { incoming })
     }
 
-    /// Completes the handshake of one incoming connection.
-    async fn establish(incoming: quinn::Incoming) -> Result<QdpConnection, TransportError> {
-        let connection = incoming.await?;
-        let (send, recv) = connection.accept_bi().await?;
-        QdpConnection::new(connection, send, recv)
+    /// Waits until every connection has closed and its peer has been told.
+    pub async fn wait_idle(&self) {
+        self.endpoint.wait_idle().await;
     }
 
     /// Stops accepting connections and closes the open ones with
@@ -49,6 +49,68 @@ impl HostEndpoint {
         let code = quinn::VarInt::from_u64(ErrorCode::HOST_SHUTDOWN.0.into_inner())
             .unwrap_or(quinn::VarInt::MAX);
         self.endpoint.close(code, b"host shutting down");
+    }
+}
+
+/// How long a client has to complete the handshake and open its control
+/// stream; the session's own timer then gives it the rest of the 10 seconds
+/// to send `CLIENT_HELLO` (Section 4.2).
+const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A client's connection before its handshake.
+#[derive(Debug)]
+pub struct IncomingConnection {
+    /// The connection attempt.
+    incoming: quinn::Incoming,
+}
+
+impl IncomingConnection {
+    /// Returns the client's address.
+    pub fn remote_address(&self) -> SocketAddr {
+        self.incoming.remote_address()
+    }
+
+    /// Returns whether the client has proved it receives packets at its
+    /// address, through QUIC's Retry.
+    pub fn address_validated(&self) -> bool {
+        self.incoming.remote_address_validated()
+    }
+
+    /// Asks the client to prove its address with a QUIC Retry, which it
+    /// answers with a new connection attempt (Section 11.7).
+    pub fn retry(self) {
+        if let Err(error) = self.incoming.retry() {
+            error.into_incoming().refuse();
+        }
+    }
+
+    /// Refuses the connection.
+    pub fn refuse(self) {
+        self.incoming.refuse();
+    }
+
+    /// Completes the handshake and accepts the client's control stream, the
+    /// first bidirectional stream, on which it sends `CLIENT_HELLO`. A client
+    /// that does not open it in time is closed with `QDP_HANDSHAKE_TIMEOUT`.
+    pub async fn establish(self) -> Result<QdpConnection, TransportError> {
+        let connection = tokio::time::timeout(ESTABLISH_TIMEOUT, self.incoming)
+            .await
+            .map_err(|_| TransportError::Config("the handshake did not complete in time"))??;
+        match tokio::time::timeout(ESTABLISH_TIMEOUT, connection.accept_bi()).await {
+            Ok(streams) => {
+                let (send, recv) = streams?;
+                QdpConnection::new(connection, send, recv)
+            }
+            Err(_) => {
+                connection.close(
+                    crate::connection::quic_code(ErrorCode::HANDSHAKE_TIMEOUT),
+                    b"the control stream was not opened in time",
+                );
+                Err(TransportError::Config(
+                    "the control stream was not opened in time",
+                ))
+            }
+        }
     }
 }
 

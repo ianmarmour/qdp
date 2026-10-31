@@ -24,11 +24,12 @@ use std::sync::Arc;
 
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
-    ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections, DisplaySize,
-    EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator, HostOptions, InputQueue,
-    SharedClipboard, TestPattern,
+    Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
+    DisplaySize, EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator, HostOptions,
+    InputQueue, SharedClipboard, TestPattern,
 };
-use tracing::{error, info, warn};
+use tokio::task::JoinSet;
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -72,6 +73,11 @@ const SESSION_THREAD_NAME: &str = "qdp-session";
 /// the host.
 #[cfg(feature = "window")]
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long the host waits, when it shuts down, for its sessions to return
+/// the client's devices to rest and for the clients to learn why the
+/// connections closed.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// An error that ends the program, with a message for the user.
 type CliResult = Result<(), String>;
@@ -188,23 +194,39 @@ async fn serve(args: ServeArgs) -> CliResult {
     let audio_setting = args.audio;
     let state_directory = Arc::new(args.identity.clone());
 
+    let admission = Admission::default();
+    let mut sessions = JoinSet::new();
     loop {
         tokio::select! {
             incoming = endpoint.accept() => {
-                let Some(connection) = incoming else {
-                    return Ok(());
+                let Some(incoming) = incoming else {
+                    break;
+                };
+                let peer = incoming.remote_address();
+                // Under load, clients prove their address before taking a
+                // place (Section 11.7).
+                if admission.busy() && !incoming.address_validated() {
+                    incoming.retry();
+                    continue;
+                }
+                let ticket = match admission.admit(peer.ip()) {
+                    Ok(ticket) => ticket,
+                    Err(refusal) => {
+                        debug!(%peer, %refusal, "connection refused");
+                        incoming.refuse();
+                        continue;
+                    }
                 };
                 let options = Arc::clone(&options);
                 let state_directory = Arc::clone(&state_directory);
-                tokio::spawn(async move {
-                    let connection = match connection {
+                sessions.spawn(async move {
+                    let connection = match incoming.establish().await {
                         Ok(connection) => connection,
                         Err(error) => {
-                            warn!(%error, "connection failed");
+                            warn!(%peer, %error, "connection failed");
                             return;
                         }
                     };
-                    let peer = connection.quic().remote_address();
                     info!(%peer, "client connected");
                     let source = match open_source(source_kind, (width, height), state_directory).await {
                         Ok(source) => source,
@@ -221,7 +243,11 @@ async fn serve(args: ServeArgs) -> CliResult {
                         Audio::On => qdp_desktop::host_audio(),
                         Audio::Off => HostAudio::default(),
                     };
-                    match qdp_runtime::serve(connection, &options, source, injector, clipboard, audio).await {
+                    let result = qdp_runtime::serve(
+                        connection, ticket, &options, source, injector, clipboard, audio,
+                    )
+                    .await;
+                    match result {
                         Ok(summary) => info!(
                             %peer,
                             frames = summary.frames_sent,
@@ -233,14 +259,24 @@ async fn serve(args: ServeArgs) -> CliResult {
                         Err(error) => warn!(%peer, %error, "session ended with an error"),
                     }
                 });
+                // Forget the sessions that have ended.
+                while sessions.try_join_next().is_some() {}
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("shutting down");
                 endpoint.close();
-                return Ok(());
+                break;
             }
         }
     }
+    // The sessions return their devices to rest before the host exits
+    // (Section 4.7), and the clients learn why the connections closed.
+    let ended = async { while sessions.join_next().await.is_some() {} };
+    if tokio::time::timeout(SHUTDOWN_GRACE, ended).await.is_err() {
+        warn!("sessions did not end in time");
+    }
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, endpoint.wait_idle()).await;
+    Ok(())
 }
 
 /// Returns the client's audio devices, as the user asked for them.

@@ -20,7 +20,7 @@ use qdp::wire::VarInt;
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
-    ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
+    ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
     DisplaySize, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource, GamepadFeedback,
     HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue,
@@ -347,8 +347,15 @@ fn start_host(
         passthrough: PassthroughPolicy::default(),
     };
     let task = tokio::spawn(async move {
-        let connection = endpoint.accept().await.expect("a client")?;
-        serve(connection, &options, source, injector, clipboard, audio).await
+        let incoming = endpoint.accept().await.expect("a client");
+        let ticket = Admission::default()
+            .admit(incoming.remote_address().ip())
+            .expect("the client is admitted");
+        let connection = incoming.establish().await?;
+        serve(
+            connection, ticket, &options, source, injector, clipboard, audio,
+        )
+        .await
     });
     (address, pin, task)
 }
@@ -1620,5 +1627,107 @@ async fn touchpad_reaches_the_host() {
             touchpad_report(12_000),
             TouchpadReport::default()
         ]
+    );
+}
+
+/// Streams frames until told to stop by the test.
+struct Endless {
+    /// The frames presented.
+    frames: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FrameSink for Endless {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        SinkControl::Continue
+    }
+}
+
+/// A client that authenticates replaces the desktop's current session,
+/// which the host closes with `QDP_SESSION_REPLACED` (Section 2.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn newer_session_replaces_older() {
+    let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let pin = identity.key_pin().unwrap();
+    let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
+    let address = endpoint.local_address().unwrap();
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let options = Arc::new(HostOptions {
+        host_name: "loopback".to_owned(),
+        authenticator,
+        frame_rate: 60,
+        encoder: EncoderTuning {
+            preference: CodecPreference::Software,
+            speed: 10,
+            quantizer: 60,
+            threads: 2,
+        },
+        passthrough: PassthroughPolicy::default(),
+    });
+    let admission = Admission::default();
+    let _host = tokio::spawn(async move {
+        for _ in 0..2 {
+            let incoming = endpoint.accept().await.expect("a client");
+            let ticket = admission.admit(incoming.remote_address().ip()).unwrap();
+            let options = Arc::clone(&options);
+            tokio::spawn(async move {
+                let connection = incoming.establish().await.unwrap();
+                serve(
+                    connection,
+                    ticket,
+                    &options,
+                    test_pattern(),
+                    Box::new(NoInput),
+                    None,
+                    HostAudio::default(),
+                )
+                .await
+            });
+        }
+        // Keep the endpoint open for the sessions.
+        std::future::pending::<()>().await;
+    });
+
+    let first_frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = async {
+        let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+        let connection = endpoint
+            .connect(
+                address,
+                SERVER_NAME,
+                HostVerification::PinnedKeys(vec![pin]),
+            )
+            .await
+            .unwrap();
+        let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+        let mut sink = Endless {
+            frames: Arc::clone(&first_frames),
+        };
+        run(
+            connection,
+            &options,
+            &mut sink,
+            None,
+            None,
+            ClientAudio::default(),
+        )
+        .await
+    };
+    let second = async {
+        while first_frames.load(Ordering::Relaxed) < INPUT_FRAME {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        stream(address, pin, ClientCredentials::Token(TOKEN.to_vec()), None).await
+    };
+    let (replaced, second) =
+        tokio::time::timeout(TEST_TIMEOUT, async { tokio::join!(first, second) })
+            .await
+            .expect("both sessions finish in time");
+    check_frames(&second.unwrap());
+    let replaced = replaced.expect_err("the first session is replaced");
+    assert!(
+        format!("{replaced:?}").contains("error_code: 11"),
+        "{replaced:?}"
     );
 }
