@@ -24,10 +24,15 @@ const RECOVERY_REPEAT_MARGIN: Duration = Duration::from_millis(20);
 /// lost final frame (Section 6.8.4).
 const TAIL_LOSS_MARGIN: Duration = Duration::from_millis(10);
 
-/// The shortest time the host keeps a frame's fragments for retransmission, so
-/// that a very small smoothed RTT does not discard them before a `NACK` can
-/// arrive.
-const MIN_RETENTION: Duration = Duration::from_millis(20);
+/// The shortest time the host keeps a frame's fragments for retransmission.
+/// Spec Section 6.8.1 asks for at least two smoothed RTTs; keeping them longer
+/// lets a large frame, such as a key frame, recover over several rounds of
+/// `NACK`s instead of being declared lost and replaced by another large frame.
+const MIN_RETENTION: Duration = Duration::from_millis(100);
+
+/// The smoothed RTTs the host keeps a frame's fragments for, if longer than
+/// [`MIN_RETENTION`].
+const RETENTION_RTTS: u32 = 4;
 
 /// What a frame is, which decides its fragment flags and its Recovery Base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,10 +350,10 @@ impl VideoSender {
             .collect()
     }
 
-    /// Discards frames whose fragments were sent more than two smoothed RTTs
-    /// ago, keeping the newest frame for tail-loss repair (Section 6.8.1).
+    /// Discards frames whose fragments were sent longer ago than the retention
+    /// time, keeping the newest frame for tail-loss repair (Section 6.8.1).
     fn expire(&mut self, now: Instant, smoothed_rtt: Duration) {
-        let retention = (2 * smoothed_rtt).max(MIN_RETENTION);
+        let retention = (RETENTION_RTTS * smoothed_rtt).max(MIN_RETENTION);
         while self.sent.len() > 1
             && now.saturating_duration_since(self.sent[0].completed_at) >= retention
         {

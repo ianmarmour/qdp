@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 use crate::auth::HostAuthExchange;
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
 use crate::media::FrameSource;
+use crate::send_stats::{SendStats, queue_delay};
 use crate::{HostAuthenticator, RuntimeError, is_normal_close};
 
 /// The Stream ID of the motion layer of the host's one monitor.
@@ -135,8 +136,9 @@ struct ActiveHost {
     driver: HostDriver,
     /// Captures and encodes frames on its own thread.
     encoder: EncoderThread,
-    /// Whether a frame has been requested from the encoder and not yet returned.
-    encoding: bool,
+    /// When the frame the encoder is working on was requested, if it is
+    /// working on one.
+    pending_since: Option<Instant>,
     /// The number of frames requested from the encoder so far.
     frames_requested: u64,
     /// The video stream's sender.
@@ -153,6 +155,8 @@ struct ActiveHost {
     display_config: DisplayConfig,
     /// The session's statistics.
     summary: HostSummary,
+    /// The statistics logged every second.
+    stats: SendStats,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
@@ -243,10 +247,12 @@ pub async fn serve(
     let (encoder, description) =
         EncoderThread::spawn(source, settings, options.encoder.preference, grid).await?;
     info!(encoder = description, "encoding");
+    let stats = SendStats::new(Instant::now(), driver.connection().path_stats());
     let mut active = ActiveHost {
         driver,
+        stats,
         encoder,
-        encoding: false,
+        pending_since: None,
         frames_requested: 0,
         sender: VideoSender::new(MOTION_STREAM_ID),
         input: InputReceiver::new(),
@@ -328,9 +334,10 @@ impl ActiveHost {
         loop {
             let smoothed_rtt = self.driver.connection().smoothed_rtt();
             let deadline = [
-                (!self.encoding).then_some(next_frame_at),
+                self.pending_since.is_none().then_some(next_frame_at),
                 self.sender.poll_timeout(smoothed_rtt),
                 self.input.poll_timeout(smoothed_rtt),
+                Some(self.stats.next_log_at()),
             ]
             .into_iter()
             .flatten()
@@ -349,11 +356,12 @@ impl ActiveHost {
 
             let now = Instant::now();
             while let Some(result) = self.encoder.try_result() {
-                self.encoding = false;
+                self.pending_since = None;
                 self.send_encoded(result?, now)?;
             }
             for datagram in self.sender.handle_timeout(smoothed_rtt, now) {
                 self.summary.retransmissions += 1;
+                self.stats.retransmitted();
                 self.send(datagram)?;
             }
             let events = self.input.handle_timeout(smoothed_rtt, now);
@@ -361,15 +369,35 @@ impl ActiveHost {
             if let Some(ack) = self.input.poll_ack(now) {
                 self.send(ack.to_bytes())?;
             }
-            if !self.encoding && now >= next_frame_at {
-                self.request_frame()?;
+            if self.pending_since.is_none() && now >= next_frame_at {
+                if self.network_behind(frame_interval) {
+                    self.stats.frame_skipped();
+                } else {
+                    self.request_frame(now)?;
+                }
                 next_frame_at += frame_interval;
                 if next_frame_at < now {
                     // Encoding fell behind: skip ahead rather than send a burst.
                     next_frame_at = now + frame_interval;
                 }
             }
+            let connection = self.driver.connection();
+            self.stats.log_if_due(
+                now,
+                connection.path_stats(),
+                connection.queued_datagram_bytes(),
+                self.pending_since
+                    .map(|since| now.saturating_duration_since(since)),
+            );
         }
+    }
+
+    /// Returns whether the datagrams waiting to be sent would take longer than
+    /// a frame interval to leave, so that the next frame should be skipped
+    /// rather than wait behind them.
+    fn network_behind(&self, frame_interval: Duration) -> bool {
+        let connection = self.driver.connection();
+        queue_delay(connection.queued_datagram_bytes(), &connection.path_stats()) > frame_interval
     }
 
     /// Sends a datagram, dropping it if it no longer fits the path.
@@ -386,7 +414,7 @@ impl ActiveHost {
 
     /// Asks the encoder thread for the next frame: a key frame for the first one
     /// and whenever the client needs to recover.
-    fn request_frame(&mut self) -> Result<(), RuntimeError> {
+    fn request_frame(&mut self, now: Instant) -> Result<(), RuntimeError> {
         let recovery = self.sender.recovery_needed().is_some();
         let request = if self.frames_requested == 0 || recovery {
             KeyFrameRequest::Force
@@ -394,7 +422,7 @@ impl ActiveHost {
             KeyFrameRequest::Auto
         };
         self.encoder.request(EncodeJob { request, recovery })?;
-        self.encoding = true;
+        self.pending_since = Some(now);
         self.frames_requested += 1;
         Ok(())
     }
@@ -424,6 +452,11 @@ impl ActiveHost {
         if output.frame.is_key_frame {
             self.summary.key_frames_sent += 1;
         }
+        self.stats.frame_sent(
+            output.frame.temporal_unit.len(),
+            output.frame.is_key_frame,
+            now.saturating_duration_since(output.captured_at),
+        );
         for datagram in sent.datagrams {
             self.send(datagram)?;
         }

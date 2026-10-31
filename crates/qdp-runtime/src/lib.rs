@@ -20,6 +20,7 @@ mod client;
 mod encode_thread;
 mod host;
 mod media;
+mod send_stats;
 
 use qdp::auth::scram::ScramError;
 use qdp::session::UsageError;

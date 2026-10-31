@@ -8,6 +8,7 @@ use qdp::registry::ErrorCode;
 use quinn::{Connection, RecvStream, SendStream};
 
 use crate::TransportError;
+use crate::config::DATAGRAM_SEND_BUFFER;
 
 /// The largest chunk read from the control stream at once.
 const CONTROL_READ_CHUNK: usize = 64 << 10;
@@ -15,6 +16,21 @@ const CONTROL_READ_CHUNK: usize = 64 << 10;
 /// The QUIC application error code sent if a QDP code cannot be represented,
 /// which cannot happen because both are variable-length integers.
 const FALLBACK_ERROR_CODE: quinn::VarInt = quinn::VarInt::from_u32(0x01);
+
+/// What a connection's path has seen so far, from the QUIC stack.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathStats {
+    /// The smoothed round-trip time.
+    pub rtt: Duration,
+    /// The congestion window: how many bytes may be in flight.
+    pub congestion_window: u64,
+    /// How many times the congestion controller has shrunk the window.
+    pub congestion_events: u64,
+    /// The packets declared lost.
+    pub lost_packets: u64,
+    /// The bytes sent in UDP datagrams.
+    pub sent_bytes: u64,
+}
 
 /// A QUIC connection carrying a QDP session, with its control stream.
 #[derive(Debug)]
@@ -66,6 +82,25 @@ impl QdpConnection {
     /// the path changes (Section 3.7.2).
     pub fn max_datagram_size(&self) -> usize {
         self.connection.max_datagram_size().unwrap_or_default()
+    }
+
+    /// Returns the statistics of the connection's path.
+    pub fn path_stats(&self) -> PathStats {
+        let stats = self.connection.stats();
+        PathStats {
+            rtt: stats.path.rtt,
+            congestion_window: stats.path.cwnd,
+            congestion_events: stats.path.congestion_events,
+            lost_packets: stats.path.lost_packets,
+            sent_bytes: stats.udp_tx.bytes,
+        }
+    }
+
+    /// Returns the bytes of datagrams waiting to be sent because the
+    /// congestion controller is holding them back. Every queued byte adds
+    /// latency, so senders should skip frames rather than let this grow.
+    pub fn queued_datagram_bytes(&self) -> usize {
+        DATAGRAM_SEND_BUFFER.saturating_sub(self.connection.datagram_send_buffer_space())
     }
 
     /// Returns the `tls-exporter` channel binding of the connection, for
