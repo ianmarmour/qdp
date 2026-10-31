@@ -16,6 +16,11 @@ use crate::streams::{OutgoingStream, write_stream};
 /// The largest chunk read from the control stream at once.
 const CONTROL_READ_CHUNK: usize = 64 << 10;
 
+/// How long an endpoint that ends a session waits for its last control
+/// messages, such as a failed `AUTH_RESULT`, to be acknowledged before
+/// closing the connection, which discards unsent stream data.
+const FINAL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// The QUIC application error code sent if a QDP code cannot be represented,
 /// which cannot happen because both are variable-length integers.
 const FALLBACK_ERROR_CODE: quinn::VarInt = quinn::VarInt::from_u32(0x01);
@@ -67,6 +72,17 @@ impl QdpConnection {
             );
             return Err(TransportError::DatagramsUnsupported);
         }
+        // The control stream is the only bidirectional stream (Section
+        // 3.5.1): a peer that opens another breaks the protocol.
+        let watched = connection.connection.clone();
+        tokio::spawn(async move {
+            if watched.accept_bi().await.is_ok() {
+                watched.close(
+                    quic_code(ErrorCode::STREAM_CREATION_ERROR),
+                    b"a second bidirectional stream was opened",
+                );
+            }
+        });
         Ok(connection)
     }
 
@@ -140,22 +156,34 @@ impl QdpConnection {
         OutgoingStream::open(self.connection.clone(), header)
     }
 
-    /// Writes bytes to the control stream.
+    /// Writes bytes to the control stream. A control stream the peer stopped
+    /// is an error (Section 3.5.1).
     pub(crate) async fn write_control(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        Ok(self.control_send.write_all(data).await?)
+        match self.control_send.write_all(data).await {
+            Ok(()) => Ok(()),
+            Err(quinn::WriteError::Stopped(_)) => Err(TransportError::ControlStreamClosed),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Reads the next chunk of the peer's control stream. A finished control
     /// stream is an error (Section 3.5.1). Cancelling the read loses no data.
     pub(crate) async fn read_control(&mut self) -> Result<Bytes, TransportError> {
-        match self
-            .control_recv
-            .read_chunk(CONTROL_READ_CHUNK, true)
-            .await?
-        {
-            Some(chunk) => Ok(chunk.bytes),
-            None => Err(TransportError::ControlStreamClosed),
+        match self.control_recv.read_chunk(CONTROL_READ_CHUNK, true).await {
+            Ok(Some(chunk)) => Ok(chunk.bytes),
+            Ok(None) | Err(quinn::ReadError::Reset(_)) => Err(TransportError::ControlStreamClosed),
+            Err(error) => Err(error.into()),
         }
+    }
+
+    /// Closes the connection with a QDP error code once the control messages
+    /// already written have been acknowledged, or after a moment, so that
+    /// the last of them, such as the reason for closing, reaches the peer.
+    pub(crate) async fn close_after_delivery(&mut self, code: ErrorCode, reason: &str) {
+        if self.control_send.finish().is_ok() {
+            let _ = tokio::time::timeout(FINAL_DELIVERY_TIMEOUT, self.control_send.stopped()).await;
+        }
+        self.close(code, reason);
     }
 
     /// Closes the connection with a QDP error code (Section 3.10).

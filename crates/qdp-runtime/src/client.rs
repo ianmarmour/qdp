@@ -39,7 +39,7 @@ use crate::clipboard::{
     Side,
 };
 use crate::media::{CursorWarp, FrameInfo, FrameSink, SinkControl, WarpKind};
-use crate::{ClientCredentials, RuntimeError};
+use crate::{ClientCredentials, RuntimeError, close_on_error};
 
 /// The client's identifier for its one display area.
 const DISPLAY_AREA_ID: ClientMonitorId = ClientMonitorId(VarInt::from_u32(1));
@@ -325,6 +325,20 @@ pub async fn run(
     clipboard: Option<SharedClipboard>,
     audio: ClientAudio,
 ) -> Result<ClientSummary, RuntimeError> {
+    let quic = connection.quic().clone();
+    let result = run_session(connection, options, sink, input, clipboard, audio).await;
+    close_on_error(&quic, result)
+}
+
+/// Runs the client's side of one session, as [`run`] describes.
+async fn run_session(
+    connection: QdpConnection,
+    options: &ClientOptions,
+    sink: &mut dyn FrameSink,
+    input: Option<InputQueue>,
+    clipboard: Option<SharedClipboard>,
+    audio: ClientAudio,
+) -> Result<ClientSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
     // The clipboard is read from the start, so that its content is known
     // when the session becomes active.
@@ -351,10 +365,8 @@ pub async fn run(
                 driver.session().continue_auth(reply)?;
             }
             ClientEvent::AuthResult(result) => {
-                if let Err(error) = auth.finish(&result) {
-                    driver.close("authentication failed");
-                    return Err(error);
-                }
+                // A failure closes the connection with QDP_AUTH_FAILED.
+                auth.finish(&result)?;
                 let session = driver.session();
                 session.send(&ControlMessage::DisplayRequest(display_request(
                     options.display,
@@ -933,13 +945,11 @@ impl ActiveClient<'_> {
     fn handle_datagram(&mut self, bytes: Bytes) -> Result<(), RuntimeError> {
         let now = Instant::now();
         let smoothed_rtt = self.driver.connection().smoothed_rtt();
-        let datagram = match Datagram::decode(&bytes) {
-            Ok(datagram) => datagram,
-            Err(error) => {
-                warn!(%error, "malformed datagram");
-                return Ok(());
-            }
-        };
+        // A datagram shorter than its fields is a connection error (Section
+        // 1.6); unknown types decode as such and are ignored.
+        let datagram = Datagram::decode(&bytes).map_err(|error| {
+            RuntimeError::ProtocolViolation(format!("malformed datagram: {error}"))
+        })?;
         match datagram {
             Datagram::VideoFragment(fragment) => match self.streams.get_mut(&fragment.stream_id) {
                 Some(stream) => stream

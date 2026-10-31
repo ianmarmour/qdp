@@ -1,5 +1,6 @@
 //! The host's media pipeline: capture, encode, send, and answer feedback.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use qdp::input::{InputEvent, InputReceiver};
@@ -37,7 +38,7 @@ use crate::host_passthrough::{
 };
 use crate::media::{CursorState, FrameSource};
 use crate::send_stats::{SendStats, queue_delay};
-use crate::{HostAuthenticator, RuntimeError, is_normal_close};
+use crate::{HostAuthenticator, RuntimeError, close_on_error, is_normal_close};
 
 /// The Stream ID of the motion layer of the host's one monitor.
 const MOTION_STREAM_ID: StreamId = StreamId(VarInt::from_u32(1));
@@ -234,6 +235,24 @@ struct ActiveHost {
 /// makes its session the desktop's one.
 pub async fn serve(
     connection: QdpConnection,
+    ticket: AdmissionTicket,
+    options: &HostOptions,
+    source: Box<dyn FrameSource>,
+    injector: Box<dyn InputInjector>,
+    clipboard: Option<SharedClipboard>,
+    audio: HostAudio,
+) -> Result<HostSummary, RuntimeError> {
+    let quic = connection.quic().clone();
+    let result = serve_session(
+        connection, ticket, options, source, injector, clipboard, audio,
+    )
+    .await;
+    close_on_error(&quic, result)
+}
+
+/// Runs the host's side of one session, as [`serve`] describes.
+async fn serve_session(
+    connection: QdpConnection,
     mut ticket: AdmissionTicket,
     options: &HostOptions,
     source: Box<dyn FrameSource>,
@@ -241,6 +260,11 @@ pub async fn serve(
     clipboard: Option<SharedClipboard>,
     audio: HostAudio,
 ) -> Result<HostSummary, RuntimeError> {
+    if options.authenticator.methods().is_empty() {
+        return Err(RuntimeError::Config(
+            "the host accepts no authentication method",
+        ));
+    }
     let binding = connection.channel_binding()?;
     // The clipboard is read from the start, so that its content is known
     // when the session becomes active.
@@ -263,6 +287,22 @@ pub async fn serve(
         failure_reason: FAILURE_REASON.to_owned(),
     };
     let mut driver = HostDriver::host(connection, config);
+    // Streams are read from the start, so that one the client opens before
+    // SESSION_START is a connection error (Section 3.5.2); once the session
+    // is active, the rules hold the clipboard data the host accepts.
+    let stream_rules: Arc<Mutex<StreamRules>> = Arc::default();
+    let rules = Arc::clone(&stream_rules);
+    driver.accept_streams(move |header| {
+        match *rules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            StreamRules::BeforeSession => StreamPolicy::Forbid(ErrorCode::STREAM_CREATION_ERROR),
+            StreamRules::Active { clipboard_limit } => {
+                client_stream_policy(header, clipboard_limit)
+            }
+        }
+    });
     let mut auth = HostAuthExchange::new(&options.authenticator, binding);
     let mut devices = StandardInput::default();
     let mut request_id = DisplayRequestId::NONE;
@@ -339,9 +379,17 @@ pub async fn serve(
         (Some(worker), Some(negotiated)) => ClipboardLink::new(Side::Host, negotiated, worker),
         _ => None,
     };
+    *stream_rules
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = StreamRules::Active {
+        clipboard_limit: clipboard.as_ref().and_then(ClipboardLink::receive_limit),
+    };
+    audio.activate();
     driver.flush().await?;
-    let receive_limit = clipboard.as_ref().and_then(ClipboardLink::receive_limit);
-    driver.accept_streams(move |header| client_stream_policy(header, receive_limit));
+    // Datagrams the client sent before SESSION_START are dropped (Section
+    // 3.7.3).
+    let early = driver.connection().quic().clone();
+    while let Ok(Ok(_)) = tokio::time::timeout(Duration::ZERO, early.read_datagram()).await {}
     info!(
         width,
         height,
@@ -411,6 +459,19 @@ fn record_attempt(
         AuthResponse::Reject => ticket.failed(),
         AuthResponse::Continue(_) => {}
     }
+}
+
+/// Which streams the host takes from the client.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum StreamRules {
+    /// None: the session is not active yet.
+    #[default]
+    BeforeSession,
+    /// Those of an active session, with the clipboard data the host accepts.
+    Active {
+        /// The most clipboard data the host accepts, if it accepts any.
+        clipboard_limit: Option<usize>,
+    },
 }
 
 /// Returns what the host does with a stream the client opened (Section
@@ -954,13 +1015,11 @@ impl ActiveHost {
 
     /// Acts on a datagram from the client.
     fn handle_datagram(&mut self, bytes: &[u8]) -> Result<(), RuntimeError> {
-        let datagram = match Datagram::decode(bytes) {
-            Ok(datagram) => datagram,
-            Err(error) => {
-                warn!(%error, "malformed datagram");
-                return Ok(());
-            }
-        };
+        // A datagram shorter than its fields is a connection error (Section
+        // 1.6); unknown types decode as such and are ignored.
+        let datagram = Datagram::decode(bytes).map_err(|error| {
+            RuntimeError::ProtocolViolation(format!("malformed datagram: {error}"))
+        })?;
         let now = Instant::now();
         let smoothed_rtt = self.driver.connection().smoothed_rtt();
         match datagram {

@@ -40,6 +40,7 @@ mod media;
 mod send_stats;
 
 use qdp::auth::scram::ScramError;
+use qdp::registry::ErrorCode;
 use qdp::session::UsageError;
 use qdp::video::SendFrameError;
 use qdp_codec::CodecError;
@@ -108,6 +109,50 @@ pub enum RuntimeError {
     /// An audio stream could not be started.
     #[error("audio failed: {0}")]
     Audio(String),
+    /// The session cannot run as configured.
+    #[error("invalid configuration: {0}")]
+    Config(&'static str),
+    /// The peer broke a rule of the protocol.
+    #[error("protocol violation: {0}")]
+    ProtocolViolation(String),
+}
+
+impl RuntimeError {
+    /// Returns the QDP error code a session that fails with this error closes
+    /// its connection with (Section 3.10).
+    pub fn close_code(&self) -> ErrorCode {
+        match self {
+            Self::Transport(TransportError::Session(error)) => error.code,
+            Self::Scram(_)
+            | Self::NoCommonAuthMethod
+            | Self::UnexpectedAuthStep
+            | Self::AuthenticationFailed(_)
+            | Self::InvalidUsername => ErrorCode::AUTH_FAILED,
+            Self::ProtocolViolation(_) => ErrorCode::PROTOCOL_VIOLATION,
+            _ => ErrorCode::INTERNAL_ERROR,
+        }
+    }
+}
+
+/// Closes a session's connection with the code of the error that ended it,
+/// unless the session ended normally, so that the peer learns why rather
+/// than seeing the connection dropped with `QDP_NO_ERROR`.
+pub(crate) fn close_on_error<T>(
+    connection: &quinn::Connection,
+    result: Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    if let Err(error) = &result {
+        let normal =
+            matches!(error, RuntimeError::Transport(transport) if is_normal_close(transport));
+        if !normal {
+            let code = error.close_code();
+            connection.close(
+                quinn::VarInt::from_u64(code.0.into_inner()).unwrap_or(quinn::VarInt::MAX),
+                error.to_string().as_bytes(),
+            );
+        }
+    }
+    result
 }
 
 /// Returns whether `error` is the peer closing the connection normally, with
