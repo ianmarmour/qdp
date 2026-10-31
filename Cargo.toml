@@ -49,6 +49,9 @@ quinn = { version = "0.11.9", default-features = false, features = ["runtime-tok
 rav1d = { version = "1.1.0", default-features = false, features = ["asm", "bitdepth_8", "bitdepth_16"] }
 rav1e = { version = "0.8.1", default-features = false, features = ["asm", "threading"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+# Opus audio, in pure Rust. It decodes bit-exactly as libopus does and
+# interoperates with it both ways.
+rusty-opus = { version = "1.0.2", default-features = false }
 ring = { version = "0.17.14", default-features = false }
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
 # Software drawing into the window; X11 and Wayland libraries are loaded at

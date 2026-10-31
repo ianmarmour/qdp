@@ -15,6 +15,7 @@ libc.workspace = true
 qdp.workspace = true
 rav1d.workspace = true
 rav1e.workspace = true
+rusty-opus.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

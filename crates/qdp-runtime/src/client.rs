@@ -25,6 +25,7 @@ use qdp_quic::{
 };
 use tracing::{debug, info, warn};
 
+use crate::audio::{ClientAudio, ClientAudioStreams};
 use crate::auth::ClientAuthExchange;
 use crate::client_cursor::{ClientCursor, CursorChange};
 use crate::client_input::{ClientDevices, InputQueue, KEYBOARD_ID, MOUSE_ID, POINTER_ID, TEXT_ID};
@@ -119,8 +120,12 @@ fn device_class(device_id: DeviceId) -> Option<DeviceClass> {
 }
 
 /// Returns the client's hello, with clipboard sharing in `clipboard`'s
-/// directions if it shares one.
-fn client_hello(options: &ClientOptions, clipboard: Option<ClipboardDirections>) -> ClientHello {
+/// directions if it shares one, and the audio its devices handle.
+fn client_hello(
+    options: &ClientOptions,
+    clipboard: Option<ClipboardDirections>,
+    audio: &ClientAudio,
+) -> ClientHello {
     let mut hello = ClientHello {
         minor_version: MinorVersion::CURRENT,
         client_name: options.client_name.clone(),
@@ -145,6 +150,7 @@ fn client_hello(options: &ClientOptions, clipboard: Option<ClipboardDirections>)
     if let Some(directions) = clipboard {
         hello.capabilities.push(clipboard::capability(directions));
     }
+    hello.capabilities.extend(audio.capabilities());
     hello
 }
 
@@ -245,18 +251,21 @@ struct ActiveClient<'a> {
     monitor_origin: (f64, f64),
     /// Clipboard sharing, if the session negotiated it.
     clipboard: Option<ClipboardLink>,
+    /// The audio streams.
+    audio: ClientAudioStreams,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
 /// frames to `sink` until it asks to stop or the host disconnects, sending
-/// the user's input from `input`, if given, and sharing `clipboard`, if
-/// given, with the host.
+/// the user's input from `input`, if given, sharing `clipboard`, if given,
+/// with the host, and playing and capturing audio through `audio`'s devices.
 pub async fn run(
     connection: QdpConnection,
     options: &ClientOptions,
     sink: &mut dyn FrameSink,
     input: Option<InputQueue>,
     clipboard: Option<SharedClipboard>,
+    audio: ClientAudio,
 ) -> Result<ClientSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
     // The clipboard is read from the start, so that its content is known
@@ -266,7 +275,8 @@ pub async fn run(
         .map(|shared| ClipboardWorker::spawn(shared.clipboard))
         .transpose()
         .map_err(RuntimeError::Clipboard)?;
-    let hello = client_hello(options, directions);
+    let hello = client_hello(options, directions, &audio);
+    let audio_request = audio.request();
     let mut driver = ClientDriver::client(connection, hello)?;
     let mut auth = ClientAuthExchange::new(options.credentials.clone(), binding);
     let mut display_config = None;
@@ -301,6 +311,9 @@ pub async fn run(
                         passthrough: None,
                     }))?;
                 }
+                if let Some(request) = &audio_request {
+                    session.send(&ControlMessage::AudioRequest(*request))?;
+                }
                 session.ready(Instant::now())?;
             }
             ClientEvent::Message(ControlMessage::DisplayConfig(config)) => {
@@ -333,6 +346,7 @@ pub async fn run(
         input: InputSender::new(clock),
         devices: ClientDevices::default(),
         input_queue: input,
+        audio: ClientAudioStreams::new(audio),
         cursor: ClientCursor::default(),
         monitor_origin: (0.0, 0.0),
         clipboard,
@@ -444,6 +458,10 @@ impl ActiveClient<'_> {
                 }
             }
             ControlMessage::PointerMode(mode) => self.devices.set_pointer_mode(mode.mode),
+            ControlMessage::AudioConfig(config) => {
+                let quic = self.driver.connection().quic().clone();
+                self.audio.configure(&config, &quic, self.clock)?;
+            }
             ControlMessage::CursorSet(set) => {
                 if let Some(change) = self.cursor.set(set) {
                     show_cursor(self.sink, change);
@@ -646,6 +664,7 @@ impl ActiveClient<'_> {
                 self.send(pong.to_bytes())?;
             }
             Datagram::InputAck(ack) => self.input.handle_ack(&ack, now),
+            Datagram::AudioPacket(packet) => self.audio.handle_packet(&packet, now),
             _ => {}
         }
         Ok(())

@@ -18,6 +18,7 @@
 //! of Section 6.4.4 and the colour description of standard dynamic range
 //! streams.
 
+mod audio;
 mod backend;
 // Only the VA-API encoder writes headers itself.
 #[cfg(target_os = "linux")]
@@ -36,6 +37,10 @@ mod videotoolbox;
 
 use thiserror::Error;
 
+pub use audio::{
+    AudioContent, AudioDecoder, AudioEncoder, AudioFormat, OPUS_MAX_CHANNELS, OPUS_SAMPLE_RATE,
+    PCM_MAX_CHANNELS, open_audio_decoder, open_audio_encoder,
+};
 pub use backend::{CodecPreference, VideoDecoder, VideoEncoder, open_decoder, open_encoder};
 pub use decoder::Av1Decoder;
 pub use encoder::{
