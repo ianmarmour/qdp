@@ -131,6 +131,11 @@ limit:
 - The host SHOULD use a congestion controller that limits queuing delay, rather
   than one that fills queues until packets are lost, and SHOULD support ECN and
   L4S [RFC9330] where the QUIC implementation allows.
+- The host SHOULD also lower its rate while a large share of its packets is lost.
+  A congestion controller that does not treat loss as congestion, as BBR does not,
+  can leave the window wide while a wireless link loses much of what is sent, and
+  each loss costs a recovery frame larger than the frames it replaces. Where the
+  encoder's quality can drop no further, the host can lower the frame rate.
 
 ### 5.5.2 Frame budgets (non-normative)
 
@@ -183,6 +188,7 @@ are requirements of the section named.
 | `DECODED` records | at least every 100 ms while frames arrive, every 1 s otherwise | [6.7](06-video.md#67-video-feedback) |
 | `LOSS` feedback in the loss state | at least every 20 ms | [6.8.3](06-video.md#683-client-rules) |
 | Host tail-loss repair | 2 × smoothed RTT + 10 ms after a frame's last fragment | [6.8.4](06-video.md#684-host-rules) |
+| Repeated recovery frame | 2 × smoothed RTT + 20 ms after the last, doubling with each that failed, up to 1 s | [6.8.4](06-video.md#684-host-rules) |
 | Input coalescing; motion merging | 1 ms; up to 8 ms | [8.6](08-input.md#86-client-rules) |
 | Input repeat interval | max(2 ms, smoothed RTT / 4) | [8.6](08-input.md#86-client-rules) |
 | Input retention | 1 s | [8.6](08-input.md#86-client-rules) |

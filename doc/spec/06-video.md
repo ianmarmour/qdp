@@ -498,6 +498,14 @@ the records' Highest Frame Seen is below R, unless 2 × smoothed RTT + 20 ms hav
 passed since it sent R's last fragment. A `LOSS` for L with Highest Frame Seen at or
 above R means R did not arrive complete, and the host sends a new recovery frame.
 
+Recovery frames that keep failing usually mean the host sends more than the path
+carries, and a key frame, many times larger than the frames around it, adds most
+to the overload. So the host backs off: the k-th recovery frame in a row that fails
+delays the next until 2^(k−1) × (2 × smoothed RTT + 20 ms) after the failed one was
+sent, but no more than 1 s after it. Until the next is sent, the host sends no
+other frames of the stream, which the client could not decode. Once the client
+reports a recovery frame decoded, the count starts again and nothing is held back.
+
 If the client's `DECODED` records have not reached the newest frame N of a stream
 within 2 × smoothed RTT + 10 ms of the host sending N's last fragment, and the host
 has sent no later frame, N or its last fragments may have been lost while the screen

@@ -71,6 +71,10 @@ struct Network {
     pacing: Duration,
     /// The temporal unit size of a delta frame.
     delta_frame_size: usize,
+    /// The bytes per second the link carries toward the client, or zero for
+    /// no limit. What it cannot carry at once waits in a buffer of
+    /// [`BOTTLENECK_BUFFER`] bytes, and what overflows the buffer is lost.
+    capacity: f64,
 }
 
 impl Network {
@@ -82,6 +86,7 @@ impl Network {
             away_for: Duration::ZERO,
             pacing: Duration::ZERO,
             delta_frame_size: DELTA_FRAME_SIZE,
+            capacity: 0.0,
         }
     }
 
@@ -100,6 +105,35 @@ impl Network {
         } else {
             arrival
         }
+    }
+}
+
+/// The bytes a link of limited capacity buffers before it loses datagrams.
+const BOTTLENECK_BUFFER: f64 = 64_000.0;
+
+/// A link of limited capacity toward the client.
+#[derive(Debug, Default)]
+struct Bottleneck {
+    /// When the link has carried everything it was given.
+    free_at: Option<Instant>,
+}
+
+impl Bottleneck {
+    /// Gives the link a datagram of `size` bytes at `at`, returning when it
+    /// has crossed at `capacity` bytes per second, or `None` if the buffer
+    /// is full and it is lost.
+    fn carry(&mut self, size: usize, at: Instant, capacity: f64) -> Option<Instant> {
+        if capacity == 0.0 {
+            return Some(at);
+        }
+        let start = self.free_at.map_or(at, |free_at| free_at.max(at));
+        let waiting = start.saturating_duration_since(at).as_secs_f64() * capacity;
+        if waiting > BOTTLENECK_BUFFER {
+            return None;
+        }
+        let done = start + Duration::from_secs_f64(size as f64 / capacity);
+        self.free_at = Some(done);
+        Some(done)
     }
 }
 
@@ -134,6 +168,7 @@ fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
     let mut downlink = Downlink::new();
     let mut uplink = Uplink::new();
     let mut sequence = 0u64;
+    let mut bottleneck = Bottleneck::default();
     // When the host's pacing lets the next datagram leave.
     let mut paced_until = start;
     let mut next_frame_at = start;
@@ -153,17 +188,22 @@ fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
                 *sequence += 1;
                 let sent = paced_until.max(now);
                 paced_until = sent + network.pacing;
-                if random.next() >= loss {
-                    downlink.insert((network.arrival(start, sent), *sequence), datagram);
+                if random.next() < loss {
+                    continue;
+                }
+                if let Some(carried) = bottleneck.carry(datagram.len(), sent, network.capacity) {
+                    downlink.insert((network.arrival(start, carried), *sequence), datagram);
                 }
             }
         };
 
-        // The host encodes a frame on schedule.
-        if now >= next_frame_at {
+        // The host encodes a frame on schedule, except while a recovery
+        // frame is held back after earlier ones failed.
+        let held = sender.recovery_wait().is_some_and(|due| now < due);
+        if now >= next_frame_at && !held {
             let kind = if outcome.sent == 0 {
                 FrameKind::Key
-            } else if sender.recovery_needed().is_some() {
+            } else if sender.recovery_needed(now).is_some() {
                 outcome.recovery_key_frames += 1;
                 FrameKind::KeyRecovery
             } else {
@@ -273,6 +313,31 @@ fn recovers_from_random_loss() {
                 "seed {seed}, loss {loss}: {outcome:?}"
             );
         }
+    }
+}
+
+/// Over a link that carries less than the stream sends, recovery frames do
+/// not flood it, and the client still decodes frames now and then. Without
+/// rate control, which this simulation leaves out, it can do no better.
+///
+/// Before failed recovery frames backed off, each was repeated as soon as
+/// the client reported it incomplete: over 330 recovery key frames in 20
+/// seconds, and the client decoded nothing after the first frame.
+#[test]
+fn recovery_does_not_flood_an_overloaded_link() {
+    for capacity in [0.9, 0.7] {
+        // Delta frames of 10 kB at 60 frames per second: 600 kB/s.
+        let network = Network {
+            pacing: Duration::from_micros(50),
+            delta_frame_size: 10_000,
+            capacity: capacity * 600_000.0,
+            ..Network::lossy(0.0)
+        };
+        let outcome = simulate(Duration::from_secs(20), network, 1);
+        assert!(
+            outcome.recovery_key_frames <= 100 && outcome.decoded >= 10,
+            "capacity {capacity}: {outcome:?}"
+        );
     }
 }
 

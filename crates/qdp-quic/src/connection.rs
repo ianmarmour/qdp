@@ -37,6 +37,8 @@ pub struct PathStats {
     pub congestion_events: u64,
     /// The packets declared lost.
     pub lost_packets: u64,
+    /// The packets sent.
+    pub sent_packets: u64,
     /// The bytes sent in UDP datagrams.
     pub sent_bytes: u64,
 }
@@ -112,6 +114,7 @@ impl QdpConnection {
             congestion_window: stats.path.cwnd,
             congestion_events: stats.path.congestion_events,
             lost_packets: stats.path.lost_packets,
+            sent_packets: stats.path.sent_packets,
             sent_bytes: stats.udp_tx.bytes,
         }
     }
