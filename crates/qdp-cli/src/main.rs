@@ -26,7 +26,8 @@ use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
     DisplaySize, EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator, HostDesktop,
-    HostOptions, InputQueue, OpenedDesktop, RuntimeError, SharedClipboard, TestPattern,
+    HostOptions, InputQueue, OpenedDesktop, ResumptionSlot, RuntimeError, SharedClipboard,
+    TestPattern,
 };
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
@@ -173,6 +174,7 @@ async fn serve(args: ServeArgs) -> CliResult {
             .add_password(user, &password()?)
             .map_err(|error| error.to_string())?;
     }
+    authenticator.set_resumption_lifetime(args.resumption);
     let options = Arc::new(HostOptions {
         host_name: hostname(),
         authenticator,
@@ -519,6 +521,7 @@ async fn receive(
         decoder_threads: 0,
         decoder: args.decoder,
         keyboard_info: qdp_desktop::keyboard_info(),
+        resumption: ResumptionSlot::default(),
     };
     let result = tokio::select! {
         result = qdp_runtime::run(
