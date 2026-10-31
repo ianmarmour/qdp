@@ -24,8 +24,8 @@ use std::sync::Arc;
 
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
-    ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections, DisplaySize,
-    EncoderTuning, FrameSink, FrameSource, HostAuthenticator, HostOptions, InputQueue,
+    ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections, DisplaySize,
+    EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator, HostOptions, InputQueue,
     SharedClipboard, TestPattern,
 };
 use tracing::{error, info, warn};
@@ -213,7 +213,8 @@ async fn serve(args: ServeArgs) -> CliResult {
                     let injector =
                         qdp_desktop::input_injector(source_width as u32, source_height as u32);
                     let clipboard = shared_clipboard(clipboard_directions);
-                    match qdp_runtime::serve(connection, &options, source, injector, clipboard).await {
+                    let audio = HostAudio::default();
+                    match qdp_runtime::serve(connection, &options, source, injector, clipboard, audio).await {
                         Ok(summary) => info!(
                             %peer,
                             frames = summary.frames_sent,
@@ -412,7 +413,14 @@ async fn receive(
         decoder: args.decoder,
     };
     let result = tokio::select! {
-        result = qdp_runtime::run(connection, &options, sink, input, shared_clipboard(args.clipboard)) => {
+        result = qdp_runtime::run(
+            connection,
+            &options,
+            sink,
+            input,
+            shared_clipboard(args.clipboard),
+            ClientAudio::default(),
+        ) => {
             result.map(Some)
         }
         () = stop => Ok(None),

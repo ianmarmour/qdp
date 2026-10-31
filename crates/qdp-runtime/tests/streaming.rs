@@ -1,8 +1,11 @@
 //! End-to-end tests that stream AV1 video from a host to a client over a real
 //! QUIC connection on the loopback interface.
 
+use std::f32::consts::TAU;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use qdp::auth::scram::ScramCredentials;
@@ -10,11 +13,12 @@ use qdp::message::CursorImage;
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
-    ClientCredentials, ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState,
-    CursorWarp, DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAuthenticator,
-    HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput, PointerButton,
-    RuntimeError, SharedClipboard, SinkControl, TestPattern, UserInput, WarpKind, input_channel,
-    run, serve,
+    ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
+    ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
+    DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAudio, HostAuthenticator,
+    HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput, Playout,
+    PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, UserInput,
+    WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -221,6 +225,7 @@ fn start_host(
     source: Box<dyn FrameSource>,
     injector: Box<dyn InputInjector>,
     clipboard: Option<SharedClipboard>,
+    audio: HostAudio,
 ) -> (
     SocketAddr,
     KeyPin,
@@ -243,7 +248,7 @@ fn start_host(
     };
     let task = tokio::spawn(async move {
         let connection = endpoint.accept().await.expect("a client")?;
-        serve(connection, &options, source, injector, clipboard).await
+        serve(connection, &options, source, injector, clipboard, audio).await
     });
     (address, pin, task)
 }
@@ -285,7 +290,15 @@ async fn stream(
         input: handle,
         ..Collector::default()
     };
-    let summary = run(connection, &options, &mut collector, queue, None).await?;
+    let summary = run(
+        connection,
+        &options,
+        &mut collector,
+        queue,
+        None,
+        ClientAudio::default(),
+    )
+    .await?;
     assert_eq!(summary.frames_presented, FRAMES as u64);
     assert_eq!(summary.decode_failures, 0);
     endpoint.wait_idle().await;
@@ -316,7 +329,13 @@ fn check_frames(collector: &Collector) {
 async fn stream_with_token() {
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
-    let (address, pin, host) = start_host(authenticator, test_pattern(), Box::new(NoInput), None);
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
     let collector = tokio::time::timeout(
         TEST_TIMEOUT,
         stream(address, pin, ClientCredentials::Token(TOKEN.to_vec()), None),
@@ -343,7 +362,13 @@ async fn stream_with_password() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput), None);
+    let (address, pin, _host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "pencil".to_owned(),
@@ -363,7 +388,13 @@ async fn wrong_password_is_refused() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput), None);
+    let (address, pin, _host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "wrong".to_owned(),
@@ -386,6 +417,7 @@ async fn input_reaches_the_host() {
         test_pattern(),
         Box::new(recorder.clone()),
         None,
+        HostAudio::default(),
     );
     let credentials = ClientCredentials::Token(TOKEN.to_vec());
     tokio::time::timeout(
@@ -415,8 +447,13 @@ async fn cursor_reaches_the_client() {
         captures: 0,
         shapes: [pointer_shape(4, 0x11), pointer_shape(6, 0x22)],
     };
-    let (address, pin, _host) =
-        start_host(authenticator, Box::new(source), Box::new(NoInput), None);
+    let (address, pin, _host) = start_host(
+        authenticator,
+        Box::new(source),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
     let credentials = ClientCredentials::Token(TOKEN.to_vec());
     let collector = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials, None))
         .await
@@ -524,6 +561,7 @@ async fn clipboard_is_shared() {
             clipboard: Box::new(host_clipboard.clone()),
             directions: ClipboardDirections::Both,
         }),
+        HostAudio::default(),
     );
     let endpoint = ClientEndpoint::bind(loopback()).unwrap();
     let connection = endpoint
@@ -547,11 +585,237 @@ async fn clipboard_is_shared() {
     };
     tokio::time::timeout(
         TEST_TIMEOUT,
-        run(connection, &options, &mut watcher, None, Some(clipboard)),
+        run(
+            connection,
+            &options,
+            &mut watcher,
+            None,
+            Some(clipboard),
+            ClientAudio::default(),
+        ),
     )
     .await
     .expect("the clipboard is shared in time")
     .unwrap();
     assert!(watcher.reached_host, "the client's text reached the host");
     assert_eq!(client_clipboard.get().as_deref(), Some(HOST_COPY));
+}
+
+/// The duration of each chunk the test audio devices move.
+const CHUNK: Duration = Duration::from_millis(10);
+
+/// The samples per channel in one chunk.
+const CHUNK_SAMPLES: usize = SAMPLE_RATE as usize / 100;
+
+/// A thread a test audio device runs, stopped when the device is dropped.
+struct DeviceThread {
+    /// Tells the thread to stop.
+    stop: Arc<AtomicBool>,
+    /// The thread.
+    thread: Option<JoinHandle<()>>,
+}
+
+impl DeviceThread {
+    /// Runs `step` once per chunk, in real time, until stopped.
+    fn start(mut step: impl FnMut() + Send + 'static) -> ActiveDevice {
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut chunks = 0;
+            while !running.load(Ordering::Relaxed) {
+                step();
+                chunks += 1;
+                if let Some(wait) =
+                    (start + CHUNK * chunks).checked_duration_since(std::time::Instant::now())
+                {
+                    std::thread::sleep(wait);
+                }
+            }
+        });
+        ActiveDevice(Box::new(Self {
+            stop,
+            thread: Some(thread),
+        }))
+    }
+}
+
+impl Drop for DeviceThread {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// An input capturing a sine tone of the same frequency on every channel.
+struct ToneInput {
+    /// The channels.
+    channels: u16,
+    /// The tone's frequency in hertz.
+    frequency: f32,
+}
+
+impl AudioInput for ToneInput {
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn start(&mut self, capture: CaptureSink) -> Result<ActiveDevice, String> {
+        let (channels, frequency) = (usize::from(self.channels), self.frequency);
+        let mut sample = 0_usize;
+        Ok(DeviceThread::start(move || {
+            let chunk: Vec<f32> = (0..CHUNK_SAMPLES)
+                .flat_map(|offset| {
+                    let time = (sample + offset) as f32 / SAMPLE_RATE as f32;
+                    std::iter::repeat_n(0.5 * (TAU * frequency * time).sin(), channels)
+                })
+                .collect();
+            sample += CHUNK_SAMPLES;
+            capture.push(&chunk);
+        }))
+    }
+
+    fn description(&self) -> &str {
+        "tone"
+    }
+}
+
+/// An output recording what it plays.
+#[derive(Clone)]
+struct RecordingOutput {
+    /// The channels.
+    channels: u16,
+    /// The first channel of everything played.
+    recorded: Arc<Mutex<Vec<f32>>>,
+}
+
+impl RecordingOutput {
+    /// Returns an output of `channels` channels that has recorded nothing.
+    fn new(channels: u16) -> Self {
+        Self {
+            channels,
+            recorded: Arc::default(),
+        }
+    }
+
+    /// Returns the tone's frequency in the last half second recorded, from
+    /// its zero crossings, or `None` if that was silent.
+    fn frequency(&self) -> Option<f32> {
+        let recorded = self.recorded.lock().unwrap();
+        let half_second = SAMPLE_RATE as usize / 2;
+        let tail = &recorded[recorded.len().checked_sub(half_second)?..];
+        if tail.iter().all(|sample| sample.abs() < 0.01) {
+            return None;
+        }
+        let crossings = tail
+            .windows(2)
+            .filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0))
+            .count();
+        Some(crossings as f32)
+    }
+}
+
+impl AudioOutput for RecordingOutput {
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn start(&mut self, channels: u16, playout: Playout) -> Result<ActiveDevice, String> {
+        let recorded = Arc::clone(&self.recorded);
+        let channels = usize::from(channels);
+        Ok(DeviceThread::start(move || {
+            let mut chunk = vec![0.0; CHUNK_SAMPLES * channels];
+            playout.pull(&mut chunk);
+            recorded
+                .lock()
+                .unwrap()
+                .extend(chunk.chunks_exact(channels).map(|frame| frame[0]));
+        }))
+    }
+
+    fn description(&self) -> &str {
+        "recorder"
+    }
+}
+
+/// Streams video until the host's audio has played for a while.
+struct AudioWatcher {
+    /// The client's speakers.
+    speakers: RecordingOutput,
+    /// The frames presented.
+    frames: usize,
+}
+
+impl FrameSink for AudioWatcher {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        let played = self.speakers.recorded.lock().unwrap().len();
+        if played >= SAMPLE_RATE as usize * 3 / 2 || self.frames >= CLIPBOARD_FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+}
+
+/// The host's desktop audio plays on the client's speakers, and the
+/// client's microphone plays on the host's virtual microphone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audio_flows_both_ways() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let host_microphone = RecordingOutput::new(1);
+    let host_audio = HostAudio {
+        desktop: Some(Box::new(ToneInput {
+            channels: 2,
+            frequency: 440.0,
+        })),
+        microphone: Some(Box::new(host_microphone.clone())),
+    };
+    let (address, pin, _host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        host_audio,
+    );
+    let speakers = RecordingOutput::new(2);
+    let client_audio = ClientAudio {
+        speakers: Some(Box::new(speakers.clone())),
+        microphone: Some(Box::new(ToneInput {
+            channels: 1,
+            frequency: 220.0,
+        })),
+    };
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let mut watcher = AudioWatcher {
+        speakers: speakers.clone(),
+        frames: 0,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(connection, &options, &mut watcher, None, None, client_audio),
+    )
+    .await
+    .expect("audio plays in time")
+    .unwrap();
+
+    // Half a second of a tone of f hertz crosses zero f times.
+    let played = speakers.frequency().expect("the host's audio played");
+    assert!((420.0..460.0).contains(&played), "played {played} Hz");
+    let heard = host_microphone
+        .frequency()
+        .expect("the client's microphone played");
+    assert!((200.0..240.0).contains(&heard), "heard {heard} Hz");
 }

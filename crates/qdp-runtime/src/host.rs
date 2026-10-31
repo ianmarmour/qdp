@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 
 use qdp::input::{InputEvent, InputReceiver};
 use qdp::message::{
-    AudioConfig, AudioConfigId, Av1Profiles, BlockGrid, Capability, Chroma, ClientMonitorId,
-    ControlMessage, CursorId, CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId,
-    DeviceKind, DeviceOutput, DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId,
-    DisplayRequestId, FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags,
-    ImageSerial, InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT,
-    PointerKind, PointerMode, StreamHeader, StreamId, VideoCodec, VideoCodecCapability,
-    VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
+    Av1Profiles, BlockGrid, Capability, Chroma, ClientMonitorId, ControlMessage, CursorId,
+    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId, DeviceKind, DeviceOutput,
+    DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequestId,
+    FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags, ImageSerial,
+    InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT, PointerKind,
+    PointerMode, StreamHeader, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags,
+    VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{HostConfig, HostEvent};
@@ -21,6 +21,7 @@ use qdp_codec::{CodecPreference, EncoderSettings, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportError};
 use tracing::{debug, info, warn};
 
+use crate::audio::{HostAudio, HostAudioStreams};
 use crate::auth::HostAuthExchange;
 use crate::clipboard::{
     self, ClipboardDirections, ClipboardLink, ClipboardOutput, ClipboardWorker, SharedClipboard,
@@ -107,8 +108,9 @@ pub struct HostSummary {
 }
 
 /// Returns the capabilities the host advertises, with clipboard sharing in
-/// `clipboard`'s directions if it shares one.
-fn capabilities(clipboard: Option<ClipboardDirections>) -> Vec<Capability> {
+/// `clipboard`'s directions if it shares one, and the audio its devices
+/// handle.
+fn capabilities(clipboard: Option<ClipboardDirections>, audio: &HostAudio) -> Vec<Capability> {
     let mut capabilities = vec![
         Capability::VideoCodec(VideoCodecCapability {
             codec: VideoCodec::AV1,
@@ -129,6 +131,7 @@ fn capabilities(clipboard: Option<ClipboardDirections>) -> Vec<Capability> {
     if let Some(directions) = clipboard {
         capabilities.push(clipboard::capability(directions));
     }
+    capabilities.extend(audio.capabilities());
     capabilities
 }
 
@@ -172,18 +175,22 @@ struct ActiveHost {
     cursor: HostCursor,
     /// Clipboard sharing, if the session negotiated it.
     clipboard: Option<ClipboardLink>,
+    /// The audio streams.
+    audio: HostAudioStreams,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
 /// client disconnects, streaming frames from `source`, which is captured and
 /// encoded on a thread of its own, performing the client's input with
-/// `injector`, and sharing `clipboard`, if given, with the client.
+/// `injector`, sharing `clipboard`, if given, with the client, and streaming
+/// audio through `audio`'s devices.
 pub async fn serve(
     connection: QdpConnection,
     options: &HostOptions,
     source: Box<dyn FrameSource>,
     injector: Box<dyn InputInjector>,
     clipboard: Option<SharedClipboard>,
+    audio: HostAudio,
 ) -> Result<HostSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
     // The clipboard is read from the start, so that its content is known
@@ -198,7 +205,7 @@ pub async fn serve(
             minor_version: MinorVersion::CURRENT,
             host_name: options.host_name.clone(),
             auth_methods: options.authenticator.methods(),
-            capabilities: capabilities(directions),
+            capabilities: capabilities(directions, &audio),
         },
         failure_reason: FAILURE_REASON.to_owned(),
     };
@@ -206,7 +213,7 @@ pub async fn serve(
     let mut auth = HostAuthExchange::new(&options.authenticator, binding);
     let mut devices = StandardInput::default();
     let mut request_id = DisplayRequestId::NONE;
-    let mut audio_requested = false;
+    let mut audio_request = None;
 
     loop {
         let event = match driver.next_event().await {
@@ -231,7 +238,9 @@ pub async fn serve(
             HostEvent::Message(ControlMessage::DisplayRequest(request)) => {
                 request_id = request.request_id;
             }
-            HostEvent::Message(ControlMessage::AudioRequest(_)) => audio_requested = true,
+            HostEvent::Message(ControlMessage::AudioRequest(request)) => {
+                audio_request = Some(request);
+            }
             HostEvent::Message(ControlMessage::ClientReady(_)) => break,
             HostEvent::Message(_) => {}
         }
@@ -239,14 +248,14 @@ pub async fn serve(
 
     let (width, height) = source.size();
     let display_config = display_config(width, height, options.frame_rate, request_id);
+    let clock = SessionClock::new(Instant::now());
+    let mut audio = HostAudioStreams::new(audio);
+    let quic = driver.connection().quic().clone();
     let session = driver.session();
     session.send(&ControlMessage::DisplayConfig(display_config.clone()))?;
-    if audio_requested {
-        // Audio is not implemented yet: the configuration defines no streams.
-        session.send(&ControlMessage::AudioConfig(AudioConfig {
-            config_id: AudioConfigId(VarInt::from_u32(1)),
-            streams: Vec::new(),
-        }))?;
+    if let (Some(request), Some(negotiated)) = (audio_request, session.negotiated()) {
+        let config = audio.configure(&request, negotiated, &quic, clock)?;
+        session.send(&ControlMessage::AudioConfig(config))?;
     }
     session.send(&ControlMessage::PointerMode(PointerMode {
         mode: PointerKind::Absolute,
@@ -292,7 +301,7 @@ pub async fn serve(
         frames_requested: 0,
         sender: VideoSender::new(MOTION_STREAM_ID),
         input: InputReceiver::new(),
-        clock: SessionClock::new(Instant::now()),
+        clock,
         devices,
         injector,
         display_config_id: 1,
@@ -301,6 +310,7 @@ pub async fn serve(
         output_sequence: 0,
         cursor: HostCursor::default(),
         clipboard,
+        audio,
     };
     for keyboard in active.devices.keyboards() {
         active.send_keyboard_output(keyboard)?;
@@ -670,6 +680,17 @@ impl ActiveHost {
                 let actions = self.devices.detach(detach.device_id);
                 self.inject(&actions);
             }
+            HostEvent::Message(ControlMessage::AudioRequest(request)) => {
+                // The host answers every request (Section 7.3).
+                let quic = self.driver.connection().quic().clone();
+                let session = self.driver.session();
+                if let Some(negotiated) = session.negotiated() {
+                    let config = self
+                        .audio
+                        .configure(&request, negotiated, &quic, self.clock)?;
+                    session.send(&ControlMessage::AudioConfig(config))?;
+                }
+            }
             HostEvent::Message(message) => {
                 if let Some(link) = &mut self.clipboard {
                     let outputs = link.handle_message(&message, Instant::now());
@@ -702,6 +723,7 @@ impl ActiveHost {
                 let pong = answer_ping(&ping, &self.clock, now, Instant::now());
                 self.send(pong.to_bytes())?;
             }
+            Datagram::AudioPacket(packet) => self.audio.handle_packet(&packet, now),
             Datagram::Input(input) => {
                 let devices = &self.devices;
                 let events = self.input.handle_input(

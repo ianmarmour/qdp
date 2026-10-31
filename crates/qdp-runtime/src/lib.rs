@@ -8,15 +8,20 @@
 //!   [`FrameSource`], encoding them, sending their fragments, answering
 //!   retransmission requests and recovering from loss with key frames. The
 //!   pointer the source reports goes to the client as cursor images, shapes
-//!   and warps.
+//!   and warps, and the desktop's audio as Opus or PCM through a
+//!   [`HostAudio`] input.
 //! - [`run`] runs a client session: it authenticates with
 //!   [`ClientCredentials`], configures its display and input devices, and decodes
 //!   the host's video into a [`FrameSink`], sending feedback and synchronizing
-//!   clocks. The sink also draws the host's cursor.
+//!   clocks. The sink also draws the host's cursor, and [`ClientAudio`]
+//!   devices play the host's audio through an adaptive jitter buffer and send
+//!   the user's microphone.
 //!
 //! [`TestPattern`] is a synthetic source for hosts without a screen capture
 //! backend, and for tests.
 
+mod audio;
+mod audio_receiver;
 mod auth;
 mod client;
 mod client_cursor;
@@ -36,6 +41,10 @@ use qdp_codec::CodecError;
 use qdp_quic::TransportError;
 use thiserror::Error;
 
+pub use audio::{
+    ActiveDevice, AudioInput, AudioOutput, CaptureSink, ClientAudio, HostAudio, Playout,
+    SAMPLE_RATE,
+};
 pub use auth::{ClientCredentials, HostAuthenticator};
 pub use client::{ClientOptions, ClientSummary, DisplaySize, run};
 pub use client_input::{InputHandle, InputQueue, UserInput, input_channel};
@@ -86,6 +95,9 @@ pub enum RuntimeError {
     /// The system clipboard could not be shared.
     #[error("clipboard failed: {0}")]
     Clipboard(String),
+    /// An audio stream could not be started.
+    #[error("audio failed: {0}")]
+    Audio(String),
 }
 
 /// Returns whether `error` is the peer closing the connection normally, with
