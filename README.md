@@ -182,7 +182,11 @@ while the sign-in screen or an elevation prompt is shown. If the screen cannot
 be captured the host
 streams a test pattern instead, and `--source screen` or `--source
 test-pattern` forces one. Run `qdp help` for every option, and set `QDP_LOG=debug`
-for more detail.
+for more detail. `QDP_LOG` also takes levels for single parts after the
+default one: `QDP_LOG=info,qdp::window=debug` on the client and
+`QDP_LOG=info,qdp_runtime::host=debug,qdp_runtime::host_cursor=debug` on the
+host trace each pointer button, every move while a button is held, positions
+the host ignores and the host's warps of the client's pointer.
 
 ## Crates
 

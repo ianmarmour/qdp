@@ -352,6 +352,8 @@ pub struct WindowApp {
     modifiers: ModifiersState,
     /// The fingers touching the window.
     fingers: HashSet<u64>,
+    /// The pointer buttons held, as the window saw them.
+    held_buttons: HashSet<MouseButton>,
     /// The user's gamepads, if they can be watched.
     #[cfg(feature = "gamepad")]
     gamepads: Option<qdp_desktop::GamepadCapture>,
@@ -417,6 +419,7 @@ impl WindowApp {
             confinement_released: false,
             modifiers: ModifiersState::empty(),
             fingers: HashSet::new(),
+            held_buttons: HashSet::new(),
             proxy,
             #[cfg(feature = "gamepad")]
             gamepads: qdp_desktop::GamepadCapture::start(input.clone())
@@ -598,6 +601,11 @@ impl WindowApp {
     fn warp(&mut self, warp: CursorWarp) {
         match warp.kind {
             WarpKind::Follow => {
+                debug!(
+                    x = warp.position.0,
+                    y = warp.position.1,
+                    "drawing the cursor where the host's device put it"
+                );
                 self.follow = Some(warp.position);
                 if let Some(display) = &self.display {
                     display.window.set_cursor_visible(false);
@@ -646,6 +654,7 @@ impl WindowApp {
             }
             _ => false,
         };
+        debug!(x, y, moved, "the host warped the pointer");
         if moved {
             self.stop_following();
         } else {
@@ -688,13 +697,25 @@ impl WindowApp {
     /// Sends the pointer's position on the monitor, if it is over the
     /// picture, kept within the host's confinement while it applies.
     fn pointer_moved(&self, position: PhysicalPosition<f64>) {
-        if let Some((x, y)) = self.monitor_position(position) {
-            let (x, y) = match self.active_confinement() {
-                Some(area) => confined(area, x, y),
-                None => (x, y),
-            };
-            self.input.send(UserInput::PointerMoved { x, y });
+        let dragging = !self.held_buttons.is_empty();
+        let Some((x, y)) = self.monitor_position(position) else {
+            if dragging {
+                debug!(
+                    window_x = position.x,
+                    window_y = position.y,
+                    "pointer moved with a button held, but no picture is shown"
+                );
+            }
+            return;
+        };
+        let (x, y) = match self.active_confinement() {
+            Some(area) => confined(area, x, y),
+            None => (x, y),
+        };
+        if dragging {
+            debug!(x, y, "pointer moved with a button held");
         }
+        self.input.send(UserInput::PointerMoved { x, y });
     }
 
     /// Returns where a position in the window falls on the host's monitor, in
@@ -744,7 +765,12 @@ impl WindowApp {
     }
 
     /// Sends a button press or release.
-    fn button(&self, button: MouseButton, state: ElementState) {
+    fn button(&mut self, button: MouseButton, state: ElementState) {
+        debug!(?button, ?state, "pointer button");
+        match state {
+            ElementState::Pressed => self.held_buttons.insert(button),
+            ElementState::Released => self.held_buttons.remove(&button),
+        };
         let button = match button {
             MouseButton::Left => PointerButton::Left,
             MouseButton::Right => PointerButton::Right,
@@ -1005,6 +1031,7 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                     Some(LocalAction::Release) => {
                         self.release_pointer();
                         self.confinement_released = true;
+                        self.held_buttons.clear();
                         self.input.send(UserInput::ReleaseAll);
                     }
                     Some(LocalAction::ToggleMicrophone) => self.toggle_microphone(),
@@ -1015,7 +1042,10 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             WindowEvent::Touch(touch) => self.touch(touch),
             // Pointer events made from touches are not sent: the touches are.
             WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. }
-                if !self.fingers.is_empty() => {}
+                if !self.fingers.is_empty() =>
+            {
+                debug!("a pointer event made from touches is not sent");
+            }
             WindowEvent::CursorMoved { position, .. } if !self.captured => {
                 self.stop_following();
                 self.pointer_moved(position);
@@ -1026,11 +1056,13 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             } if self.pointer_mode == PointerKind::Relative && !self.captured => {
                 // A click on the window captures the pointer again; it is
                 // not sent.
+                debug!("a click captures the pointer for relative mode and is not sent");
                 self.capture_pointer();
             }
             WindowEvent::MouseInput { state, button, .. } => self.button(button, state),
             WindowEvent::MouseWheel { delta, .. } => self.scroll(delta),
             WindowEvent::Focused(focused) => {
+                debug!(focused, "window focus");
                 self.focused = focused;
                 self.input.send(UserInput::Focus(if focused {
                     Focus::Focused
@@ -1056,6 +1088,7 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 } else {
                     self.release_pointer();
                     self.fingers.clear();
+                    self.held_buttons.clear();
                     self.input.send(UserInput::ReleaseAll);
                 }
             }

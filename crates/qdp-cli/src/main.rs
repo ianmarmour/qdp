@@ -128,23 +128,40 @@ fn main() -> ExitCode {
     }
 }
 
-/// Sets up logging to standard error at the level `QDP_LOG` names, `info` by
-/// default. D-Bus warnings from zbus, which reports internal details of
-/// portal calls, are shown only when they are errors.
+/// Sets up logging to standard error as `QDP_LOG` asks, `info` by default:
+/// a level, or a level followed by levels for some targets, such as
+/// `info,qdp::window=debug`. D-Bus warnings from zbus, which reports internal
+/// details of portal calls, are shown only when they are errors, unless
+/// `QDP_LOG` names zbus itself.
 fn init_logging() {
-    let level = std::env::var(LOG_VARIABLE)
-        .ok()
-        .and_then(|level| level.parse::<LevelFilter>().ok())
+    let filter = log_filter(std::env::var(LOG_VARIABLE).ok().as_deref());
+    let most = filter
+        .iter()
+        .map(|(_, level)| level)
+        .chain(filter.default_level())
+        .max()
         .unwrap_or(LevelFilter::INFO);
-    let filter = Targets::new()
-        .with_default(level)
-        .with_target(ZBUS_TARGET, level.min(LevelFilter::ERROR));
     tracing_subscriber::fmt()
-        .with_max_level(level)
+        .with_max_level(most)
         .with_writer(std::io::stderr)
         .finish()
         .with(filter)
         .init();
+}
+
+/// Returns the log filter `QDP_LOG` asks for, or `info` if it is unset or
+/// cannot be read.
+fn log_filter(setting: Option<&str>) -> Targets {
+    let filter = setting
+        .and_then(|setting| setting.parse::<Targets>().ok())
+        .unwrap_or_default();
+    let default = filter.default_level().unwrap_or(LevelFilter::INFO);
+    let filter = filter.with_default(default);
+    if filter.iter().any(|(target, _)| target == ZBUS_TARGET) {
+        filter
+    } else {
+        filter.with_target(ZBUS_TARGET, default.min(LevelFilter::ERROR))
+    }
 }
 
 /// Runs `future` on a multi-threaded runtime.
@@ -695,4 +712,41 @@ fn finish(sink: &mut CliSink, result: Result<Option<ClientSummary>, String>) -> 
         None => info!(frames = sink.frames(), "stopped"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `QDP_LOG` is a level, optionally followed by levels for some targets,
+    /// and zbus keeps to errors unless it is named.
+    #[test]
+    fn reads_the_log_setting() {
+        let level = |filter: &Targets, target: &str| {
+            filter
+                .iter()
+                .find(|(name, _)| *name == target)
+                .map(|(_, level)| level)
+        };
+        let unset = log_filter(None);
+        assert_eq!(unset.default_level(), Some(LevelFilter::INFO));
+        assert_eq!(level(&unset, ZBUS_TARGET), Some(LevelFilter::ERROR));
+
+        let targeted = log_filter(Some("warn,qdp::window=debug"));
+        assert_eq!(targeted.default_level(), Some(LevelFilter::WARN));
+        assert_eq!(level(&targeted, "qdp::window"), Some(LevelFilter::DEBUG));
+        assert_eq!(level(&targeted, ZBUS_TARGET), Some(LevelFilter::ERROR));
+
+        let zbus = log_filter(Some("info,zbus=debug"));
+        assert_eq!(level(&zbus, ZBUS_TARGET), Some(LevelFilter::DEBUG));
+
+        // Only targets: the rest stays at info.
+        let only = log_filter(Some("qdp=trace"));
+        assert_eq!(only.default_level(), Some(LevelFilter::INFO));
+        // Unreadable settings fall back to info.
+        assert_eq!(
+            log_filter(Some("=")).default_level(),
+            Some(LevelFilter::INFO)
+        );
+    }
 }
