@@ -22,6 +22,11 @@ const SUBUNITS: i64 = 256;
 /// input that caused them by a frame or two.
 const WARP_QUIET: Duration = Duration::from_millis(250);
 
+/// How long after the last input of a device the client cannot follow, such
+/// as a raw touchpad or a passthrough device, the pointer's moves are taken
+/// as that device's: reported at once, with `FOLLOW` (Section 9.4).
+const FOLLOW_WINDOW: Duration = Duration::from_millis(500);
+
 /// How far, in pixels, the captured pointer may be from where the client's
 /// input put it before the difference is taken as a move: injection rounds
 /// positions to the host's own units.
@@ -78,6 +83,8 @@ pub(crate) struct HostCursor {
     last_position: Option<(i64, i64)>,
     /// The Warp ID of the last `CURSOR_WARP`.
     last_warp: u64,
+    /// When a device the client cannot follow last reported.
+    last_unfollowed_input: Option<Instant>,
 }
 
 impl Default for HostCursor {
@@ -94,6 +101,7 @@ impl Default for HostCursor {
             last_input: None,
             last_position: None,
             last_warp: 0,
+            last_unfollowed_input: None,
         }
     }
 }
@@ -115,6 +123,9 @@ impl HostCursor {
             InputAction::MouseMoveBy { .. } => {
                 self.expected = None;
                 self.last_input = Some(now);
+            }
+            InputAction::Touchpad { .. } | InputAction::PassthroughReport { .. } => {
+                self.last_unfollowed_input = Some(now);
             }
             _ => {}
         }
@@ -214,6 +225,11 @@ impl HostCursor {
             return None;
         }
         self.last_position = Some(position);
+        // A device the client cannot follow is moving the pointer: each
+        // capture, once per display refresh, reports where it went.
+        let following = self
+            .last_unfollowed_input
+            .is_some_and(|input| now.saturating_duration_since(input) < FOLLOW_WINDOW);
         let quiet = self
             .last_input
             .is_none_or(|input| now.saturating_duration_since(input) >= WARP_QUIET);
@@ -221,7 +237,7 @@ impl HostCursor {
             (expected_x - position.0).abs() > WARP_TOLERANCE
                 || (expected_y - position.1).abs() > WARP_TOLERANCE
         });
-        if !(quiet && unexplained) {
+        if !following && !(quiet && unexplained) {
             return None;
         }
         self.expected = Some(position);
@@ -229,7 +245,11 @@ impl HostCursor {
         let subunits = |value: i64| SignedVarInt::new(value * SUBUNITS).unwrap_or_default();
         Some(CursorWarp {
             warp_id: self.latest_warp(),
-            flags: WarpFlags::default(),
+            flags: if following {
+                WarpFlags::FOLLOW
+            } else {
+                WarpFlags::default()
+            },
             x: subunits(position.0),
             y: subunits(position.1),
         })
@@ -266,6 +286,7 @@ fn image(cursor_id: CursorId, image_serial: ImageSerial, shape: &CursorShape) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qdp::message::{DeviceId, TouchpadInfo, TouchpadReport};
 
     /// Returns a solid `size × size` shape of one colour.
     fn shape(size: u32, colour: u8) -> Arc<CursorShape> {
@@ -400,6 +421,38 @@ mod tests {
             (300 * 256, 200 * 256)
         );
         assert_eq!(cursor.latest_warp().0.into_inner(), 2);
+        assert!(!moved[0].flags.contains(WarpFlags::FOLLOW));
+    }
+
+    /// While a raw touchpad drives the pointer, every move is reported at
+    /// once with `FOLLOW`, and plain warps return once it stops.
+    #[test]
+    fn follows_unknown_devices() {
+        let mut cursor = HostCursor::default();
+        let start = Instant::now();
+        let arrow = shape(8, 1);
+        cursor.update(&visible((10, 20), &arrow), start);
+        cursor.input(
+            &InputAction::Touchpad {
+                device_id: DeviceId(VarInt::from_u32(16)),
+                surface: TouchpadInfo {
+                    width: VarInt::from_u32(10_000),
+                    height: VarInt::from_u32(6_000),
+                },
+                clickpad: true,
+                report: TouchpadReport::default(),
+            },
+            start,
+        );
+        for (step, x) in [(16, 12), (32, 15)] {
+            let at = start + Duration::from_millis(step);
+            let followed = warps(&cursor.update(&visible((x, 20), &arrow), at));
+            assert_eq!(followed.len(), 1);
+            assert!(followed[0].flags.contains(WarpFlags::FOLLOW));
+            assert_eq!(followed[0].x.into_inner(), i64::from(x) * 256);
+        }
+        let later = start + FOLLOW_WINDOW + WARP_QUIET;
+        let moved = warps(&cursor.update(&visible((300, 20), &arrow), later));
         assert!(!moved[0].flags.contains(WarpFlags::FOLLOW));
     }
 

@@ -17,19 +17,19 @@ use super::uinput::{
 };
 
 /// `BTN_TOUCH`: whether anything touches.
-const BTN_TOUCH: u16 = 0x14a;
+pub(super) const BTN_TOUCH: u16 = 0x14a;
 
 /// `ABS_MT_SLOT`: selects the slot the following events change.
-const ABS_MT_SLOT: u16 = 0x2f;
+pub(super) const ABS_MT_SLOT: u16 = 0x2f;
 
 /// `ABS_MT_POSITION_X`.
-const ABS_MT_POSITION_X: u16 = 0x35;
+pub(super) const ABS_MT_POSITION_X: u16 = 0x35;
 
 /// `ABS_MT_POSITION_Y`.
-const ABS_MT_POSITION_Y: u16 = 0x36;
+pub(super) const ABS_MT_POSITION_Y: u16 = 0x36;
 
 /// `ABS_MT_TRACKING_ID`: claims a slot for a contact, or frees it with -1.
-const ABS_MT_TRACKING_ID: u16 = 0x39;
+pub(super) const ABS_MT_TRACKING_ID: u16 = 0x39;
 
 /// `ABS_MT_PRESSURE`.
 const ABS_MT_PRESSURE: u16 = 0x3a;
@@ -38,14 +38,14 @@ const ABS_MT_PRESSURE: u16 = 0x3a;
 const NO_TRACKING_ID: i32 = -1;
 
 /// The largest tracking ID; they wrap around after it.
-const MAX_TRACKING_ID: i32 = u16::MAX as i32;
+pub(super) const MAX_TRACKING_ID: i32 = u16::MAX as i32;
 
 /// How the touchscreen presents itself.
 const IDENTITY: Identity<'static> = Identity::virtual_device("QDP touchscreen");
 
 /// Turns touch frames into multitouch events, assigning contacts to slots.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Translator {
+pub(super) struct Translator {
     /// The Contact ID in each slot, and its last position.
     slots: [Option<(u8, (i32, i32))>; MAX_CONTACTS],
     /// The tracking ID the next contact gets.
@@ -54,7 +54,7 @@ struct Translator {
 
 impl Translator {
     /// Returns the events performing a frame.
-    fn events(&mut self, points: &[TouchPoint]) -> Vec<Event> {
+    pub(super) fn events(&mut self, points: &[TouchPoint]) -> Vec<Event> {
         let mut events = Vec::new();
         for point in points {
             let position = (point.x.max(0), point.y.max(0));

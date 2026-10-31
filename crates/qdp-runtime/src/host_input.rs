@@ -12,7 +12,7 @@ use qdp::input::{InputEvent, total_delta};
 use qdp::message::{
     DeviceId, DeviceKind, FeatureStatus, GamepadOutput, GamepadReport, KeyboardInfo, KeyboardLeds,
     KeyboardReport, MouseReport, PenFlags, PenReport, PointerButtons, PointerKind, PointerReport,
-    TextReport, TouchContact, TouchContactFlags, TouchscreenReport,
+    TextReport, TouchContact, TouchContactFlags, TouchpadInfo, TouchpadReport, TouchscreenReport,
 };
 use tracing::debug;
 
@@ -151,6 +151,20 @@ pub enum InputAction {
     },
     /// Removes a passthrough device, as when the client detaches it.
     PassthroughRemoved(DeviceId),
+    /// Sets a touchpad's buttons and contacts, creating the touchpad on its
+    /// first report, for the host's own gestures (Section 8.4.6).
+    Touchpad {
+        /// The touchpad.
+        device_id: DeviceId,
+        /// The size of its surface.
+        surface: TouchpadInfo,
+        /// Whether its surface is a button.
+        clickpad: bool,
+        /// Its complete state.
+        report: TouchpadReport,
+    },
+    /// Removes a touchpad, as when the client detaches it.
+    TouchpadRemoved(DeviceId),
 }
 
 /// Performs input actions on the host's desktop.
@@ -224,6 +238,13 @@ pub trait InputInjector: Send {
         let _ = (token, status, report);
     }
 
+    /// Returns whether the injector can present raw touchpads, whose
+    /// contacts the host's own gesture recognition reads, so that the host
+    /// accepts touchpads.
+    fn supports_touchpad(&self) -> bool {
+        false
+    }
+
     /// Returns whether the injector can present gamepads to the host's
     /// applications, so that the host accepts gamepad devices.
     fn supports_gamepads(&self) -> bool {
@@ -290,6 +311,15 @@ enum DeviceState {
     Touchscreen(Vec<TouchContact>),
     /// A pen.
     Pen(PenReport),
+    /// A touchpad.
+    Touchpad {
+        /// The size of its surface.
+        surface: TouchpadInfo,
+        /// Whether its surface is a button.
+        clickpad: bool,
+        /// Its last applied state.
+        report: TouchpadReport,
+    },
     /// A passthrough device, with its input reports at rest and as last
     /// applied, by report ID.
     Passthrough {
@@ -341,6 +371,23 @@ impl StandardInput {
         );
     }
 
+    /// Adds an accepted touchpad, at rest, with the size of its surface.
+    pub(crate) fn attach_touchpad(
+        &mut self,
+        device_id: DeviceId,
+        surface: TouchpadInfo,
+        clickpad: bool,
+    ) {
+        self.devices.insert(
+            device_id,
+            DeviceState::Touchpad {
+                surface,
+                clickpad,
+                report: TouchpadReport::default(),
+            },
+        );
+    }
+
     /// Returns the accepted keyboards.
     pub(crate) fn keyboards(&self) -> Vec<DeviceId> {
         self.devices
@@ -373,6 +420,7 @@ impl StandardInput {
             DeviceState::Passthrough { .. } => {
                 actions.push(InputAction::PassthroughRemoved(device_id));
             }
+            DeviceState::Touchpad { .. } => actions.push(InputAction::TouchpadRemoved(device_id)),
             _ => {}
         }
         actions
@@ -499,6 +547,23 @@ impl StandardInput {
                 }
                 Ok(_) => {}
                 Err(_) => debug!("malformed pen report skipped"),
+            },
+            DeviceState::Touchpad {
+                surface,
+                clickpad,
+                report: previous,
+            } => match TouchpadReport::decode(&event.data) {
+                Ok(report) if report != *previous => {
+                    actions.push(InputAction::Touchpad {
+                        device_id: event.device_id,
+                        surface: *surface,
+                        clickpad: *clickpad,
+                        report: report.clone(),
+                    });
+                    *previous = report;
+                }
+                Ok(_) => {}
+                Err(_) => debug!("malformed touchpad report skipped"),
             },
             DeviceState::Passthrough { current, .. } => {
                 let Some(&report_id) = event.data.first() else {
@@ -673,6 +738,20 @@ fn release(device_id: DeviceId, state: &DeviceState) -> Vec<InputAction> {
                 actions.push(InputAction::Pen(pen_at_rest(report)));
             }
         }
+        DeviceState::Touchpad {
+            surface,
+            clickpad,
+            report,
+        } => {
+            if *report != TouchpadReport::default() {
+                actions.push(InputAction::Touchpad {
+                    device_id,
+                    surface: *surface,
+                    clickpad: *clickpad,
+                    report: TouchpadReport::default(),
+                });
+            }
+        }
         DeviceState::Passthrough { rest, current } => {
             // Inject the rest report of every report ID away from rest.
             actions.extend(
@@ -730,6 +809,13 @@ fn at_rest(state: &DeviceState) -> DeviceState {
         DeviceState::Gamepad(report) => DeviceState::Gamepad(gamepad_at_rest(report)),
         DeviceState::Touchscreen(_) => DeviceState::Touchscreen(Vec::new()),
         DeviceState::Pen(report) => DeviceState::Pen(pen_at_rest(report)),
+        DeviceState::Touchpad {
+            surface, clickpad, ..
+        } => DeviceState::Touchpad {
+            surface: *surface,
+            clickpad: *clickpad,
+            report: TouchpadReport::default(),
+        },
         DeviceState::Passthrough { rest, current } => DeviceState::Passthrough {
             rest: rest.clone(),
             current: current

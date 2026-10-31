@@ -102,7 +102,7 @@ impl DeviceFeatures {
 }
 
 /// The size of a touchpad's surface, in hundredths of a millimetre (Section 8.2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TouchpadInfo {
     /// The width of the surface.
     pub width: VarInt,

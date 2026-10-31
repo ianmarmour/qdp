@@ -15,6 +15,7 @@ mod keycodes;
 mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
+mod touchpad;
 mod touchscreen;
 mod uhid;
 mod uinput;
