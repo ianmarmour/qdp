@@ -29,7 +29,7 @@ use winit::event::{
     DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, Touch,
     WindowEvent,
 };
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
@@ -52,6 +52,9 @@ const UNITS_PER_PIXEL: f64 = 3.0;
 /// The shortest time between two warps of the user's pointer: at most 60 a
 /// second (Section 9.4).
 const MIN_WARP_INTERVAL: Duration = Duration::from_micros(16_667);
+
+/// The interface scale, in percent, of an image drawn for no scaling.
+const DEFAULT_IMAGE_SCALE: f64 = 100.0;
 
 /// The key that, with Ctrl, Alt and Shift held, releases the pointer from
 /// capture (Section 8.9). It is never sent to the host.
@@ -216,9 +219,12 @@ pub struct WindowApp {
     /// Whether the window's pointer must be set again: the image or the
     /// picture's scale changed.
     cursor_stale: bool,
-    /// Where on the host's monitor to draw the cursor while it follows a
-    /// device the client does not know, in pixels.
+    /// Where on the host's monitor to draw the cursor itself, in pixels:
+    /// while a device the client does not know moves it, or after a warp the
+    /// window's pointer could not follow, until the user's pointer moves.
     follow: Option<(f64, f64)>,
+    /// A warp waiting for the warp rate limit, to apply once it allows.
+    pending_warp: Option<(f64, f64)>,
     /// Whether the window has keyboard focus.
     focused: bool,
     /// When the user's pointer was last warped.
@@ -263,6 +269,7 @@ impl WindowApp {
             scaled_cursor: None,
             cursor_stale: false,
             follow: None,
+            pending_warp: None,
             focused: false,
             last_warp: None,
             pointer_mode: PointerKind::Absolute,
@@ -358,9 +365,15 @@ impl WindowApp {
             return;
         }
         self.cursor_stale = false;
-        let factor = self
+        // The image keeps its size relative to the picture, at the interface
+        // scale it was drawn for (Section 9.2).
+        let picture = self
             .placement()
             .map_or(1.0, |(placement, width, _)| placement.scale(width));
+        let image_scale = self.cursor.as_ref().map_or(DEFAULT_IMAGE_SCALE, |image| {
+            image.scale.into_inner().max(1) as f64
+        });
+        let factor = picture * DEFAULT_IMAGE_SCALE / image_scale;
         self.scaled_cursor = self
             .cursor
             .as_ref()
@@ -401,31 +414,55 @@ impl WindowApp {
                 self.request_redraw();
             }
             WarpKind::Move => {
-                self.stop_following();
-                let now = Instant::now();
-                let too_soon = self
-                    .last_warp
-                    .is_some_and(|last| now.saturating_duration_since(last) < MIN_WARP_INTERVAL);
-                if !self.focused || too_soon {
-                    return;
-                }
-                let (Some(display), Some((placement, width, height))) =
-                    (&self.display, self.placement())
-                else {
-                    return;
-                };
-                let (x, y) = placement.to_window(warp.position.0, warp.position.1, width, height);
-                if !placement.contains(x, y) {
-                    return;
-                }
-                if let Err(error) = display
-                    .window
-                    .set_cursor_position(PhysicalPosition::new(x, y))
-                {
-                    debug!(%error, "the pointer cannot be moved");
-                }
-                self.last_warp = Some(now);
+                // Warps beyond the rate limit are coalesced: the last one is
+                // applied once the limit allows (Section 9.4).
+                self.pending_warp = Some(warp.position);
+                self.apply_pending_warp(Instant::now());
             }
+        }
+    }
+
+    /// Returns when the pending warp may be applied.
+    fn warp_allowed_at(&self) -> Option<Instant> {
+        self.pending_warp?;
+        Some(
+            self.last_warp
+                .map_or_else(Instant::now, |last| last + MIN_WARP_INTERVAL),
+        )
+    }
+
+    /// Applies the pending warp if the rate limit allows: the window's
+    /// pointer moves there while the window has focus and the position is on
+    /// the picture, and otherwise the window draws the cursor there itself,
+    /// so that the drawn cursor always moves (Section 9.4).
+    fn apply_pending_warp(&mut self, now: Instant) {
+        if self.warp_allowed_at().is_none_or(|allowed| now < allowed) {
+            return;
+        }
+        let Some((x, y)) = self.pending_warp.take() else {
+            return;
+        };
+        self.last_warp = Some(now);
+        let moved = match (&self.display, self.placement()) {
+            (Some(display), Some((placement, width, height))) if self.focused => {
+                let (window_x, window_y) = placement.to_window(x, y, width, height);
+                placement.contains(window_x, window_y)
+                    && display
+                        .window
+                        .set_cursor_position(PhysicalPosition::new(window_x, window_y))
+                        .inspect_err(|error| debug!(%error, "the pointer cannot be moved"))
+                        .is_ok()
+            }
+            _ => false,
+        };
+        if moved {
+            self.stop_following();
+        } else {
+            self.follow = Some((x, y));
+            if let Some(display) = &self.display {
+                display.window.set_cursor_visible(false);
+            }
+            self.request_redraw();
         }
     }
 
@@ -692,6 +729,11 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.update_cursor(event_loop);
+        self.apply_pending_warp(Instant::now());
+        event_loop.set_control_flow(match self.warp_allowed_at() {
+            Some(allowed) => ControlFlow::WaitUntil(allowed),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn device_event(

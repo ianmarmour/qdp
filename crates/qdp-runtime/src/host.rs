@@ -659,9 +659,8 @@ impl ActiveHost {
             confinement: None,
         }))?;
         if mode == PointerKind::Absolute {
-            if let Some(warp) = self.cursor.warp_to_current() {
-                session.send(&ControlMessage::CursorWarp(warp))?;
-            }
+            let warp = self.cursor.warp_to_current();
+            session.send(&ControlMessage::CursorWarp(warp))?;
         }
         Ok(())
     }

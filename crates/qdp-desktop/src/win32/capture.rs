@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{CursorShape, CursorState, FrameSource, RuntimeError};
+use qdp_runtime::{CursorShape, CursorState, FrameSource, PointerPosition, RuntimeError};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
@@ -86,7 +86,10 @@ impl Pointer {
                 self.position.1.saturating_add(offset(shape.hotspot.1)),
             )
         });
-        CursorState { position, shape }
+        CursorState {
+            position: position.map_or(PointerPosition::Hidden, |(x, y)| PointerPosition::At(x, y)),
+            shape,
+        }
     }
 }
 

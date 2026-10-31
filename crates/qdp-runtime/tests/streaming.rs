@@ -25,8 +25,8 @@ use qdp_runtime::{
     DisplaySize, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource, GamepadFeedback,
     HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue,
     NoInput, PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, Playout,
-    PointerButton, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
-    TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
+    PointerButton, PointerPosition, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
+    TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -118,7 +118,7 @@ impl FrameSource for CursorPattern {
     fn cursor(&mut self) -> Option<CursorState> {
         let shape = &self.shapes[usize::from(self.captures > SHAPE_CHANGE)];
         Some(CursorState {
-            position: Some(CURSOR_POSITION),
+            position: PointerPosition::At(CURSOR_POSITION.0, CURSOR_POSITION.1),
             shape: Some(Arc::clone(shape)),
         })
     }

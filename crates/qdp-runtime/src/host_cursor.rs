@@ -12,7 +12,7 @@ use qdp::message::{
 use qdp::wire::{SignedVarInt, VarInt};
 
 use crate::host_input::InputAction;
-use crate::media::{CursorShape, CursorState};
+use crate::media::{CursorShape, CursorState, PointerPosition};
 
 /// QDP positions are in 1/256 pixel (Section 1.5.6).
 const SUBUNITS: i64 = 256;
@@ -136,8 +136,8 @@ impl HostCursor {
     pub(crate) fn update(&mut self, state: &CursorState, now: Instant) -> Vec<CursorUpdate> {
         let mut updates = Vec::new();
         let wanted = match (&state.shape, state.position) {
-            (Some(shape), Some(_)) => Some(self.slot_for(shape, &mut updates)),
-            _ => None,
+            (Some(_), PointerPosition::Hidden) | (None, _) => None,
+            (Some(shape), _) => Some(self.slot_for(shape, &mut updates)),
         };
         let set = match wanted {
             Some(index) => {
@@ -158,7 +158,11 @@ impl HostCursor {
             self.current = set;
             updates.push(CursorUpdate::Set(set));
         }
-        if let Some(warp) = state.position.and_then(|position| self.warp(position, now)) {
+        let warp = match state.position {
+            PointerPosition::At(x, y) => self.warp((x, y), now),
+            PointerPosition::Hidden | PointerPosition::Unknown => None,
+        };
+        if let Some(warp) = warp {
             updates.push(CursorUpdate::Warp(warp));
         }
         updates
@@ -204,17 +208,21 @@ impl HostCursor {
 
     /// Returns a warp to where the pointer is now, as the host sends when it
     /// switches to absolute mode (Section 8.9), if a capture has seen it.
-    pub(crate) fn warp_to_current(&mut self) -> Option<CursorWarp> {
-        let (x, y) = self.last_position?;
+    /// Returns the warp the host sends on switching to absolute mode, which
+    /// it must (Section 8.9): to where a capture last saw the pointer, or
+    /// else where the client's input last put it, or else the desktop's
+    /// origin.
+    pub(crate) fn warp_to_current(&mut self) -> CursorWarp {
+        let (x, y) = self.last_position.or(self.expected).unwrap_or_default();
         self.expected = Some((x, y));
         self.last_warp += 1;
         let subunits = |value: i64| SignedVarInt::new(value * SUBUNITS).unwrap_or_default();
-        Some(CursorWarp {
+        CursorWarp {
             warp_id: self.latest_warp(),
             flags: WarpFlags::default(),
             x: subunits(x),
             y: subunits(y),
-        })
+        }
     }
 
     /// Returns a warp if the pointer moved to `position` without the
@@ -301,7 +309,7 @@ mod tests {
     /// Returns a visible pointer at `position` with `shape`.
     fn visible(position: (i32, i32), shape: &Arc<CursorShape>) -> CursorState {
         CursorState {
-            position: Some(position),
+            position: PointerPosition::At(position.0, position.1),
             shape: Some(Arc::clone(shape)),
         }
     }
@@ -348,7 +356,7 @@ mod tests {
         assert_eq!(sets(&updates), [first]);
 
         let hidden = CursorState {
-            position: None,
+            position: PointerPosition::Hidden,
             shape: Some(arrow),
         };
         let updates = cursor.update(&hidden, now);
@@ -460,14 +468,36 @@ mod tests {
     #[test]
     fn warps_to_the_current_position() {
         let mut cursor = HostCursor::default();
-        assert!(cursor.warp_to_current().is_none());
+        assert_eq!(cursor.warp_to_current().x.into_inner(), 0);
+        cursor.input(
+            &InputAction::PointerMoveTo { x: 3 * 256, y: 0 },
+            Instant::now(),
+        );
+        assert_eq!(cursor.warp_to_current().x.into_inner(), 3 * 256);
         cursor.update(&visible((7, 9), &shape(4, 1)), Instant::now());
-        let warp = cursor.warp_to_current().unwrap();
+        let warp = cursor.warp_to_current();
         assert_eq!(
             (warp.x.into_inner(), warp.y.into_inner()),
             (7 * 256, 9 * 256)
         );
         assert_eq!(warp.warp_id, cursor.latest_warp());
+    }
+
+    /// A pointer whose position the source cannot tell is shown, and never
+    /// warped.
+    #[test]
+    fn shows_untracked_pointers() {
+        let mut cursor = HostCursor::default();
+        let arrow = Arc::new(CursorShape::arrow());
+        let state = CursorState {
+            position: PointerPosition::Unknown,
+            shape: Some(arrow),
+        };
+        let updates = cursor.update(&state, Instant::now());
+        assert!(matches!(updates[0], CursorUpdate::Image(_)));
+        assert!(matches!(updates[1], CursorUpdate::Set(set) if set.cursor_id != CursorId::HIDDEN));
+        assert!(warps(&updates).is_empty());
+        assert_eq!(CursorShape::arrow().pixels.len(), 12 * 19 * 4);
     }
 
     /// Oversized shapes are cropped to 512 pixels.

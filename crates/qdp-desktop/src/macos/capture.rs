@@ -141,7 +141,7 @@ pub struct MacScreenCapture {
     _output: Retained<ScreenOutput>,
     /// Reads the pointer, which the frames then leave out, if macOS reports
     /// it.
-    cursor: Option<SystemCursor>,
+    cursor: SystemCursor,
 }
 
 // SAFETY: ScreenCaptureKit's stream may be controlled from any thread, and
@@ -185,8 +185,8 @@ impl MacScreenCapture {
                 &NSArray::new(),
             )
         };
-        // The client draws the pointer where macOS reports it (Section 9.1);
-        // otherwise the frames show it.
+        // The client draws the pointer where macOS reports it; the frames
+        // never show it (Section 9.1).
         let cursor = SystemCursor::new(width, height);
         // SAFETY: the configuration's setters take plain values.
         let configuration = unsafe {
@@ -195,7 +195,7 @@ impl MacScreenCapture {
             configuration.setHeight(height);
             configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
             configuration.setMinimumFrameInterval(CMTime::new(1, FRAME_RATE));
-            configuration.setShowsCursor(cursor.is_none());
+            configuration.setShowsCursor(false);
             configuration.setQueueDepth(QUEUE_DEPTH);
             configuration
         };
@@ -283,7 +283,7 @@ impl FrameSource for MacScreenCapture {
     }
 
     fn cursor(&mut self) -> Option<CursorState> {
-        self.cursor.as_mut().map(SystemCursor::state)
+        Some(self.cursor.state())
     }
 }
 
