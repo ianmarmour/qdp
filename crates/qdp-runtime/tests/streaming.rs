@@ -13,8 +13,10 @@ use qdp::hid::ReportDescriptor;
 use qdp::message::{
     BusType, CursorImage, DeviceFeatures, DeviceId, FeatureOperation, FeatureStatus,
     GamepadButtons, GamepadOutput, GamepadReport, KeyboardInfo, LayoutPlatform, PassthroughInfo,
-    PenFlags, PenReport, PointerKind, PointerMode,
+    PenFlags, PenReport, PointerKind, PointerMode, TouchpadButtons, TouchpadContact,
+    TouchpadContactFlags, TouchpadInfo, TouchpadReport,
 };
+use qdp::wire::VarInt;
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
@@ -1465,5 +1467,158 @@ async fn passthrough_round_trip() {
     assert_eq!(
         log.answers,
         [(FEATURE_TOKEN, FeatureStatus::Ok, FEATURE_REPORT.to_vec())]
+    );
+}
+
+/// An injector that records actions and presents raw touchpads.
+#[derive(Debug, Clone, Default)]
+struct TouchpadHost(Recorder);
+
+impl InputInjector for TouchpadHost {
+    fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        self.0.inject(action)
+    }
+
+    fn description(&self) -> &str {
+        "touchpad host"
+    }
+
+    fn supports_touchpad(&self) -> bool {
+        true
+    }
+}
+
+/// The size of the test touchpad's surface: 100 by 60 mm.
+const TOUCHPAD_SURFACE: TouchpadInfo = TouchpadInfo {
+    width: VarInt::from_u32(10_000),
+    height: VarInt::from_u32(6_000),
+};
+
+/// Returns the test touchpad with one finger at `x` and the primary button
+/// pressed.
+fn touchpad_report(x: u16) -> TouchpadReport {
+    TouchpadReport {
+        buttons: TouchpadButtons::PRIMARY,
+        contacts: vec![TouchpadContact {
+            id: 0,
+            flags: TouchpadContactFlags::CONFIDENCE,
+            x,
+            y: 30_000,
+        }],
+    }
+}
+
+/// Connects a touchpad and moves a finger on it.
+struct TouchpadWatcher {
+    /// Where the input goes.
+    input: InputHandle,
+    /// The frames presented.
+    frames: usize,
+}
+
+impl FrameSink for TouchpadWatcher {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        if self.frames == INPUT_FRAME {
+            assert!(self.input.send(UserInput::TouchpadConnected {
+                slot: 0,
+                name: "Test touchpad".to_owned(),
+                surface: TOUCHPAD_SURFACE,
+                clickpad: true,
+            }));
+            assert!(self.input.send(UserInput::Touchpad {
+                slot: 0,
+                report: touchpad_report(10_000),
+            }));
+        }
+        if self.frames == INPUT_FRAME * 3 {
+            assert!(self.input.send(UserInput::Touchpad {
+                slot: 0,
+                report: touchpad_report(12_000),
+            }));
+        }
+        if self.frames >= FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+}
+
+/// A raw touchpad's contacts and clicks reach a host that presents
+/// touchpads, which lifts every finger when the session ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn touchpad_reaches_the_host() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let injector = TouchpadHost::default();
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(injector.clone()),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let (handle, queue) = input_channel();
+    let mut watcher = TouchpadWatcher {
+        input: handle,
+        frames: 0,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut watcher,
+            Some(queue),
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("the session finishes in time")
+    .unwrap();
+    endpoint.wait_idle().await;
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    let reports: Vec<TouchpadReport> = injector
+        .0
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|action| match action {
+            InputAction::Touchpad {
+                surface,
+                clickpad,
+                report,
+                ..
+            } => {
+                assert_eq!((*surface, *clickpad), (TOUCHPAD_SURFACE, true));
+                Some(report.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reports,
+        [
+            touchpad_report(10_000),
+            touchpad_report(12_000),
+            TouchpadReport::default()
+        ]
     );
 }

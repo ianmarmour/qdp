@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 use qdp::input::{InputEvent, InputReceiver};
 use qdp::message::{
     Av1Profiles, BlockGrid, Capability, Chroma, ClientMonitorId, ControlMessage, CursorId,
-    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId, DeviceKind, DeviceStatus,
-    DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequestId, FeatureStatus,
-    FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags, ImageSerial,
-    InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT, PointerKind,
-    PointerMode, StreamHeader, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags,
-    VideoLayer, VideoStreamConfig, VideoStreamFlags,
+    CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind,
+    DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequestId,
+    FeatureStatus, FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags,
+    ImageSerial, InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT,
+    PointerKind, PointerMode, StreamHeader, StreamId, VideoCodec, VideoCodecCapability,
+    VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::registry::ErrorCode;
 use qdp::session::{HostConfig, HostEvent};
@@ -131,6 +131,9 @@ fn input_classes(injector: &dyn InputInjector, passthrough: PassthroughPolicy) -
     }
     if injector.supports_pen() {
         classes = classes.union(InputClasses::PEN);
+    }
+    if injector.supports_touchpad() {
+        classes = classes.union(InputClasses::TOUCHPAD);
     }
     if injector.supports_gamepads() {
         classes = classes.union(InputClasses::GAMEPAD);
@@ -435,6 +438,17 @@ fn answer_attach(
                 Ok(())
             })
         }
+        (_, true) if attach.kind == DeviceKind::TOUCHPAD => match attach.touchpad {
+            Some(surface) => {
+                let clickpad = attach.features.contains(DeviceFeatures::TOUCHPAD_CLICKPAD);
+                devices.attach_touchpad(attach.device_id, surface, clickpad);
+                Ok(())
+            }
+            None => Err((
+                DeviceStatusCode::Failed,
+                "the touchpad's size is missing".to_owned(),
+            )),
+        },
         (_, true) => {
             if devices.attach(attach.device_id, attach.kind) {
                 Ok(())

@@ -28,6 +28,7 @@ use qdp_runtime::{
 use super::gamepad::VirtualGamepad;
 use super::keycodes::{all_keys, consumer_key, keyboard_key};
 use super::pen::VirtualPen;
+use super::touchpad::VirtualTouchpad;
 use super::touchscreen::VirtualTouchscreen;
 use super::uhid::{Forwarded, UHID_PATH, UhidDevice};
 
@@ -306,7 +307,9 @@ impl Translator {
             | InputAction::Touch(_)
             | InputAction::Pen(_)
             | InputAction::PassthroughReport { .. }
-            | InputAction::PassthroughRemoved(_) => {
+            | InputAction::PassthroughRemoved(_)
+            | InputAction::Touchpad { .. }
+            | InputAction::TouchpadRemoved(_) => {
                 return None;
             }
         };
@@ -533,6 +536,8 @@ pub struct UinputInjector {
     touchscreen: Option<VirtualTouchscreen>,
     /// The pen tablet, created on the pen's first report.
     pen: Option<VirtualPen>,
+    /// The client's raw touchpads, created on their first report.
+    touchpads: HashMap<DeviceId, VirtualTouchpad>,
     /// The desktop's size in pixels, which the touchscreen covers.
     desktop_size: (u32, u32),
     /// Whether this user may create passthrough devices through uhid.
@@ -599,6 +604,7 @@ impl UinputInjector {
             gamepads: HashMap::new(),
             touchscreen: None,
             pen: None,
+            touchpads: HashMap::new(),
             desktop_size: (width, height),
             uhid_available: OpenOptions::new().write(true).open(UHID_PATH).is_ok(),
             passthrough: HashMap::new(),
@@ -673,6 +679,25 @@ impl InputInjector for UinputInjector {
             InputAction::Pen(report) => {
                 return self.set_pen(report).map_err(|error| error.to_string());
             }
+            InputAction::Touchpad {
+                device_id,
+                surface,
+                clickpad,
+                report,
+            } => {
+                let touchpad = match self.touchpads.entry(*device_id) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => entry.insert(
+                        VirtualTouchpad::new(*surface, *clickpad)
+                            .map_err(|error| error.to_string())?,
+                    ),
+                };
+                return touchpad.set(report).map_err(|error| error.to_string());
+            }
+            InputAction::TouchpadRemoved(device_id) => {
+                self.touchpads.remove(device_id);
+                return Ok(());
+            }
             InputAction::PassthroughReport { device_id, report } => {
                 let device = self
                     .passthrough
@@ -715,6 +740,10 @@ impl InputInjector for UinputInjector {
     }
 
     fn supports_pen(&self) -> bool {
+        true
+    }
+
+    fn supports_touchpad(&self) -> bool {
         true
     }
 

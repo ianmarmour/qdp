@@ -161,6 +161,7 @@ fn input_classes() -> InputClasses {
         .union(InputClasses::TEXT)
         .union(InputClasses::TOUCHSCREEN)
         .union(InputClasses::PEN)
+        .union(InputClasses::TOUCHPAD)
         .union(InputClasses::GAMEPAD)
         .union(InputClasses::PASSTHROUGH)
 }
@@ -604,12 +605,19 @@ impl ActiveClient<'_> {
                         .devices
                         .gamepad_slot(status.device_id)
                         .map(|_| DeviceClass::Standard);
+                    let touchpad = self
+                        .devices
+                        .touchpad_slot(status.device_id)
+                        .map(|_| DeviceClass::Standard);
                     let passthrough = self
                         .devices
                         .passthrough_slot(status.device_id)
                         .map(|_| DeviceClass::Passthrough);
-                    if let Some(class) = device_class(status.device_id).or(gamepad).or(passthrough)
-                    {
+                    let class = device_class(status.device_id)
+                        .or(gamepad)
+                        .or(touchpad)
+                        .or(passthrough);
+                    if let Some(class) = class {
                         self.input.add_device(status.device_id, class);
                     }
                     let now = Instant::now();
@@ -617,6 +625,7 @@ impl ActiveClient<'_> {
                         .devices
                         .gamepad_state(status.device_id)
                         .into_iter()
+                        .chain(self.devices.touchpad_state(status.device_id))
                         .chain(self.devices.passthrough_state(status.device_id));
                     for report in held {
                         self.input.push(
@@ -817,6 +826,33 @@ impl ActiveClient<'_> {
                         if let Some(device_id) = self.devices.disconnect_gamepad(slot) {
                             self.input.remove_device(device_id);
                             self.rumbling.remove(&device_id);
+                            self.driver
+                                .session()
+                                .send(&ControlMessage::DeviceDetach(DeviceDetach { device_id }))?;
+                        }
+                    }
+                    UserInput::TouchpadConnected { .. }
+                        if !supports_kind(
+                            self.driver.session().negotiated(),
+                            DeviceKind::TOUCHPAD,
+                        ) =>
+                    {
+                        debug!("the host does not take touchpads");
+                    }
+                    UserInput::TouchpadConnected {
+                        slot,
+                        name,
+                        surface,
+                        clickpad,
+                    } => {
+                        let attach = self.devices.connect_touchpad(slot, name, surface, clickpad);
+                        self.driver
+                            .session()
+                            .send(&ControlMessage::DeviceAttach(attach))?;
+                    }
+                    UserInput::TouchpadDisconnected { slot } => {
+                        if let Some(device_id) = self.devices.disconnect_touchpad(slot) {
+                            self.input.remove_device(device_id);
                             self.driver
                                 .session()
                                 .send(&ControlMessage::DeviceDetach(DeviceDetach { device_id }))?;

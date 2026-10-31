@@ -304,6 +304,10 @@ impl InputInjector for QuartzInjector {
             InputAction::PassthroughReport { .. } | InputAction::PassthroughRemoved(_) => {
                 Err("Quartz events cannot present HID devices".to_owned())
             }
+            // Nor touchpads, whose gestures macOS takes only from its own.
+            InputAction::Touchpad { .. } | InputAction::TouchpadRemoved(_) => {
+                Err("Quartz events cannot present touchpads".to_owned())
+            }
             InputAction::Pen(report) => {
                 let position = self.global_position(report.x, report.y);
                 self.position = position;

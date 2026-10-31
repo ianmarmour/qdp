@@ -254,6 +254,11 @@ impl Translator {
             InputAction::PassthroughReport { .. } | InputAction::PassthroughRemoved(_) => {
                 return Err("SendInput cannot present HID devices".to_owned());
             }
+            // Nor touchpads: Windows takes precision touchpads only from
+            // drivers.
+            InputAction::Touchpad { .. } | InputAction::TouchpadRemoved(_) => {
+                return Err("SendInput cannot present touchpads".to_owned());
+            }
         })
     }
 }

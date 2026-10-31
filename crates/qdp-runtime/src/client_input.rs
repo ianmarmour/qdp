@@ -11,7 +11,7 @@ use qdp::message::{
     DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, FeatureOperation, FeatureRequestId,
     FeatureStatus, GamepadButtons, GamepadOutput, GamepadReport, KeyboardReport, MouseReport,
     PassthroughInfo, PenFlags, PenReport, PointerButtons, PointerKind, PointerReport, TextReport,
-    TouchContactFlags, TouchscreenReport,
+    TouchContactFlags, TouchpadInfo, TouchpadReport, TouchscreenReport,
 };
 use qdp::wire::VarInt;
 use tokio::sync::Notify;
@@ -163,6 +163,31 @@ pub enum UserInput {
         slot: u32,
         /// Its complete state.
         report: GamepadReport,
+    },
+    /// A touchpad whose raw contacts the user asked to send, for the host's
+    /// own gestures, was connected; `slot` names it in later input (Section
+    /// 8.4.6).
+    TouchpadConnected {
+        /// The touchpad's number, unique while it is connected.
+        slot: u32,
+        /// Its product name.
+        name: String,
+        /// The size of its surface.
+        surface: TouchpadInfo,
+        /// Whether its surface is a button.
+        clickpad: bool,
+    },
+    /// A touchpad was disconnected, or its contacts are no longer sent.
+    TouchpadDisconnected {
+        /// The touchpad's number.
+        slot: u32,
+    },
+    /// A touchpad's buttons or contacts changed.
+    Touchpad {
+        /// The touchpad's number.
+        slot: u32,
+        /// Its complete state.
+        report: TouchpadReport,
     },
     /// A device the user chose to pass through was connected; `slot` names
     /// it in later input (Section 8.2.5).
@@ -363,6 +388,8 @@ pub(crate) struct ClientDevices {
     pen: PenReport,
     /// The connected gamepads, by slot: their Device IDs and states.
     gamepads: HashMap<u32, (DeviceId, GamepadReport)>,
+    /// The connected touchpads, by slot: their Device IDs and states.
+    touchpads: HashMap<u32, (DeviceId, TouchpadReport)>,
     /// The passed-through devices.
     passthrough: PassthroughDevices,
     /// The Device ID of the last gamepad or passthrough device attached.
@@ -381,6 +408,7 @@ impl Default for ClientDevices {
             touchscreen: Touchscreen::default(),
             pen: PenReport::default(),
             gamepads: HashMap::new(),
+            touchpads: HashMap::new(),
             passthrough: PassthroughDevices::default(),
             last_device_id: FIRST_DYNAMIC_ID - 1,
         }
@@ -424,6 +452,82 @@ impl ClientDevices {
     fn next_device_id(&mut self) -> DeviceId {
         self.last_device_id += 1;
         DeviceId(VarInt::new(self.last_device_id).unwrap_or(VarInt::MAX))
+    }
+
+    /// Starts tracking a touchpad, returning the `DEVICE_ATTACH` that offers
+    /// it to the host.
+    pub(crate) fn connect_touchpad(
+        &mut self,
+        slot: u32,
+        name: String,
+        surface: TouchpadInfo,
+        clickpad: bool,
+    ) -> DeviceAttach {
+        let device_id = self.next_device_id();
+        self.touchpads
+            .insert(slot, (device_id, TouchpadReport::default()));
+        let features = if clickpad {
+            DeviceFeatures::TOUCHPAD_CLICKPAD
+        } else {
+            DeviceFeatures::default()
+        };
+        DeviceAttach {
+            device_id,
+            kind: DeviceKind::TOUCHPAD,
+            features,
+            name,
+            touchpad: Some(surface),
+            passthrough: None,
+        }
+    }
+
+    /// Stops tracking a touchpad, returning its Device ID to detach.
+    pub(crate) fn disconnect_touchpad(&mut self, slot: u32) -> Option<DeviceId> {
+        self.touchpads.remove(&slot).map(|(device_id, _)| device_id)
+    }
+
+    /// Returns the slot of a touchpad's Device ID.
+    pub(crate) fn touchpad_slot(&self, device_id: DeviceId) -> Option<u32> {
+        self.touchpads
+            .iter()
+            .find(|(_, (id, _))| *id == device_id)
+            .map(|(&slot, _)| slot)
+    }
+
+    /// Returns the report of a touchpad's current state if anything touches
+    /// or is pressed: the reports made before the host accepted it were not
+    /// sent.
+    pub(crate) fn touchpad_state(&self, device_id: DeviceId) -> Option<PendingReport> {
+        let (_, report) = self.touchpads.values().find(|(id, _)| *id == device_id)?;
+        (*report != TouchpadReport::default())
+            .then(|| Self::touchpad_report(device_id, &TouchpadReport::default(), report))
+    }
+
+    /// Returns a touchpad's report: a transition when its buttons or the
+    /// fingers touching change, motion otherwise.
+    fn touchpad_report(
+        device_id: DeviceId,
+        previous: &TouchpadReport,
+        report: &TouchpadReport,
+    ) -> PendingReport {
+        let fingers = |report: &TouchpadReport| {
+            report
+                .contacts
+                .iter()
+                .map(|contact| contact.id)
+                .collect::<Vec<u8>>()
+        };
+        let kind = if report.buttons == previous.buttons && fingers(report) == fingers(previous) {
+            ReportKind::Motion
+        } else {
+            ReportKind::Transition
+        };
+        PendingReport {
+            device_id,
+            data: report.to_bytes(),
+            kind,
+            rest: rest(*report != TouchpadReport::default()),
+        }
     }
 
     /// Starts tracking a passthrough device, returning the `DEVICE_ATTACH`
@@ -687,6 +791,16 @@ impl ClientDevices {
                 self.pen = report;
                 vec![self.pen_report(kind)]
             }
+            UserInput::Touchpad { slot, report } => {
+                let Some((device_id, state)) = self.touchpads.get_mut(&slot) else {
+                    return Vec::new();
+                };
+                if report == *state {
+                    return Vec::new();
+                }
+                let previous = std::mem::replace(state, report);
+                vec![Self::touchpad_report(*device_id, &previous, state)]
+            }
             UserInput::PassthroughReport { slot, report } => {
                 self.passthrough.report(slot, report).into_iter().collect()
             }
@@ -712,6 +826,12 @@ impl ClientDevices {
                     self.mouse.buttons = PointerButtons::default();
                     reports.push(self.mouse_report(ReportKind::Transition));
                 }
+                for (device_id, state) in self.touchpads.values_mut() {
+                    if *state != TouchpadReport::default() {
+                        let previous = std::mem::take(state);
+                        reports.push(Self::touchpad_report(*device_id, &previous, state));
+                    }
+                }
                 for (device_id, state) in self.gamepads.values_mut() {
                     if *state != GamepadReport::default() {
                         let previous = std::mem::take(state);
@@ -736,6 +856,8 @@ impl ClientDevices {
             // control messages, not reports.
             UserInput::GamepadConnected { .. }
             | UserInput::GamepadDisconnected { .. }
+            | UserInput::TouchpadConnected { .. }
+            | UserInput::TouchpadDisconnected { .. }
             | UserInput::PassthroughConnected { .. }
             | UserInput::PassthroughDisconnected { .. }
             | UserInput::FeatureResponse { .. } => Vec::new(),
