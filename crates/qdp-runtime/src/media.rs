@@ -25,6 +25,12 @@ pub struct CursorShape {
     pub pixels: Vec<u8>,
 }
 
+/// The bytes of each pixel of a [`CursorShape`]: red, green, blue, alpha.
+const RGBA_BYTES: usize = 4;
+
+/// The index of the alpha byte within a pixel of a [`CursorShape`].
+const ALPHA_INDEX: usize = 3;
+
 /// The rows of the stock arrow: `B` is its black outline, `W` its white
 /// fill, and `.` transparent.
 const ARROW: [&str; 19] = [
@@ -50,6 +56,14 @@ const ARROW: [&str; 19] = [
 ];
 
 impl CursorShape {
+    /// Returns whether no pixel of the image shows: how applications,
+    /// games especially, often hide the pointer while drawing their own.
+    pub fn is_invisible(&self) -> bool {
+        self.pixels
+            .chunks_exact(RGBA_BYTES)
+            .all(|pixel| pixel[ALPHA_INDEX] == 0)
+    }
+
     /// Returns a stock arrow pointing up and left from its hotspot, for
     /// sources that cannot read the pointer's image: the host never draws
     /// the pointer into its video (Section 9.1).

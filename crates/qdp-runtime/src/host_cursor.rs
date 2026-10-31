@@ -142,8 +142,12 @@ impl HostCursor {
     /// `state`, in order: an image before the `CURSOR_SET` that shows it.
     pub(crate) fn update(&mut self, state: &CursorState, now: Instant) -> Vec<CursorUpdate> {
         let mut updates = Vec::new();
+        // A pointer whose image shows nothing is hidden, so that the client
+        // hides its own rather than show a transparent image, which not
+        // every window system draws as nothing.
         let wanted = match (&state.shape, state.position) {
             (Some(_), PointerPosition::Hidden) | (None, _) => None,
+            (Some(shape), _) if shape.is_invisible() => None,
             (Some(shape), _) => Some(self.slot_for(shape, &mut updates)),
         };
         let set = match wanted {
@@ -370,12 +374,33 @@ mod tests {
         assert_eq!(sets(&updates)[0].cursor_id, CursorId::HIDDEN);
     }
 
+    /// A pointer whose image is wholly transparent, as games set while
+    /// they draw their own, is hidden, and its image is not sent.
+    #[test]
+    fn transparent_images_hide_the_pointer() {
+        let mut cursor = HostCursor::default();
+        let now = Instant::now();
+        let arrow = shape(8, 1);
+        cursor.update(&visible((5, 5), &arrow), now);
+        let updates = cursor.update(&visible((5, 5), &shape(32, 0)), now);
+        assert!(
+            updates
+                .iter()
+                .all(|update| !matches!(update, CursorUpdate::Image(_)))
+        );
+        assert_eq!(sets(&updates)[0].cursor_id, CursorId::HIDDEN);
+        // The pointer shows again with the game's next visible image.
+        let updates = cursor.update(&visible((5, 5), &arrow), now);
+        assert_ne!(sets(&updates)[0].cursor_id, CursorId::HIDDEN);
+    }
+
     /// Past 128 shapes, the least recently shown Cursor ID is replaced.
     #[test]
     fn replaces_the_least_recently_used_cursor() {
         let mut cursor = HostCursor::default();
         let now = Instant::now();
-        let shapes: Vec<_> = (0..=MAX_CURSOR_IDS as u8)
+        // Colours from 1, since a wholly transparent shape hides the pointer.
+        let shapes: Vec<_> = (1..=MAX_CURSOR_IDS as u8 + 1)
             .map(|colour| shape(2, colour))
             .collect();
         for shape in &shapes[..MAX_CURSOR_IDS] {
