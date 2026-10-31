@@ -3,6 +3,7 @@
 //! choice of stream parameters.
 
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -184,6 +185,7 @@ impl AudioSender {
         (content, limit): (AudioContent, PacketLimit),
         connection: quinn::Connection,
         clock: SessionClock,
+        active: SessionActive,
     ) -> Result<Self, RuntimeError> {
         let mut encoder = open_audio_encoder(format, content)?;
         if content == AudioContent::Speech {
@@ -202,6 +204,7 @@ impl AudioSender {
                             limit,
                             connection,
                             clock,
+                            active,
                             input_channels: usize::from(input.channels()),
                             pending: Vec::new(),
                             sequence: 0,
@@ -245,6 +248,27 @@ impl Drop for AudioSender {
     }
 }
 
+/// Whether a session is active, shared with its sender threads.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionActive(Arc<AtomicBool>);
+
+impl SessionActive {
+    /// Returns a flag that is already set.
+    pub(crate) fn active() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+
+    /// Sets the flag.
+    pub(crate) fn activate(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns whether the flag is set.
+    fn is_active(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 /// The state of a sender thread.
 struct SendLoop {
     /// The stream.
@@ -257,6 +281,8 @@ struct SendLoop {
     connection: quinn::Connection,
     /// The session clock that timestamps packets.
     clock: SessionClock,
+    /// Whether the session is active, so that packets may be sent.
+    active: SessionActive,
     /// The channels the device captures.
     input_channels: usize,
     /// Captured samples not yet sent, remixed to the stream's channels.
@@ -335,6 +361,10 @@ impl SendLoop {
             payload: &payload,
         };
         self.position += self.format.frame_samples as u64;
+        // Datagrams are sent only once the session is active (Section 4.2).
+        if !self.active.is_active() {
+            return;
+        }
         if let Err(error) = self
             .connection
             .send_datagram(Bytes::from(packet.to_bytes()))
@@ -576,6 +606,8 @@ pub(crate) struct HostAudioStreams {
     config_id: u64,
     /// The Stream ID of the last stream defined.
     last_stream_id: u64,
+    /// Whether the session is active, so that packets may be sent.
+    active: SessionActive,
 }
 
 impl HostAudioStreams {
@@ -587,7 +619,15 @@ impl HostAudioStreams {
             capture: None,
             config_id: 0,
             last_stream_id: FIRST_AUDIO_STREAM_ID - 1,
+            active: SessionActive::default(),
         }
+    }
+
+    /// Lets the streams send packets: the session is active. Streams
+    /// configured before `SESSION_START` capture, but send nothing until
+    /// then (Section 4.2).
+    pub(crate) fn activate(&self) {
+        self.active.activate();
     }
 
     /// Returns the next Stream ID: any change of parameters needs a new one
@@ -643,6 +683,7 @@ impl HostAudioStreams {
                         kind,
                         connection.clone(),
                         clock,
+                        self.active.clone(),
                     )?;
                     self.playback = Some(sender);
                     streams.push(stream_config(stream_id, AudioDirection::Playback, format));
@@ -813,6 +854,7 @@ impl ClientAudioStreams {
                             kind,
                             connection.clone(),
                             clock,
+                            SessionActive::active(),
                         )?);
                     }
                 }

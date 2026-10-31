@@ -284,16 +284,22 @@ impl ClientAuthExchange {
     }
 
     /// Checks the host's `AUTH_RESULT`, verifying the host's SCRAM signature on
-    /// success.
+    /// success (Section 4.4.4): a host that reports success before the
+    /// exchange reached its signature has not proved it knows the password.
     pub(crate) fn finish(&mut self, result: &AuthResult) -> Result<(), RuntimeError> {
         let state = std::mem::replace(&mut self.state, ClientAuthState::Idle);
         if result.status != AuthStatus::Success {
             return Err(RuntimeError::AuthenticationFailed(result.reason.clone()));
         }
-        if let ClientAuthState::ScramFinal(client) = state {
-            client.verify_server_final(&result.auth_data)?;
+        match state {
+            ClientAuthState::ScramFinal(client) => {
+                Ok(client.verify_server_final(&result.auth_data)?)
+            }
+            ClientAuthState::Token => Ok(()),
+            ClientAuthState::Idle | ClientAuthState::ScramFirst(_) => {
+                Err(RuntimeError::UnexpectedAuthStep)
+            }
         }
-        Ok(())
     }
 }
 
@@ -373,6 +379,40 @@ mod tests {
         assert_eq!(
             format!("{:?}", ClientCredentials::Token(b"secret".to_vec())),
             "Token(..)"
+        );
+    }
+
+    /// A host that reports success before the SCRAM exchange reached its
+    /// signature is refused, while a token's success needs no signature.
+    #[test]
+    fn requires_the_signature() {
+        let success = AuthResult {
+            status: AuthStatus::Success,
+            reason: String::new(),
+            auth_data: Vec::new(),
+        };
+        let mut client = ClientAuthExchange::new(
+            ClientCredentials::Password {
+                username: "ian".to_owned(),
+                password: "pencil".to_owned(),
+            },
+            binding(),
+        );
+        client.start(&[AuthMethod::SCRAM_SHA_256_PLUS]).unwrap();
+        assert!(matches!(
+            client.finish(&success),
+            Err(RuntimeError::UnexpectedAuthStep)
+        ));
+        let mut token = ClientAuthExchange::new(ClientCredentials::Token(b"t".to_vec()), binding());
+        token.start(&[AuthMethod::TOKEN]).unwrap();
+        assert!(token.finish(&success).is_ok());
+        assert_eq!(
+            RuntimeError::UnexpectedAuthStep.close_code(),
+            qdp::registry::ErrorCode::AUTH_FAILED
+        );
+        assert_eq!(
+            RuntimeError::ProtocolViolation(String::new()).close_code(),
+            qdp::registry::ErrorCode::PROTOCOL_VIOLATION
         );
     }
 }

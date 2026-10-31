@@ -188,15 +188,35 @@ impl<S: DrivenSession> SessionDriver<S> {
     /// the connection if the session has ended.
     pub async fn flush(&mut self) -> Result<(), TransportError> {
         while let Some(bytes) = self.session.poll_transmit() {
-            self.connection.write_control(&bytes).await?;
+            match self.connection.write_control(&bytes).await {
+                Ok(()) => {}
+                Err(TransportError::ControlStreamClosed) => {
+                    return Err(self.critical_stream_closed());
+                }
+                Err(error) => return Err(error),
+            }
         }
         if let Some(reason) = self.session.close_reason() {
             let reason = reason.clone();
             debug!(code = %reason.code, reason = %reason.reason, "closing session");
-            self.connection.close(reason.code, &reason.reason);
+            self.connection
+                .close_after_delivery(reason.code, &reason.reason)
+                .await;
             return Err(TransportError::Session(reason));
         }
         Ok(())
+    }
+
+    /// Closes the connection with `QDP_CLOSED_CRITICAL_STREAM` because the
+    /// peer finished, reset or stopped the control stream (Section 3.5.1),
+    /// returning the error that ends the session.
+    fn critical_stream_closed(&mut self) -> TransportError {
+        let error = SessionError::new(
+            ErrorCode::CLOSED_CRITICAL_STREAM,
+            "the control stream was closed",
+        );
+        self.connection.close(error.code, &error.reason);
+        TransportError::Session(error)
     }
 
     /// Runs the session until it has an event for the application.
@@ -303,14 +323,7 @@ impl<S: DrivenSession> SessionDriver<S> {
                 let _ = self.session.handle_control_data(&chunk);
                 Ok(())
             }
-            Err(TransportError::ControlStreamClosed) => {
-                let error = SessionError::new(
-                    ErrorCode::CLOSED_CRITICAL_STREAM,
-                    "the control stream was closed",
-                );
-                self.connection.close(error.code, &error.reason);
-                Err(TransportError::Session(error))
-            }
+            Err(TransportError::ControlStreamClosed) => Err(self.critical_stream_closed()),
             Err(error) => Err(error),
         }
     }

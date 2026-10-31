@@ -34,12 +34,16 @@ const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// (Section 3.3).
 const UNIDIRECTIONAL_STREAMS: u32 = 64;
 
-/// The number of bidirectional streams the host lets the client open: only the
-/// control stream (Section 3.5.1).
-const HOST_BIDIRECTIONAL_STREAMS: u32 = 1;
+/// The number of bidirectional streams the host lets the client open: the
+/// control stream, and one more, so that a client opening another is seen
+/// and closed with `QDP_STREAM_CREATION_ERROR` rather than a QUIC stream
+/// limit error (Section 3.5.1).
+const HOST_BIDIRECTIONAL_STREAMS: u32 = 2;
 
-/// The number of bidirectional streams the client lets the host open: none.
-const CLIENT_BIDIRECTIONAL_STREAMS: u32 = 0;
+/// The number of bidirectional streams the client lets the host open: one,
+/// only so that a host opening it is seen and closed with
+/// `QDP_STREAM_CREATION_ERROR`.
+const CLIENT_BIDIRECTIONAL_STREAMS: u32 = 1;
 
 /// How the client verifies the host's certificate (Section 11.1).
 #[derive(Debug, Clone)]
