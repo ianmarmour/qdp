@@ -45,6 +45,7 @@ mod media;
 mod rate_control;
 mod resumption;
 mod send_stats;
+mod standing_input;
 mod stream_format;
 mod stream_ids;
 
@@ -151,6 +152,25 @@ impl RuntimeError {
             Self::ProtocolViolation(_) => ErrorCode::PROTOCOL_VIOLATION,
             _ => ErrorCode::INTERNAL_ERROR,
         }
+    }
+
+    /// Returns whether the session ended because its connection was lost,
+    /// timing out or reset, rather than closed by either side: the case a
+    /// client resumes from with its resumption token (Section 4.4.7).
+    pub fn is_connection_lost(&self) -> bool {
+        let Self::Transport(error) = self else {
+            return false;
+        };
+        let connection_error = match error {
+            TransportError::Connection(error) => error,
+            TransportError::Read(quinn::ReadError::ConnectionLost(error))
+            | TransportError::Write(quinn::WriteError::ConnectionLost(error)) => error,
+            _ => return false,
+        };
+        matches!(
+            connection_error,
+            quinn::ConnectionError::TimedOut | quinn::ConnectionError::Reset
+        )
     }
 }
 

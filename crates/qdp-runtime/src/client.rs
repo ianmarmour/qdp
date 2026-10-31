@@ -296,7 +296,7 @@ struct ActiveClient<'a> {
     /// The state of the standard devices.
     devices: ClientDevices,
     /// The user's input, if the client has a user interface.
-    input_queue: Option<InputQueue>,
+    input_queue: Option<&'a mut InputQueue>,
     /// Notified when user input arrives or a decoder finishes a frame.
     wake: Arc<Notify>,
     /// The host's cursor images and the one to draw.
@@ -333,7 +333,7 @@ pub async fn run(
     connection: QdpConnection,
     options: &ClientOptions,
     sink: &mut dyn FrameSink,
-    input: Option<InputQueue>,
+    input: Option<&mut InputQueue>,
     clipboard: Option<SharedClipboard>,
     audio: ClientAudio,
 ) -> Result<ClientSummary, RuntimeError> {
@@ -349,11 +349,18 @@ async fn run_session(
     connection: QdpConnection,
     options: &ClientOptions,
     sink: &mut dyn FrameSink,
-    input: Option<InputQueue>,
+    mut input: Option<&mut InputQueue>,
     clipboard: Option<SharedClipboard>,
     audio: ClientAudio,
 ) -> Result<ClientSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
+    // The session starts from the client's devices, focus and display as
+    // they are now, which matters when it resumes an earlier one.
+    let mut display_size = options.display;
+    if let Some(queue) = input.as_deref_mut() {
+        queue.begin_session();
+        display_size = queue.display().unwrap_or(display_size);
+    }
     // The clipboard is read from the start, so that its content is known
     // when the session becomes active.
     let directions = clipboard.as_ref().map(|shared| shared.directions);
@@ -367,7 +374,7 @@ async fn run_session(
     let mut auth = ClientAuthExchange::new(options.credentials.clone(), binding);
     let mut display_config = None;
     let mut early_messages = Vec::new();
-    let (display, first_request) = DisplayRequests::start(options.display, Instant::now());
+    let (display, first_request) = DisplayRequests::start(display_size, Instant::now());
     loop {
         match driver.next_event().await? {
             ClientEvent::HostHello(hello) => {
@@ -435,7 +442,7 @@ async fn run_session(
         input: InputSender::new(clock),
         devices: ClientDevices::default(),
         wake: input
-            .as_ref()
+            .as_deref()
             .map_or_else(|| Arc::new(Notify::new()), InputQueue::wake),
         input_queue: input,
         audio: ClientAudioStreams::new(audio),
@@ -902,7 +909,7 @@ impl ActiveClient<'_> {
     fn send_input(&mut self, smoothed_rtt: Duration, now: Instant) -> Result<(), RuntimeError> {
         let mut clipboard_outputs = Vec::new();
         let mut lock_toggles = Vec::new();
-        if let Some(queue) = &self.input_queue {
+        if let Some(queue) = self.input_queue.as_deref_mut() {
             while let Some(action) = queue.try_next() {
                 match action {
                     UserInput::GamepadConnected { .. }
