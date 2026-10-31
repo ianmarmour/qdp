@@ -122,6 +122,14 @@ pub struct Usage {
     pub id: u16,
 }
 
+impl Usage {
+    /// The usage that stands for a top-level collection with none, and for
+    /// fields outside every collection, which no policy can tell apart: it
+    /// is of the Undefined page, so its class is
+    /// [`CollectionClass::Other`].
+    pub const UNNAMED: Self = Self { page: 0, id: 0 };
+}
+
 /// What a top-level collection is, for a host's input policy (Section
 /// 8.2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -409,15 +417,20 @@ impl ReportDescriptor {
             match (prefix >> 2) & 0x03 {
                 // Main items.
                 0 => {
+                    if depth == 0 && matches!(tag, 0x8 | 0x9 | 0xb) {
+                        // A field outside every collection still reaches
+                        // the host, so the policy must see it.
+                        parsed.add_collection(Usage::UNNAMED);
+                    }
                     match tag {
                         0x8 => parsed.add_field(ReportType::Input, &globals, &locals, data)?,
                         0x9 => parsed.add_field(ReportType::Output, &globals, &locals, data)?,
                         0xb => parsed.add_field(ReportType::Feature, &globals, &locals, data)?,
                         0xa => {
                             if depth == 0 {
-                                if let Some(usage) = locals.collection_usage() {
-                                    parsed.collections.push(usage);
-                                }
+                                parsed.add_collection(
+                                    locals.collection_usage().unwrap_or(Usage::UNNAMED),
+                                );
                             }
                             depth += 1;
                             if depth > MAX_COLLECTION_DEPTH {
@@ -527,9 +540,18 @@ impl ReportDescriptor {
         Ok(())
     }
 
-    /// Returns the usages of the top-level collections, in order.
+    /// Returns the usages of the top-level collections, in order, with
+    /// [`Usage::UNNAMED`] standing for collections without one and for
+    /// fields outside every collection.
     pub fn collections(&self) -> &[Usage] {
         &self.collections
+    }
+
+    /// Notes a top-level collection, once for unnamed ones.
+    fn add_collection(&mut self, usage: Usage) {
+        if usage != Usage::UNNAMED || !self.collections.contains(&usage) {
+            self.collections.push(usage);
+        }
     }
 
     /// Returns whether the device's reports start with a report ID.
@@ -680,6 +702,32 @@ mod tests {
         assert_eq!(descriptor.report_length(ReportType::Input, 0), Some(8));
         assert_eq!(descriptor.report_length(ReportType::Output, 0), Some(1));
         assert_eq!(descriptor.rest_reports(), [vec![0; 9]]);
+    }
+
+    /// A top-level collection without a usage, and fields outside every
+    /// collection, are seen as unnamed collections, which are of no class
+    /// a policy accepts.
+    #[test]
+    fn sees_unnamed_collections() {
+        // A gamepad collection, then an unnamed one with a keyboard field.
+        let unnamed = [
+            GAMEPAD,
+            &[
+                0x05, 0x07, 0xa1, 0x01, 0x85, 0x03, 0x75, 0x08, 0x95, 0x01, 0x81, 0x00, 0xc0,
+            ],
+        ]
+        .concat();
+        let descriptor = ReportDescriptor::parse(&unnamed).unwrap();
+        assert_eq!(descriptor.collections().last(), Some(&Usage::UNNAMED));
+        assert_eq!(Usage::UNNAMED.class(), CollectionClass::Other);
+        // A keyboard field outside every collection.
+        let outside = [
+            &[0x85, 0x03, 0x05, 0x07, 0x75, 0x08, 0x95, 0x01, 0x81, 0x00][..],
+            GAMEPAD,
+        ]
+        .concat();
+        let descriptor = ReportDescriptor::parse(&outside).unwrap();
+        assert_eq!(descriptor.collections()[0], Usage::UNNAMED);
     }
 
     /// Collections are classed as the input policy needs.

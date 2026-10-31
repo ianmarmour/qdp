@@ -212,9 +212,17 @@ pub fn input_injector(width: u32, height: u32) -> Box<dyn InputInjector> {
     }
 }
 
-/// Opens the platform's input injector: uinput on Linux.
+/// Opens the platform's input injector: uinput on Linux, if its devices
+/// stay with this session (Section 8.2.5).
 #[cfg(target_os = "linux")]
 fn platform_injector(width: u32, height: u32) -> Result<Box<dyn InputInjector>, String> {
+    if !linux::devices_confined() {
+        return Err(
+            "virtual input devices would reach another user's session on seat0; \
+             only the session of seat0's active user can inject input"
+                .to_owned(),
+        );
+    }
     UinputInjector::new(width, height)
         .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         .map_err(|error| {

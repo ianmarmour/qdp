@@ -951,6 +951,12 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
                 self.display_changed();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            // On gaining focus the window library makes up presses for the
+            // keys already held, which the user did not press in the
+            // session.
+            WindowEvent::KeyboardInput {
+                is_synthetic: true, ..
+            } => {}
             WindowEvent::KeyboardInput { event, .. } if self.local_action(&event).is_some() => {
                 if event.state != ElementState::Pressed || event.repeat {
                     return;

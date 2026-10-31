@@ -335,9 +335,42 @@ enum DeviceState {
 pub(crate) struct StandardInput {
     /// The accepted devices.
     devices: HashMap<DeviceId, DeviceState>,
+    /// The buttons injected as held: those of every pointing device
+    /// combined, as operating systems combine several mice (Section 8.7,
+    /// rule 5).
+    buttons: PointerButtons,
 }
 
 impl StandardInput {
+    /// Returns how many devices are accepted.
+    pub(crate) fn len(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// Returns the buttons the pointing devices hold together, leaving out
+    /// `except`, if given.
+    fn held_buttons(&self, except: Option<DeviceId>) -> PointerButtons {
+        let held = self
+            .devices
+            .iter()
+            .filter(|(id, _)| Some(**id) != except)
+            .map(|(_, state)| match state {
+                DeviceState::Pointer(report, _) => report.buttons.0,
+                DeviceState::Mouse(report) => report.buttons.0,
+                _ => 0,
+            })
+            .fold(0, |held, buttons| held | buttons);
+        PointerButtons(held)
+    }
+
+    /// Injects the change between the buttons injected as held and those
+    /// the pointing devices now hold together.
+    fn combine_buttons(&mut self, actions: &mut Vec<InputAction>) {
+        let held = self.held_buttons(None);
+        button_actions(self.buttons, held, actions);
+        self.buttons = held;
+    }
+
     /// Adds an accepted device, at rest, returning whether its kind is
     /// supported.
     pub(crate) fn attach(&mut self, device_id: DeviceId, kind: DeviceKind) -> bool {
@@ -415,6 +448,7 @@ impl StandardInput {
             return Vec::new();
         };
         let mut actions = release(device_id, &state);
+        self.combine_buttons(&mut actions);
         match state {
             DeviceState::Gamepad(_) => actions.push(InputAction::GamepadRemoved(device_id)),
             DeviceState::Passthrough { .. } => {
@@ -437,6 +471,7 @@ impl StandardInput {
                 *state = at_rest(state);
             }
         }
+        self.combine_buttons(&mut actions);
         actions
     }
 
@@ -455,6 +490,7 @@ impl StandardInput {
             PointerKind::Relative => Positions::Ignore,
             _ => positions,
         };
+        let others = self.held_buttons(Some(event.device_id));
         let Some(state) = self.devices.get_mut(&event.device_id) else {
             return Vec::new();
         };
@@ -487,7 +523,9 @@ impl StandardInput {
                     // report moves the pointer even to the same place.
                     (report.x, report.y) = (previous.x, previous.y);
                 }
-                button_actions(previous.buttons, report.buttons, &mut actions);
+                let held = PointerButtons(others.0 | report.buttons.0);
+                button_actions(self.buttons, held, &mut actions);
+                self.buttons = held;
                 scroll_action(
                     (previous.wheel_total, previous.pan_total),
                     (report.wheel_total, report.pan_total),
@@ -505,7 +543,9 @@ impl StandardInput {
                 if (dx != 0 || dy != 0) && mode == PointerKind::Relative {
                     actions.push(InputAction::MouseMoveBy { dx, dy });
                 }
-                button_actions(previous.buttons, report.buttons, &mut actions);
+                let held = PointerButtons(others.0 | report.buttons.0);
+                button_actions(self.buttons, held, &mut actions);
+                self.buttons = held;
                 scroll_action(
                     (previous.wheel_total, previous.pan_total),
                     (report.wheel_total, report.pan_total),
@@ -565,9 +605,16 @@ impl StandardInput {
                 Ok(_) => {}
                 Err(_) => debug!("malformed touchpad report skipped"),
             },
-            DeviceState::Passthrough { current, .. } => {
-                let Some(&report_id) = event.data.first() else {
-                    debug!("empty passthrough report skipped");
+            DeviceState::Passthrough { current, rest } => {
+                // The rest reports, checked against the descriptor, name
+                // each input report ID and its length.
+                let Some(&report_id) = event.data.first().filter(|report_id| {
+                    rest.get(report_id)
+                        .is_some_and(|rest| rest.len() == event.data.len())
+                }) else {
+                    debug!(
+                        "passthrough report of no input report ID, or of the wrong length, skipped"
+                    );
                     return actions;
                 };
                 current.insert(report_id, event.data.clone());
@@ -716,13 +763,8 @@ fn release(device_id: DeviceId, state: &DeviceState) -> Vec<InputAction> {
         DeviceState::Keyboard(report) => {
             keyboard_actions(report, &KeyboardReport::default(), &mut actions);
         }
-        DeviceState::Pointer(report, _) => {
-            button_actions(report.buttons, PointerButtons::default(), &mut actions);
-        }
-        DeviceState::Mouse(report) => {
-            button_actions(report.buttons, PointerButtons::default(), &mut actions);
-        }
-        DeviceState::Text => {}
+        // Buttons are released together, as the combination changes.
+        DeviceState::Pointer(..) | DeviceState::Mouse(_) | DeviceState::Text => {}
         DeviceState::Touchscreen(contacts) => {
             if !contacts.is_empty() {
                 actions.push(InputAction::Touch(
@@ -918,6 +960,90 @@ mod tests {
         );
         assert!(!input.is_holding());
         assert!(input.release_all().is_empty());
+    }
+
+    /// A passthrough report is applied only with an input report ID of the
+    /// device and that report's length.
+    #[test]
+    fn checks_passthrough_reports() {
+        let device = DeviceId(VarInt::from_u32(30));
+        let mut input = StandardInput::default();
+        input.attach_passthrough(device, &[vec![1, 0x80]]);
+        let apply = |input: &mut StandardInput, data: Vec<u8>| {
+            input.apply(
+                &event(device, data),
+                Positions::Apply,
+                PointerKind::Absolute,
+            )
+        };
+        assert_eq!(
+            apply(&mut input, vec![1, 0x20]),
+            [InputAction::PassthroughReport {
+                device_id: device,
+                report: vec![1, 0x20]
+            }]
+        );
+        assert!(apply(&mut input, vec![1]).is_empty());
+        assert!(apply(&mut input, vec![1, 0, 0]).is_empty());
+        assert!(apply(&mut input, vec![2, 0]).is_empty());
+    }
+
+    /// The pointer's and the mouse's buttons combine: a button is pressed
+    /// once either holds it and released once neither does, and detaching a
+    /// device releases only what no other device holds (Section 8.7, rule
+    /// 5).
+    #[test]
+    fn combines_buttons() {
+        let mut input = devices();
+        let pointer = |buttons| PointerReport {
+            buttons,
+            ..PointerReport::default()
+        };
+        let mouse = |buttons| MouseReport {
+            buttons,
+            ..MouseReport::default()
+        };
+        let apply = |input: &mut StandardInput, device, data: Vec<u8>| {
+            input.apply(
+                &event(device, data),
+                Positions::Ignore,
+                PointerKind::Absolute,
+            )
+        };
+        assert_eq!(
+            apply(
+                &mut input,
+                POINTER,
+                pointer(PointerButtons::LEFT).to_bytes()
+            ),
+            [InputAction::ButtonDown(PointerButton::Left)]
+        );
+        assert!(apply(&mut input, MOUSE, mouse(PointerButtons::LEFT).to_bytes()).is_empty());
+        assert!(
+            apply(
+                &mut input,
+                POINTER,
+                pointer(PointerButtons::default()).to_bytes()
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            apply(&mut input, MOUSE, mouse(PointerButtons::RIGHT).to_bytes()),
+            [
+                InputAction::ButtonUp(PointerButton::Left),
+                InputAction::ButtonDown(PointerButton::Right)
+            ]
+        );
+        apply(
+            &mut input,
+            POINTER,
+            pointer(PointerButtons::RIGHT).to_bytes(),
+        );
+        assert!(input.detach(MOUSE).is_empty());
+        assert_eq!(
+            input.release_all(),
+            [InputAction::ButtonUp(PointerButton::Right)]
+        );
     }
 
     /// Pointer reports move before pressing, and scroll by the change in totals,

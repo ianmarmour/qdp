@@ -15,6 +15,7 @@ mod keycodes;
 mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
+mod seat;
 mod touchpad;
 mod touchpad_capture;
 mod touchscreen;
@@ -28,4 +29,5 @@ pub use screencast::ScreenCapture;
 pub use uinput::UinputInjector;
 
 pub(crate) use hidraw::start as start_passthrough;
+pub(crate) use seat::devices_confined;
 pub(crate) use touchpad_capture::start as start_touchpad;
