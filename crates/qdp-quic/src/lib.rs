@@ -29,7 +29,7 @@ use thiserror::Error;
 pub use config::{HostVerification, client_config, host_config};
 pub use connection::{PathStats, QdpConnection};
 pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDriver};
-pub use endpoint::{ClientEndpoint, HostEndpoint};
+pub use endpoint::{ClientEndpoint, HostEndpoint, IncomingConnection};
 pub use identity::{HostIdentity, KeyPin};
 pub use streams::{
     OutgoingStream, ReceivedStream, StreamChunk, StreamFailure, StreamLimit, StreamPolicy,

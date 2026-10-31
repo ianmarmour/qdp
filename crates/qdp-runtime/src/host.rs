@@ -13,7 +13,7 @@ use qdp::message::{
     VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::registry::ErrorCode;
-use qdp::session::{HostConfig, HostEvent};
+use qdp::session::{AuthResponse, HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, VideoSender};
 use qdp::wire::{SignedVarInt, VarInt};
@@ -21,6 +21,7 @@ use qdp_codec::{CodecPreference, EncoderSettings, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportError};
 use tracing::{debug, info, warn};
 
+use crate::admission::AdmissionTicket;
 use crate::audio::{HostAudio, HostAudioStreams};
 use crate::auth::HostAuthExchange;
 use crate::clipboard::{
@@ -228,9 +229,12 @@ struct ActiveHost {
 /// client disconnects, streaming frames from `source`, which is captured and
 /// encoded on a thread of its own, performing the client's input with
 /// `injector`, sharing `clipboard`, if given, with the client, and streaming
-/// audio through `audio`'s devices.
+/// audio through `audio`'s devices. `ticket` is the connection's admission,
+/// which records its authentication attempts and, once it authenticates,
+/// makes its session the desktop's one.
 pub async fn serve(
     connection: QdpConnection,
+    mut ticket: AdmissionTicket,
     options: &HostOptions,
     source: Box<dyn FrameSource>,
     mut injector: Box<dyn InputInjector>,
@@ -275,10 +279,12 @@ pub async fn serve(
             HostEvent::ClientHello(hello) => info!(client = %hello.client_name, "client hello"),
             HostEvent::AuthStart { method, auth_data } => {
                 let response = auth.start(method, &auth_data);
+                record_attempt(&mut ticket, &response, driver.connection());
                 driver.session().respond_auth(response, now)?;
             }
             HostEvent::AuthContinue { auth_data } => {
                 let response = auth.continue_exchange(&auth_data);
+                record_attempt(&mut ticket, &response, driver.connection());
                 driver.session().respond_auth(response, now)?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
@@ -391,6 +397,20 @@ pub async fn serve(
     let actions = active.devices.release_all();
     active.inject(&actions);
     result
+}
+
+/// Records an authentication attempt's outcome in the connection's
+/// admission.
+fn record_attempt(
+    ticket: &mut AdmissionTicket,
+    response: &AuthResponse,
+    connection: &QdpConnection,
+) {
+    match response {
+        AuthResponse::Accept(_) => ticket.authenticated(connection),
+        AuthResponse::Reject => ticket.failed(),
+        AuthResponse::Continue(_) => {}
+    }
 }
 
 /// Returns what the host does with a stream the client opened (Section

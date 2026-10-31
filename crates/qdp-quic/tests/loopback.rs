@@ -116,7 +116,13 @@ fn client_hello() -> ClientHello {
 /// Runs the host's side of one session: SCRAM authentication, configuration,
 /// one clock synchronization exchange, and then waits for the client to close.
 async fn run_host(host: HostEndpoint, credentials: ScramCredentials) -> TransportError {
-    let connection = host.accept().await.expect("a client").expect("a handshake");
+    let connection = host
+        .accept()
+        .await
+        .expect("a client")
+        .establish()
+        .await
+        .expect("a handshake");
     let binding = connection.channel_binding().expect("a TLS exporter");
     let clock = SessionClock::new(Instant::now());
     let mut driver = HostDriver::host(connection, host_config());
@@ -392,7 +398,10 @@ async fn wrong_pin_is_refused() {
     let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let host = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = host.local_address().unwrap();
-    let host_task = tokio::spawn(async move { host.accept().await.map(|result| result.is_ok()) });
+    let host_task = tokio::spawn(async move {
+        let incoming = host.accept().await?;
+        Some(incoming.establish().await.is_ok())
+    });
 
     let other_pin = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()])
         .unwrap()
