@@ -28,11 +28,17 @@ rav1e = { version = "0.8.1", default-features = false, features = ["asm", "threa
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 ring = { version = "0.17.14", default-features = false }
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
+# Software drawing into the window; X11 and Wayland libraries are loaded at
+# run time, so building needs none of them.
+softbuffer = { version = "0.4.8", default-features = false, features = ["wayland", "wayland-dlopen", "x11", "x11-dlopen"] }
 thiserror = { version = "2.0.17", default-features = false }
 tokio = { version = "1.47", default-features = false }
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["ansi", "fmt", "std"] }
 unicode-normalization = { version = "0.1.24", default-features = false }
+# Client-side decorations (wayland-csd-adwaita) give the window a title bar on
+# GNOME, which draws none for Wayland clients.
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }
 
 [workspace.lints.rust]
 missing_docs = "warn"
