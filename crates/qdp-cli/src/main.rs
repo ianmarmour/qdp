@@ -394,7 +394,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
         Microphone::Off => format!("QDP: {}", args.address),
     };
     let proxy = event_loop.create_proxy();
-    let mut sink = WindowSink::new(sink, Arc::clone(&slot), proxy.clone(), Arc::clone(&close));
+    let mut sink = WindowSink::new(sink, slot.clone(), proxy.clone(), Arc::clone(&close));
     let (display_sender, display) = tokio::sync::oneshot::channel();
     let session_close = Arc::clone(&close);
     let session = std::thread::Builder::new()

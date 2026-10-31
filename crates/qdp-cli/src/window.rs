@@ -13,12 +13,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use qdp::message::{CursorImage, PointerKind, PointerMode};
+use qdp::message::{CursorImage, FrameNumber, PointerKind, PointerMode, StreamId};
 use qdp_codec::Yuv420Frame;
 use qdp_desktop::{DeviceSelector, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
-    CursorWarp, DisplaySize, FrameInfo, FrameSink, InputHandle, PenInput, PointerButton,
-    SinkControl, TouchPhase, UserInput, WarpKind,
+    CursorWarp, DisplaySize, DisplayTiming, FrameInfo, FrameSink, InputHandle, PenInput,
+    PointerButton, Presentation, PresentationTiming, SinkControl, TouchPhase, UserInput, WarpKind,
 };
 use softbuffer::{Context, Surface};
 use tokio::sync::{Notify, oneshot};
@@ -81,10 +81,91 @@ pub enum WindowMessage {
     SessionEnded,
 }
 
-/// The newest decoded frame, waiting to be drawn. A newer frame replaces one
-/// not drawn yet, so a window that draws slowly shows the newest picture
-/// instead of falling behind, and frames never drawn are never converted.
-pub type FrameSlot = Arc<Mutex<Option<Yuv420Frame>>>;
+/// A frame of a stream, as presentations name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FrameId {
+    /// The frame's stream.
+    stream_id: StreamId,
+    /// The frame's number in its stream.
+    frame_number: FrameNumber,
+}
+
+/// What the session and the window share about the frames.
+#[derive(Debug, Default)]
+struct SlotState {
+    /// The newest frame, waiting to be drawn.
+    waiting: Option<(Yuv420Frame, FrameId)>,
+    /// When the frames drawn or replaced since the session last asked
+    /// reached the screen.
+    presentations: Vec<Presentation>,
+    /// The display's refresh timing, if the window knows it.
+    display_timing: Option<DisplayTiming>,
+}
+
+/// The newest decoded frame, waiting to be drawn, and what became of the
+/// frames before it. A newer frame replaces one not drawn yet, so a window
+/// that draws slowly shows the newest picture instead of falling behind,
+/// and frames never drawn are never converted.
+#[derive(Debug, Clone, Default)]
+pub struct FrameSlot(Arc<Mutex<SlotState>>);
+
+impl FrameSlot {
+    /// Locks the shared state.
+    fn lock(&self) -> std::sync::MutexGuard<'_, SlotState> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Puts a frame in the slot, replacing one not drawn yet.
+    fn put(&self, frame: Yuv420Frame, info: &FrameInfo) {
+        let id = FrameId {
+            stream_id: info.stream_id,
+            frame_number: info.frame_number,
+        };
+        let mut state = self.lock();
+        if let Some((_, replaced)) = state.waiting.replace((frame, id)) {
+            state.presentations.push(presentation(replaced, None));
+        }
+    }
+
+    /// Takes the frame waiting to be drawn.
+    fn take(&self) -> Option<(Yuv420Frame, FrameId)> {
+        self.lock().waiting.take()
+    }
+
+    /// Records when a frame taken from the slot reached the screen, or that
+    /// it never did.
+    fn shown(&self, id: FrameId, presented_at: Option<Instant>) {
+        self.lock()
+            .presentations
+            .push(presentation(id, presented_at));
+    }
+
+    /// Returns the presentations recorded since the last call.
+    fn take_presentations(&self) -> Vec<Presentation> {
+        std::mem::take(&mut self.lock().presentations)
+    }
+
+    /// Notes the display's refresh timing.
+    fn set_display_timing(&self, timing: Option<DisplayTiming>) {
+        self.lock().display_timing = timing;
+    }
+
+    /// Returns the display's refresh timing, if known.
+    fn display_timing(&self) -> Option<DisplayTiming> {
+        self.lock().display_timing
+    }
+}
+
+/// Returns the presentation of frame `id`.
+fn presentation(id: FrameId, presented_at: Option<Instant>) -> Presentation {
+    Presentation {
+        stream_id: id.stream_id,
+        frame_number: id.frame_number,
+        presented_at,
+    }
+}
 
 /// Raised once when the window closes, so that the session stops.
 #[derive(Debug, Default)]
@@ -156,14 +237,24 @@ impl FrameSink for WindowSink {
             return SinkControl::Stop;
         }
         let control = self.inner.present(frame, info);
-        if let Ok(mut slot) = self.slot.lock() {
-            *slot = Some(frame.clone());
-        }
+        self.slot.put(frame.clone(), &info);
         if self.proxy.send_event(WindowMessage::Frame).is_err() {
             // The event loop has ended, so the window is gone.
             return SinkControl::Stop;
         }
         control
+    }
+
+    fn presentation_timing(&self) -> PresentationTiming {
+        PresentationTiming::Deferred
+    }
+
+    fn take_presentations(&mut self) -> Vec<Presentation> {
+        self.slot.take_presentations()
+    }
+
+    fn display_timing(&mut self) -> Option<DisplayTiming> {
+        self.slot.display_timing()
     }
 
     fn set_cursor(&mut self, cursor: Option<&CursorImage>) {
@@ -674,41 +765,49 @@ impl WindowApp {
     /// Draws the newest frame into the window, and the cursor where it
     /// follows a device the client does not know.
     fn draw(&mut self) {
-        let newest = self.slot.lock().ok().and_then(|mut slot| slot.take());
-        if let Some(frame) = newest {
+        let newest = self.slot.take();
+        if let Some((frame, _)) = &newest {
             let resized = self.current.as_ref().is_none_or(|current| {
                 (current.width, current.height) != (frame.width(), frame.height())
             });
-            self.current = Some(yuv420_to_rgb(&frame));
+            self.current = Some(yuv420_to_rgb(frame));
             if resized {
                 self.cursor_stale = true;
             }
         }
+        let presented_at = self.show();
+        if let Some((_, id)) = newest {
+            self.slot.shown(id, presented_at);
+        }
+        self.slot.set_display_timing(qdp_desktop::display_timing());
+    }
+
+    /// Draws the current picture, and the cursor where the window draws it,
+    /// returning when the picture reached the screen, if it did.
+    fn show(&mut self) -> Option<Instant> {
         let follow = match (self.follow, &self.scaled_cursor, self.placement()) {
             (Some((x, y)), Some((_, cursor)), Some((placement, width, height))) => {
                 Some((placement.to_window(x, y, width, height), cursor.clone()))
             }
             _ => None,
         };
-        let Some(display) = &mut self.display else {
-            return;
-        };
+        let display = self.display.as_mut()?;
         let size = display.window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
             // A minimized window has nothing to draw.
-            return;
+            return None;
         };
         if let Err(error) = display.surface.resize(width, height) {
             warn!(%error, "cannot resize the window's surface");
-            return;
+            return None;
         }
         let mut buffer = match display.surface.buffer_mut() {
             Ok(buffer) => buffer,
             Err(error) => {
                 warn!(%error, "cannot draw the window");
-                return;
+                return None;
             }
         };
         match &self.current {
@@ -723,8 +822,12 @@ impl WindowApp {
         if let Some((position, cursor)) = follow {
             cursor.draw_into(&mut buffer, size.width as usize, position);
         }
-        if let Err(error) = buffer.present() {
-            warn!(%error, "cannot show the window's picture");
+        match buffer.present() {
+            Ok(()) => Some(Instant::now()),
+            Err(error) => {
+                warn!(%error, "cannot show the window's picture");
+                None
+            }
         }
     }
 }

@@ -21,6 +21,11 @@ const INITIAL_PERIOD: Duration = Duration::from_secs(5);
 /// The ping interval after the initial period (Section 5.2.1).
 const STEADY_PING_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The ping interval until the first pong arrives: the clocks are compared
+/// as soon as they can be, even if the first ping is lost. Pinging more
+/// often than the intervals above is allowed (Section 5.2.1).
+const UNANSWERED_PING_INTERVAL: Duration = Duration::from_millis(100);
+
 /// One measurement of the peer's clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockSample {
@@ -72,7 +77,9 @@ impl ClockSync {
         let Some(last) = self.last_ping_at else {
             return self.active_since;
         };
-        let interval = if last < self.active_since + INITIAL_PERIOD {
+        let interval = if self.samples.is_empty() {
+            UNANSWERED_PING_INTERVAL
+        } else if last < self.active_since + INITIAL_PERIOD {
             INITIAL_PING_INTERVAL
         } else {
             STEADY_PING_INTERVAL
@@ -244,17 +251,26 @@ mod tests {
         assert_eq!(sync.offset_micros(), Some(-1000));
     }
 
-    /// Pings are sent every second for the first five seconds, then every ten.
+    /// Unanswered pings are repeated every 100 ms; once one is answered,
+    /// pings are sent every second for the first five seconds, then every
+    /// ten.
     #[test]
     fn ping_schedule() {
         let epoch = Instant::now();
-        let mut sync = ClockSync::new(SessionClock::new(epoch), epoch);
+        let clock = SessionClock::new(epoch);
+        let mut sync = ClockSync::new(clock, epoch);
+        sync.poll_ping(epoch).unwrap();
+        let retry_at = sync.next_ping_at();
+        assert_eq!(retry_at, epoch + UNANSWERED_PING_INTERVAL);
+        let retry = sync.poll_ping(retry_at).unwrap();
+        let pong = answer_ping(&retry, &clock, retry_at, retry_at);
+        assert!(sync.handle_pong(&pong, retry_at).is_some());
         let mut times = Vec::new();
-        while times.len() < 8 {
+        while times.len() < 7 {
             let now = sync.next_ping_at();
             sync.poll_ping(now).unwrap();
-            times.push(now.duration_since(epoch).as_secs());
+            times.push(now.duration_since(retry_at).as_secs());
         }
-        assert_eq!(times, [0, 1, 2, 3, 4, 5, 15, 25]);
+        assert_eq!(times, [1, 2, 3, 4, 5, 15, 25]);
     }
 }

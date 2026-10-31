@@ -374,11 +374,12 @@ async fn serve_session(
         clipboard_limit: clipboard.as_ref().and_then(ClipboardLink::receive_limit),
     };
     audio.activate();
-    driver.flush().await?;
-    // Datagrams the client sent before SESSION_START are dropped (Section
-    // 3.7.3).
+    // Datagrams that arrived before SESSION_START is sent are dropped
+    // (Section 3.7.3); those after it, such as the client's first clock
+    // ping, are not.
     let early = driver.connection().quic().clone();
     while let Ok(Ok(_)) = tokio::time::timeout(Duration::ZERO, early.read_datagram()).await {}
+    driver.flush().await?;
     let plan = *display.plan();
     info!(
         capture_width = plan.layout.capture.0,

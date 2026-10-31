@@ -39,7 +39,9 @@ mod win32;
 
 use std::path::Path;
 
-use qdp_runtime::{ClientAudio, Clipboard, FrameSource, HostAudio, InputInjector, NoInput};
+use qdp_runtime::{
+    ClientAudio, Clipboard, DisplayTiming, FrameSource, HostAudio, InputInjector, NoInput,
+};
 use tracing::warn;
 
 pub use clipboard::SystemClipboard;
@@ -180,6 +182,20 @@ pub fn client_audio(microphone: Microphone) -> ClientAudio {
 )))]
 pub fn client_audio(_microphone: Microphone) -> ClientAudio {
     ClientAudio::default()
+}
+
+/// Returns the refresh timing of the display windows are shown on, if the
+/// platform tells it: on Windows, from the Desktop Window Manager.
+#[cfg(windows)]
+pub fn display_timing() -> Option<DisplayTiming> {
+    win32::display_timing()
+}
+
+/// Returns the refresh timing of the display windows are shown on; this
+/// platform does not tell it to applications yet.
+#[cfg(not(windows))]
+pub fn display_timing() -> Option<DisplayTiming> {
+    None
 }
 
 /// Opens the system clipboard for sharing, or returns `None`, with a warning,

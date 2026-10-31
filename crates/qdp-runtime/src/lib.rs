@@ -70,8 +70,9 @@ pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
 pub use host_input::{InputAction, InputInjector, NoInput, PointerButton, TouchPhase, TouchPoint};
 pub use host_passthrough::{FeatureRequest, PassthroughDevice, PassthroughPolicy};
 pub use media::{
-    CursorShape, CursorState, CursorWarp, FrameInfo, FrameSink, FrameSource, PointerPosition,
-    SinkControl, TestPattern, WarpKind, changed_blocks,
+    CursorShape, CursorState, CursorWarp, DisplayTiming, FrameInfo, FrameSink, FrameSource,
+    PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl, TestPattern,
+    WarpKind, changed_blocks,
 };
 
 /// An error that ends a session.
