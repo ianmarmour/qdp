@@ -20,10 +20,10 @@ Implementations of this draft identify themselves with the ALPN token
 | [5. Timing](spec/05-timing.md) | Session clocks, clock synchronization, display timing, presentation, rate control. |
 | [6. Display and video](spec/06-video.md) | Monitors, video streams and layers, AV1 requirements, fragmentation, feedback, loss recovery, composition. |
 | [7. Audio](spec/07-audio.md) | Audio streams, Opus and PCM, jitter buffering, synchronization, microphone. |
-| [8. Input](spec/08-input.md) | Keyboard, mouse, gamepad, touch and pen input; pointer modes; rumble and LEDs. |
+| [8. Input](spec/08-input.md) | Input modelled on USB HID: standard keyboard, pointer, mouse, touchscreen, pen, touchpad, gamepad and text devices, HID passthrough for controllers, pointer modes, output and feature reports. |
 | [9. Cursor](spec/09-cursor.md) | Client-drawn cursor, cursor images, warps. |
-| [10. Clipboard](spec/10-clipboard.md) | Delayed-rendering clipboard sharing. |
-| [11. Security](spec/11-security.md) | Authentication, replay, privacy, untrusted media, resource limits. |
+| [10. Clipboard](spec/10-clipboard.md) | Lazy, announce-then-fetch clipboard sharing. |
+| [11. Security](spec/11-security.md) | Authentication, replay, privacy, microphone and clipboard consent, untrusted media, HID passthrough, resource limits. |
 | [12. Registries](spec/12-registries.md) | Every code point in one place. |
 
 ## Reading order

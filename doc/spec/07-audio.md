@@ -2,11 +2,12 @@
 
 ## 7.1 Model
 
-Audio flows in **audio streams**. A playback stream carries the host's audio
-output to the client; a capture stream carries the client's microphone to the
-host, which presents it as an audio input device. The host defines all audio
-streams in `AUDIO_CONFIG`, including the client's capture stream, so that both
-directions use parameters the host can handle.
+Audio flows in **audio streams**. A playback stream carries the host's audio output
+to the client; a capture stream carries the client's microphone to the host, which
+presents it as an audio input device. The host defines all audio streams in
+`AUDIO_CONFIG`, including the client's capture stream, so that both directions use
+parameters the host can handle, but it defines a capture stream only when the client
+has asked for one.
 
 ## 7.2 AUDIO_REQUEST (0x18)
 
@@ -17,13 +18,14 @@ AUDIO_REQUEST Payload {
 }
 ```
 
-- **Playback Channels**: the number of output channels the client wants, from 1
-  to 8, or 0 for no playback.
+- **Playback Channels**: the number of output channels the client wants, from 1 to 8,
+  or 0 for no playback.
 - **Capture Channels**: the number of microphone channels the client will send,
-  usually 1, or 0 for no microphone.
+  usually 1, or 0 for no microphone. The client sets it above 0 only when the user has
+  turned the microphone on for this session.
 
-The client sends `AUDIO_REQUEST` during configuration, and again when its audio
-devices change or the user turns the microphone on or off.
+The client sends `AUDIO_REQUEST` during configuration, and again when its audio devices
+change or the user turns the microphone on or off.
 
 ## 7.3 AUDIO_CONFIG (0x19)
 
@@ -35,6 +37,7 @@ AUDIO_CONFIG Payload {
 }
 
 Audio Stream Config {
+  Entry Length (i),
   Stream ID (i),
   Direction (8),
   Codec (i),
@@ -53,26 +56,31 @@ Opus Mapping {
 
 The host MUST answer each `AUDIO_REQUEST` with an `AUDIO_CONFIG`.
 
-- **Config ID**: increases with each `AUDIO_CONFIG`. As with displays, each
-  configuration replaces the previous one; streams that disappear have ended,
-  and any change of parameters requires a new Stream ID. Audio and video Stream
-  IDs share one space and MUST NOT collide.
-- **Direction**: 0x00 `PLAYBACK` (host to client) or 0x01 `CAPTURE` (client to
-  host).
+- **Config ID**: starts at 1 and increases with each `AUDIO_CONFIG`. As with displays,
+  each configuration replaces the previous one; streams that disappear have ended,
+  and any change of parameters requires a new Stream ID. Audio and video Stream IDs
+  share one space.
+- **Entry Length**: the number of bytes in the rest of this entry. A receiver skips
+  any bytes after the fields it knows.
+- **Direction**: 0x00 `PLAYBACK` (host to client) or 0x01 `CAPTURE` (client to host).
+  The host MUST NOT define a `CAPTURE` stream unless the client's most recent
+  `AUDIO_REQUEST` had a Capture Channels value above 0, and its Channel Count MUST NOT
+  exceed that value.
 - **Codec**: 0x01 Opus, 0x02 PCM L16, 0x03 PCM L24.
-- **Sample Rate**: in hertz. It MUST be 48000 for Opus.
-- **Channel Count**: 1 to 8. The order of channels is that of channel mapping
-  family 1 of [RFC7845]: mono; left, right; left, center, right; and so on up to
-  7.1 (front left, front center, front right, side left, side right, rear left,
-  rear right, LFE).
-- **Frame Duration**: the audio duration of each packet in microseconds. For
-  Opus it MUST be 2500, 5000, 10000 or 20000. For PCM it MUST be between 1000
-  and 20000 and a whole number of samples.
-- **Opus Mapping**: present only for Opus streams with more than two channels.
-  It gives the multistream layout exactly as the channel mapping table of
-  [RFC7845], Section 5.1.1: the number of Opus streams, how many of them are
-  coupled stereo streams, and, for each output channel, the index of the decoded
-  channel that feeds it.
+- **Sample Rate**: in hertz. It MUST be 48000 for Opus, and 44100 or 48000 for PCM.
+- **Channel Count**: 1 to 8. For every codec, including PCM, the order of channels is
+  that of channel mapping family 1 of [RFC7845]: mono; left, right; left, center,
+  right; and so on up to 7.1 (front left, front center, front right, side left, side
+  right, rear left, rear right, LFE).
+- **Frame Duration**: the audio duration of each packet in microseconds. For Opus it
+  MUST be 2500, 5000, 10000 or 20000. For PCM it MUST be between 1000 and 20000 and a
+  whole number of samples.
+- **Opus Mapping**: present only for Opus streams with more than two channels. It
+  gives the multistream layout exactly as the channel mapping table of [RFC7845],
+  Section 5.1.1: the number of Opus streams, how many of them are coupled stereo
+  streams, and, for each of the Channel Count output channels, the index of the
+  decoded channel that feeds it. There are exactly Channel Count Channel Mapping
+  entries.
 
 ## 7.4 AUDIO_PACKET datagram
 
@@ -87,54 +95,71 @@ AUDIO_PACKET Datagram {
 }
 ```
 
-- **Sequence Number**: starts at 1 and increases by 1 for each packet of the
-  stream. A packet sent twice keeps its number.
-- **Sample Position**: the index, per channel, of the packet's first sample since
-  the start of the stream. Gaps in Sample Position mean the sender sent nothing
-  for that time, for example during silence.
-- **Capture Timestamp**: the sender-clock time at which the first sample was
-  captured.
+- **Sequence Number**: starts at 1 and increases by 1 for each packet of the stream. A
+  packet sent twice keeps its number.
+- **Sample Position**: the index, per channel, of the packet's first sample since the
+  start of the stream. Gaps in Sample Position mean the sender sent nothing for that
+  time, for example during silence.
+- **Capture Timestamp**: the sender-clock time at which the first sample was captured.
 - **Payload**: one encoded frame ([Section 7.5](#75-codecs)).
+
+Every `AUDIO_PACKET` MUST fit the sender's current maximum datagram size
+([Section 3.7.2](03-transport.md#372-size)). The host chooses playback parameters
+(codec, channel count, frame duration and, for Opus, a bitrate cap) so that packets
+fit, and sends a new `AUDIO_CONFIG` if the maximum shrinks so far that they no longer
+do. Capture streams MUST be configured so that every packet fits in 1200 bytes, the
+smallest maximum QUIC allows, because the host cannot see the client's path. An Opus
+encoder is limited per packet to the space left after the datagram's header fields.
 
 ## 7.5 Codecs
 
 ### 7.5.1 Opus
 
-For one or two channels the payload is one Opus packet [RFC6716]. For more
-channels it is an Opus multistream packet: the packets of all streams but the
-last use the self-delimiting framing of [RFC6716], Appendix B, and the last uses
-the normal framing, as in [RFC7845], Section 5.1.1. Senders SHOULD enable Opus
-in-band forward error correction and set its expected loss rate from observed
+For one or two channels the payload is one Opus packet [RFC6716]. For more channels it
+is an Opus multistream packet: the packets of all streams but the last use the
+self-delimiting framing of [RFC6716], Appendix B, and the last uses the normal
+framing, as described in [RFC7845], Section 3.
+
+Opus in-band forward error correction exists only with 10 and 20 ms frames in its
+SILK and hybrid modes, and costs one frame of extra buffering at the receiver. Senders
+of such streams SHOULD enable it and set its expected loss rate from observed loss.
+Streams with 2.5 or 5 ms frames, which Opus codes without forward error correction,
+rely on loss concealment; their senders MAY send each packet twice when they observe
 loss.
 
 ### 7.5.2 PCM
 
 PCM payloads carry interleaved samples, signed and in network byte order: 16-bit
-samples as in L16 [RFC3551], or 24-bit samples as in L24 [RFC3190]. PCM has no
-loss concealment of its own; senders MAY send each packet twice, and receivers
-drop duplicates by Sequence Number.
+samples as in L16 [RFC3551], or 24-bit samples as in L24 [RFC3190], in the channel
+order of [Section 7.3](#73-audio_config-0x19) rather than the order RFC 3551 defines.
+PCM has no loss concealment of its own; senders MAY send each packet twice, and
+receivers drop duplicates by Sequence Number.
 
 ## 7.6 Receiving audio
 
-- **Jitter buffer.** Audio cannot stall the way video can, so the receiver keeps
-  a small adaptive buffer. A target of 5 to 20 ms suits the networks QDP is
-  designed for. The buffer SHOULD shrink when jitter is low.
-- **Loss.** A missing packet is concealed with the codec's loss concealment, or
-  recovered from in-band forward error correction in the next Opus packet.
-- **Clock drift.** The sender's and receiver's audio clocks run at slightly
-  different rates. The receiver SHOULD resample gently to keep its buffer near
-  the target, rather than dropping or inserting samples audibly.
+- **Jitter buffer.** Audio cannot stall the way video can, so the receiver keeps a
+  small adaptive buffer. A target of 5 to 20 ms suits the networks QDP is designed
+  for. The buffer SHOULD shrink when jitter is low.
+- **Loss.** A missing packet is concealed with the codec's loss concealment, recovered
+  from in-band forward error correction in the next Opus packet where the stream uses
+  it, or replaced by its duplicate.
+- **Clock drift.** The sender's and receiver's audio clocks run at slightly different
+  rates. The receiver SHOULD resample gently to keep its buffer near the target,
+  rather than dropping or inserting samples audibly.
 - **Synchronization with video.** Using the clock offset
-  ([Section 5.2](05-timing.md#52-clock-synchronization)), the client can map
-  Capture Timestamps of audio and video to its own clock. Video is shown as soon
-  as possible and audio after its jitter buffer, so audio normally trails video
-  by the buffer depth. A lag of up to about 20 ms is well inside the range viewers
-  cannot detect [BT1359]; a client MAY delay video slightly if the lag grows
-  larger.
+  ([Section 5.2](05-timing.md#52-clock-synchronization)), the client can map Capture
+  Timestamps of audio and video to its own clock. Video is shown as soon as possible
+  and audio after its jitter buffer, so audio normally trails video by the buffer
+  depth. A lag of up to about 20 ms is well inside the range viewers cannot detect
+  [BT1359]; a client MAY delay video slightly if the lag grows larger.
 
 ## 7.7 Microphone
 
-The client SHOULD apply acoustic echo cancellation to the microphone signal
-before encoding it, using the decoded playback audio as the reference signal.
-Only the client has both signals; the host cannot cancel echo picked up in the
-client's room.
+A client MUST NOT capture or send microphone audio unless the user has turned the
+microphone on for this session. It MUST ignore a capture stream it did not request,
+MUST stop sending as soon as the user turns the microphone off, before the host's new
+`AUDIO_CONFIG` arrives, and SHOULD show an indicator while it captures.
+
+The client SHOULD apply acoustic echo cancellation to the microphone signal before
+encoding it, using the decoded playback audio as the reference signal. Only the client
+has both signals; the host cannot cancel echo picked up in the client's room.

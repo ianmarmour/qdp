@@ -20,9 +20,11 @@ sends input as redundant state so that a lost packet never delays a keystroke.
 Most remote desktop protocols were designed for slow or lossy wide-area
 networks, and their defaults spend CPU time to save bandwidth. Today a large
 share of users reach cloud machines in the same region: round-trip times under
-50 ms, often under 10 ms, and links of 300 Mbit/s or more. Clients typically
-have at least four cores at 3 GHz or faster. QDP is optimized for these
-conditions and still works, less well, outside them.
+50 ms, often under 10 ms, and links of 300 Mbit/s or more. Desktop clients
+typically have at least four cores at 3 GHz or faster, and current phones and
+tablets are as fast in short bursts, though heat and battery limit them over long
+sessions. QDP is optimized for these conditions and still works, less well,
+outside them.
 
 ### 2.2 Goals
 
@@ -34,7 +36,8 @@ conditions and still works, less well, outside them.
 3. **Fidelity**: text and user interfaces are shown sharply, and bit-exact once
    they stop changing.
 4. **Universality**: one protocol for office work, creative work and games,
-   on Windows, macOS and Linux, with any content and no modes.
+   with any content and no modes. Clients run on Windows, macOS, Linux, Android
+   and iOS; hosts run on Windows, macOS and Linux.
 5. **Re-implementability**: the specification is complete enough to write an
    interoperable implementation in another language without reading ours.
 
@@ -89,7 +92,7 @@ not out of a mode switch:
   and stays on the low-latency motion layer. Text stops changing within a frame
   or two and is refined to lossless.
 - The pointer mode follows the host: when an application captures and hides the
-  pointer, the client switches to relative input ([§8.7](spec/08-input.md#87-pointer_mode-0x33)).
+  pointer, the client switches to relative input ([§8.9](spec/08-input.md#89-pointer_mode-0x33)).
   This is the one place QDP relies on the host operating system's state, because
   it concerns what input means, not what pixels show.
 
@@ -166,7 +169,9 @@ its own frame. QDP adds the reliability it needs on top:
   that state ([§6.8](spec/06-video.md#68-loss-recovery)). Because the client
   decodes strictly in order and stops at the first gap, its decoder state is
   always known to the host, and recovery needs no key frame when the encoder
-  keeps a reference the client has acknowledged.
+  keeps a reference the client has acknowledged. This relies on the decoder
+  holding exactly that state; a client that feeds partial frames to its decoder
+  must be able to undo them, or fall back to asking for a key frame.
 
 Forward error correction is not part of version 1. At the round-trip times QDP
 targets, retransmission is cheap, and every endpoint would otherwise have to
@@ -188,36 +193,54 @@ Drawing the cursor on the client removes all network latency from pointer
 movement, which is the latency users notice first. Every major remote desktop
 protocol does this; VNC calls it the Cursor pseudo-encoding.
 
-### 5.9 Input as state plus redundant events
+### 5.9 Input modelled on HID
 
-Continuous input (pointer position, motion totals, held keys, gamepad controls)
-is sent as state, so the next datagram repairs any loss. Discrete events (key
-presses, clicks, wheel movement, text) carry sequence numbers and are repeated
-in every datagram until the host acknowledges them. A lost datagram therefore
-never loses a keystroke and never waits a round trip for retransmission. Input
-datagrams are tiny, so the redundancy costs well under 1 Mbit/s.
+All input is described in terms of USB HID ([§8](spec/08-input.md)), in two forms:
+
+- **Standard devices** (keyboard, absolute pointer, relative mouse, touchscreen,
+  pen, touchpad, gamepad and text) have report layouts defined by QDP. The client
+  builds them from its operating system's input events, because operating systems
+  do not let applications read raw keyboard and mouse HID, many built-in keyboards
+  and trackpads are not HID devices at all, phones have only touchscreens and
+  on-screen keyboards, and a remote desktop needs absolute pointer positions that
+  mouse hardware never reports.
+- **Passthrough devices** forward a physical controller's HID descriptor and
+  reports unchanged, so a game on the host sees the real wheel, flight stick or
+  controller with all its features, with no per-device protocol work. HID is the
+  same over USB and Bluetooth.
+
+Each report states the device's complete state, and relative motion and scrolling
+are running totals, so a later report repairs any lost one. Reports share one
+sequence number, so the host applies Ctrl on the keyboard and a click on the mouse
+in the order the user made them. Reports that change discrete state (a key, a
+button, a touch, text) are repeated until acknowledged and are never dropped
+because a newer report exists. A lost datagram therefore never loses a keystroke
+and never waits a full round trip. Even a 1 kHz mouse and gamepad at a 50 ms round
+trip need only a few megabits per second upstream, by our estimate.
 
 Keys are identified by USB HID usage: a platform-neutral, standardized name for
-each physical key that every operating system can map to its own codes. VNC
-uses X11 keysyms, which describe characters rather than keys and need
-workarounds for every layout; RDP uses PC scan codes, which are platform-specific.
-Gamepads use the W3C Standard Gamepad layout and pens use W3C Pointer Events
-conventions, for the same reason.
+each physical key that every operating system can map to its own codes. VNC uses
+X11 keysyms, which describe characters rather than keys and need workarounds for
+every layout. Gamepads use the W3C Standard Gamepad layout and pens use W3C Pointer
+Events conventions, for the same reason.
 
 ### 5.10 Opus for audio
 
-Opus has algorithmic delay as low as 5 ms, built-in forward error correction and
-loss concealment, multichannel support and no royalties. Uncompressed PCM is
+Opus has algorithmic delay as low as 5 ms with its 2.5 ms frames, in-band forward
+error correction with 10 and 20 ms frames, loss concealment, multichannel support
+and no royalties. Low delay and forward error correction do not combine, so
+low-delay streams rely on loss concealment or on sending packets twice. Uncompressed PCM is
 also offered because bandwidth is plentiful on the target networks. LC3 was
 considered and rejected: its minimum delay is higher and its licensing outside
 Bluetooth products is less clear.
 
 ### 5.11 Lazy clipboard
 
-Following RDP's delayed rendering, endpoints announce clipboard formats and
-transfer data only on paste, so copying large content costs nothing unless it
-is pasted remotely. Formats are media types rather than platform format
-numbers.
+Endpoints announce clipboard formats and transfer data only on paste, which is
+how operating system clipboards already work locally, so copying large content
+costs nothing unless it is pasted remotely. Formats are media types rather than
+platform format numbers, and content the platform marks as a password is never
+announced.
 
 ### 5.12 Extensibility
 
@@ -249,13 +272,14 @@ and nothing but the handshake is processed before authentication
 | A single lossless or 4:4:4 video stream | Lossless updates cannot be spread over frames, and 4:4:4 lacks hardware decoding on most clients ([§5.4](#54-two-layers-motion-and-refinement)). |
 | Video over reliable QUIC streams | One lost packet would delay every later frame on that stream. |
 | Forward error correction in version 1 | Retransmission is cheap at the target round-trip times; deferred. |
+| Raw USB redirection for keyboards, mice and controllers | Cannot express absolute pointer positions; takes the device away from the client; does not exist for built-in, Bluetooth or touch devices; needs kernel drivers on the host; exposes the host's USB stack. HID passthrough gives controllers their native features without these costs. |
 
 ## 7. Lessons from existing protocols
 
 | Protocol | What QDP borrows | What QDP avoids |
 |---|---|---|
 | VNC / RFB [RFC6143] | Client-drawn cursor; simple, documented message layouts | Character-based key codes; weak built-in security; uncoordinated extensions |
-| RDP [MS-RDPBCGR] and extensions | Monitor layout fields ([MS-RDPEDISP]); delayed-rendering clipboard ([MS-RDPECLIP]); hybrid video and lossless graphics ([MS-RDPEGFX]) | Layers of legacy codecs and channels; TCP as the primary transport |
+| RDP | Nothing; QDP is designed independently of it | Layers of legacy codecs and virtual channels; TCP as the primary transport; a 30 fps default |
 | SPICE | Separate channels for display, input, cursor and audio | One TCP connection per channel |
 | Amazon DCV | 4:2:0 video plus lossless refinement of static areas; QUIC transport | Proprietary, undocumented wire format |
 | Parsec, Moonlight | Low-latency pipeline: no buffering, hardware codecs, relative input | Gaming-first scope; 4:2:0 text by default |
@@ -270,7 +294,9 @@ the target client, using screenshots of a code editor and a text-heavy web page
 rendered by a browser, a scrolling sequence, and a pan-and-zoom across an
 upscaled photograph standing in for game content. PSNR is measured in RGB.
 x264's perceptual tuning lowers its PSNR somewhat, and the upscaled photograph is
-easier to compress than real game footage.
+easier to compress than real game footage. The tools used (ffmpeg, x264, SVT-AV1,
+libaom, dav1d) were only measuring instruments; the implementation uses none of
+them ([Section 10](#10-implementation)).
 
 **Encoding at 4K (60 frames per second):**
 
@@ -314,16 +340,53 @@ result motivated the refinement layer.
 - Local prediction of scrolling and window dragging on the client.
 - AV2 support once hardware decoders ship.
 - Relays, NAT traversal and connection brokers.
+- An AV1 encoder path that uses the host's changed-block map to skip unchanged
+  areas, so that software encoding costs scale with what changed rather than with
+  screen size ([Section 10](#10-implementation)).
 
 **Open questions to resolve before version 1 is final:**
 
-- Lossless AV1 encoding: our test pipeline (ffmpeg 6.1 with libaom) did not
-  produce bit-exact output, although the AV1 specification defines lossless
-  coding. A verified lossless encoder path, or a fallback, is needed for the
-  `LOSSLESS` refinement layer.
+- Lossless AV1 encoding: the AV1 specification defines lossless coding, but an
+  earlier test pipeline did not produce bit-exact output. Our own encoder path
+  must be verified bit-exact with test vectors before the `LOSSLESS` refinement
+  layer is relied on.
+- Reference HID report descriptors for the standard devices, validated with HID
+  tooling, for hosts that create virtual devices from the report layouts.
 - Which hardware AV1 encoders support the reference control needed for
   key-frame-free recovery, and how hosts should fall back.
 - Default values for loss detection and the redundancy window, to be tuned with
   real implementations on real networks.
 - HDR metadata: whether to carry mastering display information beyond what the
   AV1 sequence header and metadata OBUs provide.
+
+## 10. Implementation
+
+The specification is language-neutral. Our implementation follows these
+decisions:
+
+- **Pure Rust**, with no bundled third-party C or C++ libraries such as ffmpeg.
+  Rust crates that embed hand-written assembly for performance-critical code, such
+  as cryptography or codec kernels, are acceptable.
+- **Transport**: `quinn` for QUIC and `rustls` for TLS 1.3.
+- **Software AV1 decoding**: rav1d.
+- **Software AV1 encoding**: `rav1e`, behind an encoder interface so that it can be
+  replaced later. It serves hosts without an AV1 hardware encoder and the refinement
+  layer, which hardware encoders cannot produce.
+- **Operating system interfaces** for everything hardware-specific:
+
+| Platform | Role | Video | Capture | Audio | Input |
+|---|---|---|---|---|---|
+| Windows | Host and client | Media Foundation, Direct3D 12 video | Windows.Graphics.Capture, virtual display driver | WASAPI | SendInput, virtual HID driver |
+| macOS | Host and client | VideoToolbox | ScreenCaptureKit | Core Audio | CGEvent, virtual HID |
+| Linux | Host and client | VA-API or Vulkan Video | PipeWire, KMS | PipeWire | uinput |
+| Android | Client | MediaCodec | — | AAudio | Android input framework |
+| iOS | Client | VideoToolbox | — | Core Audio | UIKit, GameController framework |
+
+- **Mobile clients** use the same Rust core through generated Swift and Kotlin
+  bindings, so no protocol logic exists outside Rust.
+- **AV1 only.** Hosts without an AV1 hardware encoder, including current Macs,
+  encode in software. Real-time software AV1 encoding is expensive at high
+  resolutions and frame rates, so such hosts start at reduced resolution or frame
+  rate. Encoding guided by the changed-block map ([Section 9](#9-future-work)) is
+  the main planned improvement, because for desktop work it makes encoding cost
+  proportional to what changed.

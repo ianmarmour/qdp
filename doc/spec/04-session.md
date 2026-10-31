@@ -7,10 +7,10 @@ stream:
 
 1. **Hello**: the endpoints exchange versions and capabilities.
 2. **Authentication**: the client proves its identity to the host.
-3. **Configuration**: the client describes its monitors, audio and input
-   devices; the host answers with the streams it will send.
-4. **Active**: media, input, cursor and clipboard data flow until the
-   connection closes.
+3. **Configuration**: the client describes its monitors, audio and input devices;
+   the host answers with the streams it will send and the devices it accepts.
+4. **Active**: media, input, cursor and clipboard data flow until the connection
+   closes.
 
 ## 4.2 Session states
 
@@ -22,8 +22,8 @@ stream:
 | `ACTIVE` | it receives `SESSION_START` | `ACTIVE` | it sends `SESSION_START` |
 
 The table below lists when each control message may be sent. A message received
-outside these rules is a connection error of type `QDP_PROTOCOL_VIOLATION`,
-except for pipelined messages ([Section 4.4.6](#446-pipelining)).
+outside these rules is a connection error of type `QDP_PROTOCOL_VIOLATION`, except
+for pipelined messages ([Section 4.4.6](#446-pipelining)).
 
 | Message | Sender | Allowed when |
 |---|---|---|
@@ -33,18 +33,25 @@ except for pipelined messages ([Section 4.4.6](#446-pipelining)).
 | `AUTH_CONTINUE` | Both | `AUTHENTICATING`, during a method that uses it |
 | `AUTH_RESULT` | Host | `AUTHENTICATING` |
 | `DISPLAY_REQUEST`, `AUDIO_REQUEST`, `KEYBOARD_INFO`, `DEVICE_ATTACH`, `DEVICE_DETACH` | Client | `CONFIGURING` or `ACTIVE` |
-| `CLIENT_READY` | Client | `CONFIGURING`; exactly once |
+| `CLIENT_READY` | Client | `CONFIGURING`; exactly once per successful authentication |
+| `DEVICE_STATUS` | Host | `CONFIGURING` or `ACTIVE`, answering a `DEVICE_ATTACH` |
+| `HID_FEATURE_REQUEST` | Host | `CONFIGURING` or `ACTIVE`, for a device it has accepted |
+| `HID_FEATURE_RESPONSE` | Client | `CONFIGURING` or `ACTIVE`, answering a request |
 | `DISPLAY_CONFIG`, `AUDIO_CONFIG`, `POINTER_MODE`, `CURSOR_SET`, `CURSOR_WARP` | Host | `CONFIGURING` after receiving `CLIENT_READY`, or `ACTIVE` |
 | `SESSION_START` | Host | `CONFIGURING` after receiving `CLIENT_READY`; exactly once |
+| `RESUMPTION_TOKEN` | Host | `ACTIVE` |
 | `KEYFRAME_REQUEST` | Client | `ACTIVE` |
 | `CLIPBOARD_OFFER`, `CLIPBOARD_REQUEST`, `CLIPBOARD_REJECT` | Both | `ACTIVE` |
 
-Datagrams and unidirectional streams are used only in the `ACTIVE` state.
+Datagrams are used only in the `ACTIVE` state, and unidirectional streams only as
+[Section 3.5.2](03-transport.md#352-unidirectional-streams) allows.
 
 The host MUST close the connection with `QDP_HANDSHAKE_TIMEOUT` if it has not
-received `CLIENT_READY` within 30 seconds of the QUIC handshake completing. The
-client SHOULD close the connection with the same code if it has not received
-`SESSION_START` within 30 seconds.
+received `CLIENT_HELLO` within 10 seconds of the QUIC handshake completing, if
+authentication has not succeeded within 120 seconds, which leaves time for a user
+to type a password, or if it has not received `CLIENT_READY` within 30 seconds of a
+successful `AUTH_RESULT`. The client SHOULD close the connection with the same code
+if it has not received `SESSION_START` within 30 seconds of sending `CLIENT_READY`.
 
 ## 4.3 Hello messages
 
@@ -61,8 +68,8 @@ CLIENT_HELLO Payload {
 
 - **Minor Version**: the highest minor version of this specification the client
   implements. This document defines minor version 0.
-- **Client Name**: a human-readable product name and version, for logs and
-  display, for example `qdp-client/0.1.0`. At most 255 bytes.
+- **Client Name**: a human-readable product name and version, for logs and display,
+  for example `qdp-client/0.1.0`. At most 255 bytes.
 - **Capability Count** and **Capability**: the client's capabilities
   ([Section 4.6](#46-capabilities)). At most 64 capabilities.
 
@@ -80,18 +87,19 @@ HOST_HELLO Payload {
 ```
 
 - **Minor Version**: the highest minor version the host implements.
-- **Host Name**: a human-readable name for the host, for example its computer
-  name. At most 255 bytes. A host MAY send an empty name to avoid revealing it
-  before authentication.
-- **Auth Method**: the authentication methods the host accepts for this client,
-  in the host's order of preference ([Section 4.4](#44-authentication)). There
-  MUST be at least one.
+- **Host Name**: a human-readable name for the host, for example its computer name.
+  At most 255 bytes. A host MAY send an empty name to avoid revealing it before
+  authentication.
+- **Auth Method**: the authentication methods the host accepts for this client, in
+  the host's order of preference ([Section 4.4](#44-authentication)). There MUST be
+  at least one.
 - **Capability**: the host's capabilities. At most 64.
 
-Both endpoints use the lower of the two minor versions. Because later minor
-versions only add fields at the end of structures and add new negotiated
-features, an endpoint never needs to reject a peer for having a different minor
-version.
+Both endpoints use the lower of the two minor versions. Later minor versions only
+add fields at the end of extensible structures
+([Section 1.6](01-introduction.md#16-extensibility)) and add features that are used
+only when negotiated, so an endpoint never needs to reject a peer for having a
+different minor version.
 
 If the client and host share no video codec, the host MUST close the connection
 with `QDP_NO_COMMON_CAPABILITY` after sending `HOST_HELLO`.
@@ -117,9 +125,9 @@ AUTH_RESULT Payload {
 }
 ```
 
-The client begins an attempt with `AUTH_START` naming one of the offered
-methods. The method defines any `AUTH_CONTINUE` exchange. The host ends the
-attempt with `AUTH_RESULT`:
+The client begins an attempt with `AUTH_START` naming one of the offered methods.
+The method defines any `AUTH_CONTINUE` exchange; Auth Data is at most 8192 bytes in
+every message. The host ends the attempt with `AUTH_RESULT`:
 
 | Status | Name | Meaning |
 |---|---|---|
@@ -127,38 +135,48 @@ attempt with `AUTH_RESULT`:
 | 0x01 | `FAILED_RETRY` | The attempt failed; the client may start another attempt. |
 | 0x02 | `FAILED_FINAL` | The attempt failed; the host will close the connection. |
 
-`Reason` is a human-readable explanation of at most 255 bytes. It SHOULD NOT
-reveal whether a user name exists. After three failed attempts on one
-connection, a host MUST send `FAILED_FINAL` and close the connection with
-`QDP_AUTH_FAILED`. Hosts SHOULD also limit the rate of failed attempts per
-source address and per user name.
+`Reason` is a human-readable explanation of at most 255 bytes, and SHOULD be the
+same for every kind of failure, so that it does not reveal whether a user name
+exists. After three failed attempts on one connection, a host MUST send
+`FAILED_FINAL` and close the connection with `QDP_AUTH_FAILED`. Hosts SHOULD also
+limit the rate of failed attempts per source address and per user name.
 
 A host that receives `AUTH_START` for a method it did not offer MUST answer
 `FAILED_RETRY`; the attempt counts as failed.
 
 ### 4.4.2 CLIENT_CERTIFICATE (0x01)
 
-The client presented a certificate in the TLS handshake, and the host
-authorizes it, typically by comparing the SHA-256 hash of its
-SubjectPublicKeyInfo with a list of allowed keys. `AUTH_START` carries empty
-Auth Data and the host answers with `AUTH_RESULT` directly. A host MUST NOT
-offer this method on a connection where the client presented no certificate.
+The client presented a certificate in the TLS handshake, and the host authorizes it,
+typically by comparing the SHA-256 hash of its SubjectPublicKeyInfo [RFC5280] with a
+list of allowed keys. A host that accepts this method MUST request a client
+certificate in the TLS handshake, because QUIC does not allow client authentication
+after the handshake. `AUTH_START` carries empty Auth Data and the host answers with
+`AUTH_RESULT` directly. A host MUST NOT offer this method on a connection where the
+client presented no certificate.
 
 ### 4.4.3 TOKEN (0x02)
 
-`AUTH_START` carries an opaque token of at most 4096 bytes that the client
-obtained out of band, for example from a connection broker. The host answers
-with `AUTH_RESULT` directly. Tokens are bearer credentials; hosts SHOULD accept
-only short-lived tokens and SHOULD reject a token that has been used before.
+`AUTH_START` carries an opaque token of at most 4096 bytes that the client obtained
+out of band, for example from a connection broker, or a resumption token from an
+earlier session ([Section 4.4.7](#447-resumption_token-0x08)). The host answers with
+`AUTH_RESULT` directly. Tokens are bearer credentials:
+
+- hosts MUST reject tokens that were not issued for them, for example by checking
+  that the token names the host's key;
+- hosts SHOULD accept only short-lived tokens and SHOULD reject a token that has
+  been used before;
+- clients MUST NOT send a token to a host whose key they have not verified by
+  pinning or by public key infrastructure
+  ([Section 11.1](11-security.md#111-host-authentication)).
 
 ### 4.4.4 SCRAM_SHA_256_PLUS (0x03)
 
-Password authentication uses SCRAM-SHA-256-PLUS [RFC5802] [RFC7677] with the
-`tls-exporter` channel binding [RFC9266]. The channel binding data is the 32-byte
-TLS exporter output with label `EXPORTER-Channel-Binding` and an empty context,
-taken from the QUIC connection's TLS session, so a password exchange cannot be
-relayed through another connection. The GS2 header is therefore
-`p=tls-exporter,,`.
+Password authentication against credentials stored by the QDP host uses
+SCRAM-SHA-256-PLUS [RFC5802] [RFC7677] with the `tls-exporter` channel binding
+[RFC9266]. The channel binding data is the 32-byte TLS exporter output with label
+`EXPORTER-Channel-Binding` and an empty context, taken from the QUIC connection's TLS
+session, so a password exchange cannot be relayed through another connection. The
+GS2 header is therefore `p=tls-exporter,,`.
 
 SCRAM messages are carried as UTF-8 bytes in Auth Data without SASL framing:
 
@@ -169,65 +187,137 @@ SCRAM messages are carried as UTF-8 bytes in Auth Data without SASL framing:
 | 3 | `AUTH_CONTINUE` (client) | client-final-message |
 | 4 | `AUTH_RESULT` | server-final-message on success; empty on failure |
 
-On `SUCCESS`, the client MUST verify the server signature in the
-server-final-message and MUST close the connection with `QDP_AUTH_FAILED` if
-it does not match.
+In addition to [RFC5802]:
+
+- User names are prepared with the UsernameCaseMapped profile and passwords with the
+  OpaqueString profile of [RFC8265].
+- The host MUST reject any GS2 header other than `p=tls-exporter,,`, and MUST check
+  that the channel binding attribute `c=` equals the base64 encoding of the GS2
+  header followed by the 32-byte exporter output.
+- For a user name it does not know, the host MUST still answer step 1 with a
+  server-first-message, using a salt derived deterministically from the user name
+  and a host secret and its normal iteration count, and fail only at step 4, taking
+  the same time as for a known user.
+- Hosts MUST use an iteration count of at least 4096, and SHOULD use a much higher
+  one. Clients MUST reject iteration counts below 4096 or above 10,000,000 by closing
+  the connection with `QDP_AUTH_FAILED`.
+- On `SUCCESS`, the client MUST verify the server signature in the
+  server-final-message and MUST close the connection with `QDP_AUTH_FAILED` if it
+  does not match.
 
 ### 4.4.5 ANONYMOUS (0x04)
 
 No authentication. A host MUST NOT offer this method unless an administrator has
-explicitly enabled it, and clients SHOULD warn the user before using it.
-`AUTH_START` carries empty Auth Data.
+explicitly enabled it, and clients SHOULD warn the user before using it. `AUTH_START`
+carries empty Auth Data.
 
 ### 4.4.6 Pipelining
 
 To shorten session setup, a client MAY:
 
-- send `AUTH_START` immediately after `CLIENT_HELLO`, before receiving
-  `HOST_HELLO`, if it knows from earlier sessions that the host accepts the
-  method; and
+- send `AUTH_START` immediately after `CLIENT_HELLO`, before receiving `HOST_HELLO`,
+  if it knows from an earlier session that the host accepts the method; and
 - send its configuration messages and `CLIENT_READY`
   ([Section 4.5](#45-configuration)) immediately after its final authentication
-  message.
+  message, using the host capabilities it remembers from an earlier session.
 
-The host processes pipelined messages only once the state they require is
-reached. It MUST buffer up to 64 KiB of pipelined messages and MUST close the
-connection with `QDP_RESOURCE_LIMIT` if a client sends more before
-authentication succeeds. If the attempt fails, the host discards the pipelined
-configuration messages and the client MUST send them again after a later
-successful attempt. With a token or client certificate and pipelining, a session
-becomes active one round trip after the QUIC handshake.
+The host processes pipelined messages only once the state they require is reached.
+The client MUST NOT pipeline more than 64 KiB of messages before a successful
+`AUTH_RESULT`, and MUST NOT pipeline passthrough device attachments; a host that
+receives more closes the connection as
+[Section 11.7](11-security.md#117-resource-exhaustion) describes. Because the
+client's memory of the host's capabilities can be out of date, the host tolerates
+mismatches in pipelined configuration: it configures at most as many monitors as it
+supports, and refuses devices it does not support with `DEVICE_STATUS`.
+
+If an attempt fails, the host discards every message other than authentication
+messages that it received before the client's next `AUTH_START`. Discarded messages
+do not count toward the 64 KiB limit or toward the rule that `CLIENT_READY` is sent
+once, and the client MUST send its configuration again after a later successful
+attempt. With a token or client certificate and pipelining, a session becomes active
+one round trip after the QUIC handshake.
+
+### 4.4.7 RESUMPTION_TOKEN (0x08)
+
+```
+RESUMPTION_TOKEN Payload {
+  Token (Octets),
+  Lifetime (i),
+}
+```
+
+Ending a QDP connection does not end the user's desktop on the host
+([Section 4.7](#47-ending-a-session)). So that a client can reconnect without asking
+the user for credentials again, for example after a phone's operating system
+suspended it and the connection timed out, the host MAY send `RESUMPTION_TOKEN` after
+`SESSION_START`, and again whenever it rotates the token. Token is opaque and at most
+256 bytes; Lifetime is the number of seconds it remains valid after the connection
+ends.
+
+A client reconnecting within the lifetime authenticates the new connection with the
+`TOKEN` method, using this token, and sees the desktop as it is now. The host MUST
+accept each resumption token at most once, MUST bind it to the identity that
+authenticated the original session, and SHOULD issue a fresh token after each
+successful resumption. Clients store resumption tokens as described in
+[Section 11.2](11-security.md#112-client-authentication).
+
+### 4.4.8 PASSWORD (0x05)
+
+Some hosts must check a user's operating system account password, for example a
+domain account, which SCRAM cannot do because the host stores no SCRAM verifier for
+it. With the `PASSWORD` method, `AUTH_START` carries:
+
+```
+PASSWORD Auth Data {
+  User Name (String),
+  Password (String),
+}
+```
+
+encoded inside the Auth Data Octets. The host verifies them with its operating
+system and answers with `AUTH_RESULT`. The password is protected by TLS but is
+revealed to the host, so a client MUST send it only to a host whose key it has
+verified by pinning or by public key infrastructure, never on a connection trusted
+only on first use. Hosts MUST rate-limit failures as for every method. How an
+authenticated identity maps to an operating system account and desktop is decided by
+the host.
 
 ## 4.5 Configuration
 
 In the `CONFIGURING` state the client MUST send `DISPLAY_REQUEST`
-([Section 6.2](06-video.md#62-display_request-0x10)). It SHOULD send
-`KEYBOARD_INFO` ([Section 8.2.1](08-input.md#821-keyboard_info-0x30)), MAY send
-`AUDIO_REQUEST` ([Section 7.2](07-audio.md#72-audio_request-0x18)) and one
-`DEVICE_ATTACH` per extra input device
-([Section 8.2.2](08-input.md#822-device_attach-0x31)), and then sends:
+([Section 6.2](06-video.md#62-display_request-0x10)) and one `DEVICE_ATTACH` for each
+required input device, at least `KEYBOARD`, `POINTER` and `MOUSE`
+([Section 8.2.1](08-input.md#821-device_attach-0x31)). It SHOULD send
+`KEYBOARD_INFO` ([Section 8.2.3](08-input.md#823-keyboard_info-0x30)), MAY send
+`AUDIO_REQUEST` ([Section 7.2](07-audio.md#72-audio_request-0x18)) and
+`DEVICE_ATTACH` messages for other devices, and then sends:
 
 ```
 CLIENT_READY Payload {
 }
 ```
 
-After receiving `CLIENT_READY`, the host MUST send, in this order:
+The host answers each `DEVICE_ATTACH` with `DEVICE_STATUS` as it processes it. After
+receiving `CLIENT_READY`, the host MUST send, in this order:
 
-1. `DISPLAY_CONFIG` ([Section 6.3](06-video.md#63-display_config-0x11));
-2. `AUDIO_CONFIG`, if the client sent `AUDIO_REQUEST`;
-3. `POINTER_MODE` ([Section 8.7](08-input.md#87-pointer_mode-0x33));
-4. `CURSOR_SET` ([Section 9.3](09-cursor.md#93-cursor_set-0x38));
-5. `SESSION_START`.
+1. `DEVICE_STATUS` for any device attached during configuration that it has not yet
+   answered;
+2. `DISPLAY_CONFIG` ([Section 6.3](06-video.md#63-display_config-0x11));
+3. `AUDIO_CONFIG`, if the client sent `AUDIO_REQUEST`;
+4. `POINTER_MODE` ([Section 8.9](08-input.md#89-pointer_mode-0x33));
+5. `CURSOR_SET` ([Section 9.3](09-cursor.md#93-cursor_set-0x38));
+6. `SESSION_START`.
 
 ```
 SESSION_START Payload {
 }
 ```
 
-The host may start sending media immediately after `SESSION_START`. The client
-MUST NOT send datagrams or open unidirectional streams until it has received
-`SESSION_START`.
+The host may start sending media immediately after `SESSION_START`. The client MUST
+NOT send datagrams or open unidirectional streams until it has received
+`SESSION_START`. Datagrams and streams from the host can overtake `SESSION_START`;
+the client buffers them as [Section 3.7.3](03-transport.md#373-processing-rules)
+describes.
 
 ## 4.6 Capabilities
 
@@ -241,11 +331,10 @@ Capability {
 }
 ```
 
-A capability states that the sender implements a feature, and with what limits.
-A feature is used only if both endpoints advertise it. Unless a capability is
-marked *repeatable*, an endpoint MUST NOT send it more than once. A
-`Capability Length` above 4096 is a connection error of type
-`QDP_PROTOCOL_VIOLATION`.
+A capability states that the sender implements a feature, and with what limits. A
+feature is used only if both endpoints advertise it. Unless a capability is marked
+*repeatable*, an endpoint MUST NOT send it more than once. A `Capability Length`
+above 4096 is a connection error of type `QDP_PROTOCOL_VIOLATION`.
 
 ### 4.6.2 VIDEO_CODEC (0x01), repeatable
 
@@ -258,28 +347,33 @@ VIDEO_CODEC Value {
   Max Height (i),
   Max Pixel Rate (i),
   Flags (8),
+  Max Level (8),
 }
 ```
 
-The host lists what it can encode and the client what it can decode, one
-capability per codec.
+The host lists what it can encode and the client what it can decode, one capability
+per codec.
 
 - **Codec**: 0x01 for AV1. Entries with an unknown codec are ignored.
-- **Profiles**: AV1 profiles supported: 0x01 profile 0 (Main), 0x02 profile 1
-  (High), 0x04 profile 2 (Professional).
-- **Max Bit Depth**: 8, 10 or 12.
-- **Max Width**, **Max Height**: largest frame dimensions in pixels.
+- **Profiles**: AV1 profiles supported: 0x01 profile 0 (Main), 0x02 profile 1 (High).
+  The value 0x04, profile 2, is reserved and MUST NOT be used in this version.
+- **Max Bit Depth**: 8 or 10. The value 12 is reserved for later versions.
+- **Max Width**, **Max Height**: largest frame dimensions in pixels. The host MUST
+  NOT configure a monitor larger than the client's limits.
 - **Max Pixel Rate**: luma samples per second the endpoint can sustain across all
-  video streams in low-latency mode, or 0 if not stated. Hosts SHOULD keep the
-  total within the client's value.
+  video streams in low-latency mode, or 0 if not stated. Hosts SHOULD keep the total
+  within the client's value.
 - **Flags**:
   - 0x01 `HARDWARE_PROFILE_0`: profile 0 is hardware-accelerated.
   - 0x02 `HARDWARE_PROFILE_1`: profile 1 is hardware-accelerated.
   - 0x04 `LOSSLESS`: the endpoint can encode or decode lossless frames
     ([Section 6.4.3](06-video.md#643-refinement-layer)).
+- **Max Level**: the highest AV1 level (`seq_level_idx`) the endpoint supports, or 31
+  for no limit. Every stream's sequence header MUST signal a level the stream meets
+  and that does not exceed the client's Max Level.
 
-The host uses the flags to choose stream formats. For example, it can send 4:4:4
-on the motion layer only to a client that decodes profile 1 in hardware.
+The host uses the flags to choose stream formats. For example, it can send 4:4:4 on
+the motion layer only to a client that decodes profile 1 in hardware.
 
 ### 4.6.3 REFINEMENT (0x02)
 
@@ -298,8 +392,8 @@ AUDIO_CODEC Value {
 
 - **Codec**: 0x01 Opus, 0x02 PCM L16, 0x03 PCM L24 ([Section 7.5](07-audio.md#75-codecs)).
 - **Max Channels**: 1 to 8.
-- **Directions**: 0x01 `SEND` (the endpoint can encode and send this codec),
-  0x02 `RECEIVE` (it can receive and decode it).
+- **Directions**: 0x01 `SEND` (the endpoint can encode and send this codec), 0x02
+  `RECEIVE` (it can receive and decode it).
 
 ### 4.6.5 INPUT (0x04)
 
@@ -309,19 +403,20 @@ INPUT Value {
 }
 ```
 
-For the client, the classes it can capture; for the host, the classes it can
-inject. A class is used only if both set it.
+For the client, the kinds of input device it can attach; for the host, the kinds it
+can inject. A class is used only if both set it.
 
 | Mask | Class |
 |---|---|
 | 0x01 | `KEYBOARD` |
-| 0x02 | `POINTER_ABSOLUTE` |
-| 0x04 | `POINTER_RELATIVE` |
-| 0x08 | `GAMEPAD` |
-| 0x10 | `TOUCH` |
-| 0x20 | `PEN` |
-| 0x40 | `TEXT` (Unicode text events) |
-| 0x80 | `DEVICE_OUTPUT` (rumble and LEDs) |
+| 0x02 | `POINTER` (absolute) |
+| 0x04 | `MOUSE` (relative) |
+| 0x08 | `TOUCHSCREEN` |
+| 0x10 | `PEN` |
+| 0x20 | `TOUCHPAD` |
+| 0x40 | `GAMEPAD` |
+| 0x80 | `TEXT` |
+| 0x100 | `PASSTHROUGH` |
 
 ### 4.6.6 CLIPBOARD (0x05)
 
@@ -332,9 +427,8 @@ CLIPBOARD Value {
 }
 ```
 
-- **Directions**: 0x01 `SEND` (the endpoint offers its clipboard), 0x02
-  `RECEIVE` (it accepts the peer's clipboard). Hosts set these from
-  administrative policy.
+- **Directions**: 0x01 `SEND` (the endpoint offers its clipboard), 0x02 `RECEIVE`
+  (it accepts the peer's clipboard). Hosts set these from administrative policy.
 - **Max Size**: the largest clipboard data, in bytes, the endpoint accepts.
 
 ### 4.6.7 MONITORS (0x06)
@@ -346,26 +440,32 @@ MONITORS Value {
 ```
 
 The number of monitors the endpoint can stream (host) or display (client). An
-endpoint that does not send this capability supports one monitor.
+endpoint that does not send this capability supports one monitor. The host MUST NOT
+configure more monitors than the client supports.
 
 ### 4.6.8 HDR (0x07)
 
 ```
 HDR Value {
-  Colorimetry (8),
+  Formats (8),
 }
 ```
 
-High dynamic range formats the endpoint can encode (host) or present (client):
-0x01 BT.2020 primaries with the PQ transfer function, 0x02 BT.2020 primaries
-with the HLG transfer function.
+A mask of the high dynamic range formats the endpoint can encode (host) or present
+(client), in any combination: 0x01 BT.2020 primaries with the PQ transfer function,
+0x02 BT.2020 primaries with the HLG transfer function.
 
 ## 4.7 Ending a session
 
 Either endpoint ends the session by closing the QUIC connection
-([Section 3.10](03-transport.md#310-errors-and-closing)). A host that accepts a
-new session for the same user while one is active MAY close the old session
-with `QDP_SESSION_REPLACED`. A host that is shutting down or logging the user
-out SHOULD close sessions with `QDP_HOST_SHUTDOWN`. When a session ends, the host
-MUST release every key and button it pressed on the client's behalf
-([Section 8.6](08-input.md#86-host-processing)).
+([Section 3.10](03-transport.md#310-errors-and-closing)). Ending a QDP connection
+does not end the user's desktop on the host: a client that reconnects, with fresh
+credentials or a resumption token ([Section 4.4.7](#447-resumption_token-0x08)), sees
+the desktop as it is now. Hosts MAY end an abandoned desktop after an administrative
+timeout, and SHOULD lock it while no client is connected
+([Section 11.4](11-security.md#114-local-control-and-privacy)).
+
+A host that accepts a new session for the same user while one is active MAY close the
+old session with `QDP_SESSION_REPLACED`. A host that is shutting down or logging the
+user out SHOULD close sessions with `QDP_HOST_SHUTDOWN`. When a session ends, the host
+MUST return every input device to rest ([Section 8.7](08-input.md#87-host-rules)).
