@@ -2,12 +2,16 @@
 //! Quick Desktop Protocol.
 //!
 //! `qdp serve` streams a test pattern until a screen capture backend exists for
-//! the platform; `qdp connect` decodes the stream and can write it to a
-//! YUV4MPEG2 file until it has a window.
+//! the platform; `qdp connect` shows the stream in a window, or with
+//! `--headless` only logs statistics and can write it to a YUV4MPEG2 file.
 
 mod args;
+#[cfg(feature = "window")]
+mod color;
 mod identity;
 mod sink;
+#[cfg(feature = "window")]
+mod window;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -15,13 +19,13 @@ use std::sync::Arc;
 
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
-    ClientCredentials, ClientOptions, DisplaySize, EncoderTuning, HostAuthenticator, HostOptions,
-    TestPattern,
+    ClientCredentials, ClientOptions, ClientSummary, DisplaySize, EncoderTuning, FrameSink,
+    HostAuthenticator, HostOptions, TestPattern,
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::filter::LevelFilter;
 
-use crate::args::{Command, ConnectArgs, ServeArgs, USAGE, format_pin, parse_args};
+use crate::args::{Command, ConnectArgs, Presentation, ServeArgs, USAGE, format_pin, parse_args};
 use crate::sink::CliSink;
 
 /// The environment variable that holds the password for `--user`.
@@ -43,6 +47,17 @@ const DEFAULT_DISPLAY: DisplaySize = DisplaySize {
     refresh_millihertz: 60_000,
 };
 
+/// The name of the thread that runs the session while the window runs on the
+/// main thread.
+#[cfg(feature = "window")]
+const SESSION_THREAD_NAME: &str = "qdp-session";
+
+/// How long the session may take to end on its own after the window closes,
+/// before it is cut off. It normally ends at the next frame, saying goodbye to
+/// the host.
+#[cfg(feature = "window")]
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// An error that ends the program, with a message for the user.
 type CliResult = Result<(), String>;
 
@@ -62,7 +77,7 @@ fn main() -> ExitCode {
         }
         Command::Pin { identity } => print_pin(&identity),
         Command::Serve(args) => run_async(serve(args)),
-        Command::Connect(args) => run_async(connect(args)),
+        Command::Connect(args) => connect(args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -87,7 +102,7 @@ fn init_logging() {
 }
 
 /// Runs `future` on a multi-threaded runtime.
-fn run_async(future: impl Future<Output = CliResult>) -> CliResult {
+fn run_async<T>(future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -198,9 +213,100 @@ fn hostname() -> String {
         .unwrap_or_default()
 }
 
-/// Runs `qdp connect`: connects to the host and receives until the frame limit,
-/// an interrupt, or the host closing.
-async fn connect(args: ConnectArgs) -> CliResult {
+/// Runs `qdp connect`: shows the host's stream until the frame limit, an
+/// interrupt, the window closing, or the host closing.
+fn connect(args: ConnectArgs) -> CliResult {
+    let sink = CliSink::new(args.output.as_deref(), args.frames)
+        .map_err(|error| format!("cannot create the output file: {error}"))?;
+    match args.presentation {
+        Presentation::Headless => connect_headless(&args, sink),
+        #[cfg(feature = "window")]
+        Presentation::Window => connect_in_window(args, sink),
+        #[cfg(not(feature = "window"))]
+        Presentation::Window => {
+            Err("this qdp was built without the window feature; pass --headless".to_owned())
+        }
+    }
+}
+
+/// Receives the stream without a window, until the frame limit, an interrupt,
+/// or the host closing.
+fn connect_headless(args: &ConnectArgs, mut sink: CliSink) -> CliResult {
+    let result = run_async(receive(args, &mut sink, interrupted()));
+    finish(&mut sink, result)
+}
+
+/// Shows the stream in a window. The window runs on this thread, which must be
+/// the main thread, and the session on another.
+#[cfg(feature = "window")]
+fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
+    use crate::window::{CloseSignal, FrameSlot, WindowApp, WindowMessage, WindowSink};
+
+    let event_loop = window::event_loop()?;
+    let slot = FrameSlot::default();
+    let close = Arc::new(CloseSignal::default());
+    let title = format!("QDP: {}", args.address);
+    let proxy = event_loop.create_proxy();
+    let mut sink = WindowSink::new(sink, Arc::clone(&slot), proxy.clone(), Arc::clone(&close));
+    let session_close = Arc::clone(&close);
+    let session = std::thread::Builder::new()
+        .name(SESSION_THREAD_NAME.to_owned())
+        .spawn(move || {
+            let stop = async {
+                tokio::select! {
+                    () = interrupted() => {}
+                    () = window_closed(&session_close) => {}
+                }
+            };
+            let result = run_async(receive(&args, &mut sink, stop));
+            let result = finish(sink.inner_mut(), result);
+            // The window may have closed already, so nobody may listen.
+            let _ = proxy.send_event(WindowMessage::SessionEnded);
+            result
+        })
+        .map_err(|error| format!("cannot start the session: {error}"))?;
+
+    let mut app = WindowApp::new(title, slot, Arc::clone(&close));
+    let window_result = event_loop
+        .run_app(&mut app)
+        .map_err(|error| format!("the window failed: {error}"));
+    // The window is gone; stop the session if it still runs.
+    close.close();
+    let session_result = session
+        .join()
+        .unwrap_or_else(|_| Err("the session thread panicked".to_owned()));
+    window_result?;
+    if let Some(error) = app.error() {
+        return Err(format!(
+            "{error}; pass --headless to connect without a window"
+        ));
+    }
+    session_result
+}
+
+/// Completes once the window has closed and the session has had
+/// [`CLOSE_GRACE`] to end on its own.
+#[cfg(feature = "window")]
+async fn window_closed(close: &window::CloseSignal) {
+    close.closed().await;
+    tokio::time::sleep(CLOSE_GRACE).await;
+}
+
+/// Completes on Ctrl-C, or never if the interrupt cannot be watched.
+async fn interrupted() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Connects to the host and presents its stream in `sink` until the sink stops,
+/// the host closes, or `stop` completes. Returns the session's summary, or
+/// `None` if `stop` cut it off.
+async fn receive(
+    args: &ConnectArgs,
+    sink: &mut dyn FrameSink,
+    stop: impl Future<Output = ()>,
+) -> Result<Option<ClientSummary>, String> {
     let credentials = match (&args.token, &args.user) {
         (Some(token), _) => ClientCredentials::Token(token.as_bytes().to_vec()),
         (None, Some(user)) => ClientCredentials::Password {
@@ -231,25 +337,26 @@ async fn connect(args: ConnectArgs) -> CliResult {
         display: DEFAULT_DISPLAY,
         decoder_threads: 0,
     };
-    let mut sink = CliSink::new(args.output.as_deref(), args.frames)
-        .map_err(|error| format!("cannot create the output file: {error}"))?;
     let result = tokio::select! {
-        result = qdp_runtime::run(connection, &options, &mut sink) => result.map(Some),
-        _ = tokio::signal::ctrl_c() => Ok(None),
+        result = qdp_runtime::run(connection, &options, sink) => result.map(Some),
+        () = stop => Ok(None),
     };
+    let summary = result.map_err(|error| format!("session failed: {error}"))?;
+    endpoint.wait_idle().await;
+    Ok(summary)
+}
+
+/// Finishes the output file and logs how the session ended.
+fn finish(sink: &mut CliSink, result: Result<Option<ClientSummary>, String>) -> CliResult {
     sink.finish()
         .map_err(|error| format!("cannot write the output file: {error}"))?;
-    match result {
-        Ok(Some(summary)) => {
-            info!(
-                frames = summary.frames_presented,
-                decode_failures = summary.decode_failures,
-                "disconnected"
-            );
-        }
-        Ok(None) => info!(frames = sink.frames(), "interrupted"),
-        Err(error) => return Err(format!("session failed: {error}")),
+    match result? {
+        Some(summary) => info!(
+            frames = summary.frames_presented,
+            decode_failures = summary.decode_failures,
+            "disconnected"
+        ),
+        None => info!(frames = sink.frames(), "stopped"),
     }
-    endpoint.wait_idle().await;
     Ok(())
 }

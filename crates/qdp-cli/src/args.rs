@@ -31,6 +31,7 @@ Connect options:
   --server-name NAME   Name sent in the TLS handshake (default qdp-host)
   --frames N           Disconnect after N frames
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
+  --headless           Open no window; only log statistics
 
 Set QDP_LOG to error, warn, info, debug or trace to change the log level.";
 
@@ -98,6 +99,16 @@ pub struct ServeArgs {
     pub quantizer: u8,
 }
 
+/// Where `qdp connect` shows the stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presentation {
+    /// In a window.
+    Window,
+    /// Nowhere: the stream is only counted, and written to the file
+    /// `--output` names.
+    Headless,
+}
+
 /// The options of `qdp connect`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectArgs {
@@ -115,6 +126,8 @@ pub struct ConnectArgs {
     pub frames: Option<u64>,
     /// Where to write the decoded video.
     pub output: Option<PathBuf>,
+    /// Where to show the stream.
+    pub presentation: Presentation,
 }
 
 /// An error in the command line.
@@ -275,6 +288,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         server_name: DEFAULT_SERVER_NAME.to_owned(),
         frames: None,
         output: None,
+        presentation: Presentation::Window,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -284,6 +298,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--server-name" => connect.server_name = value("--server-name", &mut arguments)?,
             "--frames" => connect.frames = Some(parse("--frames", &mut arguments)?),
             "--output" => connect.output = Some(value("--output", &mut arguments)?.into()),
+            "--headless" => connect.presentation = Presentation::Headless,
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
@@ -332,6 +347,14 @@ mod tests {
         assert_eq!(connect.address.port(), 4433);
         assert_eq!(connect.pin, KeyPin([0xab; 32]));
         assert_eq!(connect.frames, Some(10));
+        assert_eq!(connect.presentation, Presentation::Window);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --headless"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.presentation, Presentation::Headless);
         assert!(parse_line(&format!("connect 192.0.2.7:4433 --pin {pin}")).is_err());
         assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
         assert!(parse_line("connect nowhere --pin x --token t").is_err());

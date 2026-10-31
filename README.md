@@ -37,20 +37,25 @@ The host creates its key in `./qdp-identity` the first time:
 
 On the client, connect with the host's address or name and its pin. The host
 listens on UDP port 4433 unless given `--listen`; add `:PORT` to the address
-for another port:
+for another port. The stream opens in a window, and closing the window
+disconnects:
 
 ```bash
-./target/release/qdp connect 192.0.2.7 --pin PIN --token my-secret --output session.y4m
+./target/release/qdp connect 192.0.2.7 --pin PIN --token my-secret
 ```
+
+With `--headless` the client opens no window and only logs statistics, and
+`--output session.y4m` also writes the decoded video to a YUV4MPEG2 file, which
+ffmpeg and most players open. To build without window support, for a machine
+that only serves, use `cargo build --release --no-default-features`.
 
 To use a password instead of a token, pass `--user NAME` on both sides with the
 password in the `QDP_PASSWORD` environment variable; it is checked with
 SCRAM-SHA-256-PLUS, so it never crosses the network.
 
-For now the host streams a test pattern and the client writes the decoded
-video to a YUV4MPEG2 file, which ffmpeg and most players open. Screen capture,
-input, a client window and hardware video codecs come next. Run `qdp help` for
-every option, and set `QDP_LOG=debug` for more detail.
+For now the host streams a test pattern. Screen capture, input and hardware
+video codecs come next. Run `qdp help` for every option, and set
+`QDP_LOG=debug` for more detail.
 
 ## Crates
 

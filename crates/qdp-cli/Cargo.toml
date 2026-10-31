@@ -16,14 +16,22 @@ path = "src/main.rs"
 # The library crate is also called qdp; documenting both would collide.
 doc = false
 
+[features]
+default = ["window"]
+# Shows the stream in a window. Without it, `qdp connect` runs headless only,
+# for hosts and servers that need no windowing libraries.
+window = ["dep:softbuffer", "dep:winit", "tokio/sync", "tokio/time"]
+
 [dependencies]
 qdp.workspace = true
 qdp-codec.workspace = true
 qdp-quic.workspace = true
 qdp-runtime.workspace = true
+softbuffer = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+winit = { workspace = true, optional = true }
 
 [lints]
 workspace = true

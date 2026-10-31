@@ -101,6 +101,7 @@ fn connect(port: u16, pin: &str, token: &str, extra: &[&str]) -> Output {
                 pin,
                 "--token",
                 token,
+                "--headless",
             ])
             .args(extra)
             .env("QDP_LOG", "warn")
