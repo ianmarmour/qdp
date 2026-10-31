@@ -24,6 +24,9 @@ ashpd = { version = "0.13.13", default-features = false, features = ["screencast
 bytes = { version = "1.10", default-features = false, features = ["std"] }
 # Audio devices on macOS and Windows.
 cpal = { version = "0.18.2", default-features = false }
+# Gamepads on Linux, macOS and Windows, for clients. On Linux it needs
+# libudev's development files.
+gilrs = { version = "0.11.2", default-features = false, features = ["wgi"] }
 libc = { version = "0.2.172", default-features = false }
 # Apple's frameworks, for hardware video decoding on macOS.
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }

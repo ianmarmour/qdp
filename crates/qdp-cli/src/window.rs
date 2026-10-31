@@ -213,6 +213,9 @@ pub struct WindowApp {
     captured: bool,
     /// The modifier keys held.
     modifiers: ModifiersState,
+    /// The user's gamepads, if they can be watched.
+    #[cfg(feature = "gamepad")]
+    gamepads: Option<qdp_desktop::GamepadCapture>,
 }
 
 impl WindowApp {
@@ -230,7 +233,6 @@ impl WindowApp {
             current: None,
             close,
             error: None,
-            input,
             scroll_remainder: (0.0, 0.0),
             cursor: None,
             scaled_cursor: None,
@@ -241,6 +243,11 @@ impl WindowApp {
             pointer_mode: PointerKind::Absolute,
             captured: false,
             modifiers: ModifiersState::empty(),
+            #[cfg(feature = "gamepad")]
+            gamepads: qdp_desktop::GamepadCapture::start(input.clone())
+                .inspect_err(|error| warn!(error, "gamepads are not sent"))
+                .ok(),
+            input,
         }
     }
 
@@ -655,6 +662,10 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             WindowEvent::MouseWheel { delta, .. } => self.scroll(delta),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                #[cfg(feature = "gamepad")]
+                if let Some(gamepads) = &self.gamepads {
+                    gamepads.set_focused(focused);
+                }
                 if !focused {
                     self.release_pointer();
                     self.input.send(UserInput::ReleaseAll);
