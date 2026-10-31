@@ -21,7 +21,7 @@ use qdp::session::{ClientEvent, Negotiated};
 use qdp::time::{ClockSync, SessionClock, answer_ping};
 use qdp::video::VideoReceiver;
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{CodecPreference, open_decoder};
+use qdp_codec::{CodecPreference, DecoderCommand, ProcessDecoder, VideoDecoder, open_decoder};
 use qdp_quic::{
     ClientDriver, DriverInput, QdpConnection, StreamLimit, StreamPolicy, TransportError,
 };
@@ -108,6 +108,10 @@ pub struct ClientOptions {
     pub decoder_threads: u32,
     /// Whether to decode in hardware or software.
     pub decoder: CodecPreference,
+    /// The command that starts a separate decoder process, which isolates
+    /// decoding the host's untrusted video from the client (Section 11.5),
+    /// or `None` to decode in the client's own process, which is faster.
+    pub decoder_process: Option<DecoderCommand>,
     /// The user's input language and keyboard layout, sent so that the host
     /// can match them (Section 8.2.3).
     pub keyboard_info: Option<KeyboardInfo>,
@@ -289,6 +293,9 @@ struct ActiveClient<'a> {
     decoder_threads: u32,
     /// Whether to decode in hardware or software.
     decoder_preference: CodecPreference,
+    /// The command that starts a separate decoder process, if decoding is
+    /// isolated.
+    decoder_process: Option<DecoderCommand>,
     /// The session's statistics.
     summary: ClientSummary,
     /// Sends input reports reliably.
@@ -438,6 +445,7 @@ async fn run_session(
         early: EarlyBuffer::default(),
         decoder_threads: options.decoder_threads,
         decoder_preference: options.decoder,
+        decoder_process: options.decoder_process.clone(),
         summary: ClientSummary::default(),
         input: InputSender::new(clock),
         devices: ClientDevices::default(),
@@ -812,7 +820,14 @@ impl ActiveClient<'_> {
             else {
                 continue;
             };
-            let decoder = open_decoder(self.decoder_threads, self.decoder_preference)?;
+            let decoder: Box<dyn VideoDecoder> = match &self.decoder_process {
+                Some(command) => Box::new(ProcessDecoder::spawn(
+                    command.clone(),
+                    self.decoder_threads,
+                    self.decoder_preference,
+                )?),
+                None => open_decoder(self.decoder_threads, self.decoder_preference)?,
+            };
             info!(
                 stream = stream.stream_id.0.into_inner(),
                 width = monitor.width.into_inner(),

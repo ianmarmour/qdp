@@ -429,6 +429,7 @@ fn client_options(credentials: ClientCredentials) -> ClientOptions {
         },
         decoder_threads: 2,
         decoder: CodecPreference::Software,
+        decoder_process: None,
         keyboard_info: Some(KeyboardInfo {
             language: "en-GB".to_owned(),
             layout_platform: LayoutPlatform::XKB,

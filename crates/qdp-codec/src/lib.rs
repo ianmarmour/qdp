@@ -10,6 +10,8 @@
 //!   one (VideoToolbox on macOS) and falls back to software otherwise.
 //! - [`Av1Decoder`], which decodes with rav1d, returning one picture per
 //!   temporal unit.
+//! - [`ProcessDecoder`], which decodes in a separate process running
+//!   [`serve_decoder_on_stdio`], isolating the decoder from the client.
 //! - [`parse_obus`] and [`to_qdp_temporal_unit`], which check and convert AV1
 //!   bitstreams.
 //!
@@ -30,6 +32,7 @@ mod frame;
 mod headers;
 mod level;
 mod obu;
+mod process_decoder;
 mod sequence;
 #[cfg(target_os = "linux")]
 mod vaapi;
@@ -50,6 +53,7 @@ pub use encoder::{
 pub use frame::{Rgb32Order, Yuv420Frame};
 pub use level::{NO_LEVEL, TileCount, frame_rate_within, level_for};
 pub use obu::{Obu, ObuType, parse_obus, to_qdp_temporal_unit};
+pub use process_decoder::{DecoderCommand, ProcessDecoder, serve_decoder, serve_decoder_on_stdio};
 pub use sequence::{ColorDescription, SequenceHeader};
 #[cfg(target_os = "linux")]
 pub use vaapi::VaapiEncoder;
@@ -83,4 +87,7 @@ pub enum CodecError {
     /// A hardware codec cannot handle the stream, so software must.
     #[error("the hardware codec cannot be used: {0}")]
     HardwareUnavailable(String),
+    /// The decoder process failed, or its decoder reported an error.
+    #[error("decoder process: {0}")]
+    DecoderProcess(String),
 }

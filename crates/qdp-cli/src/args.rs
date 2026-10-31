@@ -68,6 +68,10 @@ Connect options:
   --headless           Open no window; only log statistics
   --decoder KIND       auto, hardware or software (default auto: the GPU's
                        decoder when it has one, otherwise software)
+  --decoder-process on|off
+                       Decode the host's video in a separate process, so that
+                       a decoder bug a malicious stream exploits cannot reach
+                       the session; slower (default off)
   --clipboard WAY      both, send, receive or off: share the clipboard's text
                        both ways, only this machine's, only the host's, or
                        not at all (default both)
@@ -122,6 +126,10 @@ pub enum Command {
     Serve(ServeArgs),
     /// Connect to a host.
     Connect(ConnectArgs),
+    /// Decode video for a client that runs `connect` with
+    /// `--decoder-process on`, on standard input and output. Not for
+    /// people to run.
+    Decoder,
     /// Print the key pin of the host's or the client's identity.
     Pin {
         /// The directory of the identity.
@@ -212,6 +220,18 @@ pub enum Audio {
     Off,
 }
 
+/// The command a client runs itself with to start its decoder process.
+pub const DECODER_COMMAND: &str = "decoder";
+
+/// Where a client decodes the host's video (Section 11.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecoderPlacement {
+    /// In the client's own process, which is faster.
+    InProcess,
+    /// In a separate process, which isolates it from the session.
+    SeparateProcess,
+}
+
 /// Where `qdp connect` shows the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presentation {
@@ -246,6 +266,8 @@ pub struct ConnectArgs {
     pub presentation: Presentation,
     /// Whether to decode in hardware or software.
     pub decoder: CodecPreference,
+    /// Where to decode the host's video.
+    pub decoder_process: DecoderPlacement,
     /// Which way to share the clipboard, if at all.
     pub clipboard: Option<ClipboardDirections>,
     /// Whether to play the host's sound.
@@ -350,6 +372,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
     match arguments.next().as_deref() {
         Some("serve") => parse_serve(arguments).map(Command::Serve),
         Some("connect") => parse_connect(arguments).map(Command::Connect),
+        Some(DECODER_COMMAND) => Ok(Command::Decoder),
         Some("pin") => {
             let mut identity = None;
             let mut role = Role::Host;
@@ -523,6 +546,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         output: None,
         presentation: Presentation::Window,
         decoder: CodecPreference::Auto,
+        decoder_process: DecoderPlacement::InProcess,
         clipboard: Some(ClipboardDirections::Both),
         audio: Audio::On,
         microphone: Microphone::Off,
@@ -542,6 +566,18 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--decoder" => {
                 connect.decoder =
                     parse_preference("--decoder", &value("--decoder", &mut arguments)?)?
+            }
+            "--decoder-process" => {
+                connect.decoder_process = match value("--decoder-process", &mut arguments)?.as_str()
+                {
+                    "on" => DecoderPlacement::SeparateProcess,
+                    "off" => DecoderPlacement::InProcess,
+                    other => {
+                        return Err(error(format!(
+                            "--decoder-process must be on or off, not {other}"
+                        )));
+                    }
+                }
             }
             "--clipboard" => {
                 connect.clipboard = parse_clipboard(&value("--clipboard", &mut arguments)?)?
@@ -743,6 +779,21 @@ mod tests {
         assert_eq!(connect.identity, PathBuf::from("keys"));
         assert!(parse_line(&format!("connect 192.0.2.7 --pin {pin} --token t --user u")).is_err());
         assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
+        assert_eq!(connect.decoder_process, DecoderPlacement::InProcess);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --decoder-process on"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.decoder_process, DecoderPlacement::SeparateProcess);
+        assert!(
+            parse_line(&format!(
+                "connect 192.0.2.7 --pin {pin} --token t --decoder-process maybe"
+            ))
+            .is_err()
+        );
+        assert_eq!(parse_line("decoder").unwrap(), Command::Decoder);
         assert!(parse_line("connect nowhere --pin x --token t").is_err());
     }
 

@@ -94,7 +94,12 @@ encoder it uses, and `--encoder software` or `--encoder hardware` forces one.
 Clients decode on the GPU where they can: on Macs with hardware AV1 decoding
 (Apple M3 and newer) through VideoToolbox, falling back to software decoding
 elsewhere or if the hardware cannot handle a stream. `--decoder software` or
-`--decoder hardware` forces one.
+`--decoder hardware` forces one. `qdp connect --decoder-process on` decodes in
+a separate process, so that a decoder bug a malicious host's stream exploits
+cannot reach the session's keys, clipboard or input; a decoder process that
+fails is replaced. It costs some speed, since each picture is copied between
+the processes: `cargo run --release -p qdp-codec --example
+decoder_process_benchmark` measures how much on a given machine.
 
 The client draws the host's pointer as its own, so moving it has no network
 latency, and follows the host's pointer when an application moves it. Hosts
