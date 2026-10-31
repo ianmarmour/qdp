@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
-    DisplaySize, EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator, HostDesktop,
-    HostOptions, InputQueue, OpenedDesktop, ResumptionSlot, RuntimeError, SharedClipboard,
-    TestPattern,
+    DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator,
+    HostDesktop, HostOptions, InputQueue, OpenedDesktop, ResumptionSlot, RuntimeError,
+    SharedClipboard, TestPattern,
 };
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
@@ -37,7 +37,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::args::{
-    Audio, Command, ConnectArgs, Presentation, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
+    Audio, Command, ConnectArgs, LockPolicy, Presentation, ServeArgs, SourceKind, USAGE,
+    format_pin, parse_args,
 };
 use crate::sink::CliSink;
 
@@ -207,6 +208,7 @@ async fn serve(args: ServeArgs) -> CliResult {
     let source_kind = args.source;
     let clipboard_directions = args.clipboard;
     let audio_setting = args.audio;
+    let lock_policy = args.lock;
     let state_directory = Arc::new(args.identity.clone());
     // What the host can inject is found once, before any client connects,
     // so that no input device exists for a client that has not
@@ -257,7 +259,12 @@ async fn serve(args: ServeArgs) -> CliResult {
                             Audio::Off => HostAudio::default(),
                         },
                         open: Box::new(move || {
-                            Box::pin(open_desktop(source_kind, (width, height), state_directory))
+                            Box::pin(open_desktop(
+                                source_kind,
+                                (width, height),
+                                state_directory,
+                                lock_policy,
+                            ))
                         }),
                     };
                     let result = qdp_runtime::serve(connection, ticket, &options, desktop).await;
@@ -317,18 +324,44 @@ fn shared_clipboard(directions: Option<ClipboardDirections>) -> Option<SharedCli
 }
 
 /// Opens a session's desktop once its client has authenticated: what it
-/// streams, as [`open_source`] opens it, and an input injector for it.
+/// streams, as [`open_source`] opens it, an input injector for it, and,
+/// when it streams the screen, the lock that `lock` asks for.
 async fn open_desktop(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
+    lock: LockPolicy,
 ) -> Result<OpenedDesktop, RuntimeError> {
-    let source = open_source(kind, size, state_directory)
+    let (source, streamed) = open_source(kind, size, state_directory)
         .await
         .map_err(RuntimeError::Capture)?;
     let (width, height) = source.size();
     let injector = qdp_desktop::input_injector(width as u32, height as u32);
-    Ok(OpenedDesktop { source, injector })
+    let lock = match (streamed, lock) {
+        (Streamed::Screen, LockPolicy::Lock) => Some(Box::new(lock_desktop) as DesktopLock),
+        (Streamed::TestPattern, _) | (_, LockPolicy::Leave) => None,
+    };
+    Ok(OpenedDesktop {
+        source,
+        injector,
+        lock,
+    })
+}
+
+/// Locks this machine's desktop, or says why it cannot.
+fn lock_desktop() {
+    if let Err(error) = qdp_desktop::lock_desktop() {
+        warn!(%error, "cannot lock the desktop");
+    }
+}
+
+/// What a session streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Streamed {
+    /// The screen.
+    Screen,
+    /// The test pattern.
+    TestPattern,
 }
 
 /// Opens what a session streams: the screen, or a `size` test pattern.
@@ -338,8 +371,11 @@ async fn open_source(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
-) -> Result<Box<dyn FrameSource>, String> {
-    let test_pattern = || Box::new(TestPattern::new(size.0, size.1)) as Box<dyn FrameSource>;
+) -> Result<(Box<dyn FrameSource>, Streamed), String> {
+    let test_pattern = || {
+        let pattern = Box::new(TestPattern::new(size.0, size.1)) as Box<dyn FrameSource>;
+        (pattern, Streamed::TestPattern)
+    };
     if kind == SourceKind::TestPattern {
         return Ok(test_pattern());
     }
@@ -347,7 +383,7 @@ async fn open_source(
         .await
         .map_err(|error| error.to_string())?;
     match (screen, kind) {
-        (Ok(screen), _) => Ok(screen),
+        (Ok(screen), _) => Ok((screen, Streamed::Screen)),
         (Err(error), SourceKind::Auto) => {
             warn!(%error, "streaming a test pattern instead of the screen");
             Ok(test_pattern())

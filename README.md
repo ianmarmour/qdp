@@ -67,6 +67,16 @@ To use a password instead of a token, pass `--user NAME` on both sides with the
 password in the `QDP_PASSWORD` environment variable; it is checked with
 SCRAM-SHA-256-PLUS, so it never crosses the network.
 
+If the connection drops, for example when the network changes, the client
+reconnects on its own without the token or password, with a single-use token
+the host gave it, which stays valid for five minutes after the connection ends;
+`qdp serve --resume SECONDS` changes how long, and `--resume 0` turns it off.
+When a session ends other than by the client disconnecting, because the network
+dropped, a newer session replaced it or the host stopped, the host locks its
+desktop so that it is not left unlocked: through logind on Linux, which GNOME,
+KDE and `swayidle` lock for, and with the system's own lock on macOS and
+Windows. `qdp serve --lock off` leaves the desktop as it is.
+
 On Linux the host encodes on the GPU through VA-API when the GPU can encode
 AV1 (AMD RDNA 3 or newer, Intel Arc or newer), and otherwise falls back to
 software encoding. It needs the GPU's VA-API driver, which desktop

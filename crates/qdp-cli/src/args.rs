@@ -45,6 +45,9 @@ Serve options:
   --resume SECONDS     How long a client whose connection dropped may
                        reconnect without its credentials, 0 for never
                        (default 300)
+  --lock on|off        Lock this machine's desktop when a session ends other
+                       than by its client disconnecting, as when the network
+                       drops (default on)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -159,6 +162,19 @@ pub struct ServeArgs {
     /// How long resumption tokens remain valid after their connection
     /// ends, or `None` to issue none.
     pub resumption: Option<Duration>,
+    /// What happens to the desktop when a session ends other than by its
+    /// client disconnecting.
+    pub lock: LockPolicy,
+}
+
+/// What a host does with its desktop when a session ends other than by its
+/// client disconnecting (Section 11.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LockPolicy {
+    /// The desktop is locked, so that it is not left unlocked.
+    Lock,
+    /// The desktop is left as it is.
+    Leave,
 }
 
 /// What the client's touchpad does (Section 8.4.6).
@@ -347,6 +363,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         audio: Audio::On,
         passthrough: PassthroughPolicy::GameControllers,
         resumption: Some(qdp_runtime::DEFAULT_RESUMPTION_LIFETIME),
+        lock: LockPolicy::Lock,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -388,6 +405,13 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     )));
                 }
                 serve.resumption = (seconds > 0).then(|| Duration::from_secs(seconds));
+            }
+            "--lock" => {
+                serve.lock = match value("--lock", &mut arguments)?.as_str() {
+                    "on" => LockPolicy::Lock,
+                    "off" => LockPolicy::Leave,
+                    other => return Err(error(format!("--lock must be on or off, not {other}"))),
+                }
             }
             other => return Err(error(format!("unknown option: {other}"))),
         }
@@ -573,6 +597,12 @@ mod tests {
         };
         assert_eq!(serve.resumption, Some(Duration::from_secs(60)));
         assert!(parse_line("serve --token abc --resume 100000").is_err());
+        assert_eq!(serve.lock, LockPolicy::Lock);
+        let Command::Serve(serve) = parse_line("serve --token abc --lock off").unwrap() else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.lock, LockPolicy::Leave);
+        assert!(parse_line("serve --token abc --lock maybe").is_err());
         assert!(parse_line("serve").is_err());
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }

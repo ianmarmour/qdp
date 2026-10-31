@@ -362,7 +362,15 @@ fn host_desktop(
         input_classes: input_classes(&*injector, PassthroughPolicy::default()),
         clipboard,
         audio,
-        open: Box::new(move || Box::pin(async move { Ok(OpenedDesktop { source, injector }) })),
+        open: Box::new(move || {
+            Box::pin(async move {
+                Ok(OpenedDesktop {
+                    source,
+                    injector,
+                    lock: None,
+                })
+            })
+        }),
     }
 }
 
@@ -574,6 +582,7 @@ async fn wrong_password_is_refused() {
                     Ok(OpenedDesktop {
                         source: test_pattern(),
                         injector: Box::new(NoInput),
+                        lock: None,
                     })
                 })
             }
@@ -2215,7 +2224,9 @@ async fn deferred_presentations_are_reported() {
 }
 
 /// A client that authenticates replaces the desktop's current session,
-/// which the host closes with `QDP_SESSION_REPLACED` (Section 2.1).
+/// which the host closes with `QDP_SESSION_REPLACED` (Section 2.1). The
+/// replaced session locks the desktop, and the one whose client
+/// disconnected does not (Section 11.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_session_replaces_older() {
     let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
@@ -2226,24 +2237,43 @@ async fn newer_session_replaces_older() {
     authenticator.add_token(TOKEN.to_vec());
     let options = Arc::new(host_options(authenticator));
     let admission = Admission::default();
-    let _host = tokio::spawn(async move {
+    let locks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let host_locks = Arc::clone(&locks);
+    let host = tokio::spawn(async move {
+        let mut sessions = Vec::new();
         for _ in 0..2 {
             let incoming = endpoint.accept().await.expect("a client");
             let ticket = admission.admit(incoming.remote_address().ip()).unwrap();
             let options = Arc::clone(&options);
-            tokio::spawn(async move {
+            let locks = Arc::clone(&host_locks);
+            sessions.push(tokio::spawn(async move {
                 let connection = incoming.establish().await.unwrap();
-                let desktop = host_desktop(
-                    test_pattern(),
-                    Box::new(NoInput),
-                    None,
-                    HostAudio::default(),
-                );
+                let desktop = HostDesktop {
+                    open: Box::new(move || {
+                        Box::pin(async move {
+                            Ok(OpenedDesktop {
+                                source: test_pattern(),
+                                injector: Box::new(NoInput),
+                                lock: Some(Box::new(move || {
+                                    locks.fetch_add(1, Ordering::SeqCst);
+                                })),
+                            })
+                        })
+                    }),
+                    ..host_desktop(
+                        test_pattern(),
+                        Box::new(NoInput),
+                        None,
+                        HostAudio::default(),
+                    )
+                };
                 serve(connection, ticket, &options, desktop).await
-            });
+            }));
         }
-        // Keep the endpoint open for the sessions.
-        std::future::pending::<()>().await;
+        // The endpoint stays open until both sessions have ended.
+        for session in sessions {
+            let _ = session.await;
+        }
     });
 
     let first_frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2287,6 +2317,11 @@ async fn newer_session_replaces_older() {
         format!("{replaced:?}").contains("error_code: 11"),
         "{replaced:?}"
     );
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host's sessions end in time")
+        .unwrap();
+    assert_eq!(locks.load(Ordering::SeqCst), 1);
 }
 
 /// A client that authenticated once reconnects with the resumption token
