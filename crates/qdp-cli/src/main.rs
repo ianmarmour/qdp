@@ -16,18 +16,23 @@ mod sink;
 mod window;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     ClientCredentials, ClientOptions, ClientSummary, DisplaySize, EncoderTuning, FrameSink,
-    HostAuthenticator, HostOptions, InputQueue, TestPattern,
+    FrameSource, HostAuthenticator, HostOptions, InputQueue, TestPattern,
 };
 use tracing::{error, info, warn};
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::args::{Command, ConnectArgs, Presentation, ServeArgs, USAGE, format_pin, parse_args};
+use crate::args::{
+    Command, ConnectArgs, Presentation, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
+};
 use crate::sink::CliSink;
 
 /// The environment variable that holds the password for `--user`.
@@ -35,6 +40,9 @@ const PASSWORD_VARIABLE: &str = "QDP_PASSWORD";
 
 /// The environment variable that sets the log level.
 const LOG_VARIABLE: &str = "QDP_LOG";
+
+/// The log target of the D-Bus library the screen capture portal uses.
+const ZBUS_TARGET: &str = "zbus";
 
 /// The exit code for a command line the program does not understand.
 const USAGE_EXIT_CODE: u8 = 2;
@@ -91,15 +99,21 @@ fn main() -> ExitCode {
 }
 
 /// Sets up logging to standard error at the level `QDP_LOG` names, `info` by
-/// default.
+/// default. D-Bus warnings from zbus, which reports internal details of
+/// portal calls, are shown only when they are errors.
 fn init_logging() {
     let level = std::env::var(LOG_VARIABLE)
         .ok()
         .and_then(|level| level.parse::<LevelFilter>().ok())
         .unwrap_or(LevelFilter::INFO);
+    let filter = Targets::new()
+        .with_default(level)
+        .with_target(ZBUS_TARGET, level.min(LevelFilter::ERROR));
     tracing_subscriber::fmt()
         .with_max_level(level)
         .with_writer(std::io::stderr)
+        .finish()
+        .with(filter)
         .init();
 }
 
@@ -163,6 +177,8 @@ async fn serve(args: ServeArgs) -> CliResult {
         .map_err(|error| error.to_string())?;
     info!(%address, pin = format_pin(pin), "serving; clients connect with --pin {}", format_pin(pin));
     let (width, height) = args.size;
+    let source_kind = args.source;
+    let state_directory = Arc::new(args.identity.clone());
 
     loop {
         tokio::select! {
@@ -171,6 +187,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                     return Ok(());
                 };
                 let options = Arc::clone(&options);
+                let state_directory = Arc::clone(&state_directory);
                 tokio::spawn(async move {
                     let connection = match connection {
                         Ok(connection) => connection,
@@ -181,8 +198,16 @@ async fn serve(args: ServeArgs) -> CliResult {
                     };
                     let peer = connection.quic().remote_address();
                     info!(%peer, "client connected");
-                    let source = Box::new(TestPattern::new(width, height));
-                    let injector = qdp_desktop::input_injector(width as u32, height as u32);
+                    let source = match open_source(source_kind, (width, height), state_directory).await {
+                        Ok(source) => source,
+                        Err(error) => {
+                            warn!(%peer, %error, "cannot capture the screen");
+                            return;
+                        }
+                    };
+                    let (source_width, source_height) = source.size();
+                    let injector =
+                        qdp_desktop::input_injector(source_width as u32, source_height as u32);
                     match qdp_runtime::serve(connection, &options, source, injector).await {
                         Ok(summary) => info!(
                             %peer,
@@ -202,6 +227,31 @@ async fn serve(args: ServeArgs) -> CliResult {
                 return Ok(());
             }
         }
+    }
+}
+
+/// Opens what a session streams: the screen, or a `size` test pattern.
+/// Capturing the screen can wait for the user to choose a monitor, so it runs
+/// on a blocking thread.
+async fn open_source(
+    kind: SourceKind,
+    size: (usize, usize),
+    state_directory: Arc<PathBuf>,
+) -> Result<Box<dyn FrameSource>, String> {
+    let test_pattern = || Box::new(TestPattern::new(size.0, size.1)) as Box<dyn FrameSource>;
+    if kind == SourceKind::TestPattern {
+        return Ok(test_pattern());
+    }
+    let screen = tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory))
+        .await
+        .map_err(|error| error.to_string())?;
+    match (screen, kind) {
+        (Ok(screen), _) => Ok(screen),
+        (Err(error), SourceKind::Auto) => {
+            warn!(%error, "streaming a test pattern instead of the screen");
+            Ok(test_pattern())
+        }
+        (Err(error), _) => Err(error),
     }
 }
 

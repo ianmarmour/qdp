@@ -18,6 +18,17 @@ On Debian and Ubuntu that is `sudo apt install nasm`, on Arch
 needed on Intel Macs). Apple Silicon Macs need only the Xcode command line
 tools.
 
+On Linux, screen capture uses PipeWire, whose development files and libclang
+are needed to build it:
+
+```bash
+sudo dnf install pipewire-devel clang-devel
+```
+
+On Debian and Ubuntu that is `sudo apt install libpipewire-0.3-dev libclang-dev`,
+and on Arch `sudo pacman -S pipewire clang`. To build without screen capture
+instead, pass `--no-default-features --features window`.
+
 Build the `qdp` command, which is both the host and the client:
 
 ```bash
@@ -82,7 +93,12 @@ sudo usermod -aG input "$USER"
 Log out and in again for the group change to apply. Without access the host
 logs a warning and ignores input.
 
-For now the host streams a test pattern. Screen capture comes next. Run `qdp help` for every option, and set `QDP_LOG=debug`
+The host streams its screen. On Linux it asks the desktop, through the
+ScreenCast portal that GNOME, KDE and wlroots compositors provide, which
+monitor to share; the first time, the desktop shows a dialog, and the choice is
+remembered in the identity directory for later sessions. If the screen cannot
+be captured the host streams a test pattern instead, and `--source screen` or
+`--source test-pattern` forces one. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail.
 
 ## Crates

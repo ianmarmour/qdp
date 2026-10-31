@@ -41,7 +41,7 @@ pub use decoder::Av1Decoder;
 pub use encoder::{
     Av1Encoder, EncodedFrame, EncoderSettings, FASTEST_SPEED, KeyFrameRequest, tile_count,
 };
-pub use frame::Yuv420Frame;
+pub use frame::{Rgb32Order, Yuv420Frame};
 pub use obu::{Obu, ObuType, parse_obus, to_qdp_temporal_unit};
 pub use sequence::SequenceHeader;
 #[cfg(target_os = "linux")]
