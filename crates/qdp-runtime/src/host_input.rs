@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 use qdp::input::{InputEvent, total_delta};
 use qdp::message::{
-    DeviceId, DeviceKind, KeyboardLeds, KeyboardReport, MouseReport, PointerButtons, PointerReport,
-    TextReport,
+    DeviceId, DeviceKind, KeyboardInfo, KeyboardLeds, KeyboardReport, MouseReport, PointerButtons,
+    PointerKind, PointerReport, TextReport,
 };
 use tracing::debug;
 
@@ -114,6 +114,20 @@ pub trait InputInjector: Send {
     fn supports_text(&self) -> bool {
         false
     }
+
+    /// Returns the pointer mode the host's applications call for (Section
+    /// 8.9): relative while one has hidden and captured the pointer, as games
+    /// do, and absolute otherwise.
+    fn pointer_mode(&mut self) -> PointerKind {
+        PointerKind::Absolute
+    }
+
+    /// Selects the keyboard layout matching the client's, where the platform
+    /// allows, so that each key produces the character printed on the user's
+    /// keyboard (Section 8.2.3).
+    fn set_keyboard_layout(&mut self, info: &KeyboardInfo) {
+        let _ = info;
+    }
 }
 
 /// An injector that performs nothing, for hosts that only stream.
@@ -215,9 +229,21 @@ impl StandardInput {
         actions
     }
 
-    /// Returns the actions a report calls for. A report that does not parse
-    /// is skipped.
-    pub(crate) fn apply(&mut self, event: &InputEvent, positions: Positions) -> Vec<InputAction> {
+    /// Returns the actions a report calls for in pointer mode `mode`. A report
+    /// that does not parse is skipped. In absolute mode the mouse's motion
+    /// only updates its baseline, and in relative mode the pointer's
+    /// positions are ignored; both apply buttons and scrolling (Section 8.7,
+    /// rule 5).
+    pub(crate) fn apply(
+        &mut self,
+        event: &InputEvent,
+        positions: Positions,
+        mode: PointerKind,
+    ) -> Vec<InputAction> {
+        let positions = match mode {
+            PointerKind::Relative => Positions::Ignore,
+            _ => positions,
+        };
         let Some(state) = self.devices.get_mut(&event.device_id) else {
             return Vec::new();
         };
@@ -265,7 +291,7 @@ impl StandardInput {
                 };
                 let dx = total_delta(previous.motion_x_total, report.motion_x_total);
                 let dy = total_delta(previous.motion_y_total, report.motion_y_total);
-                if dx != 0 || dy != 0 {
+                if (dx != 0 || dy != 0) && mode == PointerKind::Relative {
                     actions.push(InputAction::MouseMoveBy { dx, dy });
                 }
                 button_actions(previous.buttons, report.buttons, &mut actions);
@@ -431,7 +457,11 @@ mod tests {
         report.set_held(0xe1, true); // Left Shift
         report.set_held(0x04, true); // A
         report.consumer_keys[0] = 0x00e9; // Volume Increment
-        let actions = input.apply(&event(KEYBOARD, report.to_bytes()), Positions::Apply);
+        let actions = input.apply(
+            &event(KEYBOARD, report.to_bytes()),
+            Positions::Apply,
+            PointerKind::Absolute,
+        );
         assert_eq!(
             actions,
             [
@@ -443,7 +473,11 @@ mod tests {
         report.set_held(0x04, false);
         report.set_held(0x05, true);
         report.consumer_keys[0] = 0;
-        let actions = input.apply(&event(KEYBOARD, report.to_bytes()), Positions::Apply);
+        let actions = input.apply(
+            &event(KEYBOARD, report.to_bytes()),
+            Positions::Apply,
+            PointerKind::Absolute,
+        );
         assert_eq!(
             actions,
             [
@@ -472,7 +506,11 @@ mod tests {
             pan_total: 0,
         };
         assert_eq!(
-            input.apply(&event(POINTER, report.to_bytes()), Positions::Apply),
+            input.apply(
+                &event(POINTER, report.to_bytes()),
+                Positions::Apply,
+                PointerKind::Absolute
+            ),
             [
                 InputAction::PointerMoveTo {
                     x: 100 * 256,
@@ -491,7 +529,11 @@ mod tests {
             ..report
         };
         assert_eq!(
-            input.apply(&event(POINTER, next.to_bytes()), Positions::Apply),
+            input.apply(
+                &event(POINTER, next.to_bytes()),
+                Positions::Apply,
+                PointerKind::Absolute
+            ),
             [
                 InputAction::ButtonUp(PointerButton::Left),
                 InputAction::Scroll {
@@ -515,15 +557,60 @@ mod tests {
             pan_total: 0,
         };
         assert_eq!(
-            input.apply(&event(POINTER, report.to_bytes()), Positions::Ignore),
+            input.apply(
+                &event(POINTER, report.to_bytes()),
+                Positions::Ignore,
+                PointerKind::Absolute
+            ),
             [InputAction::ButtonDown(PointerButton::Left)]
         );
         assert_eq!(
-            input.apply(&event(POINTER, report.to_bytes()), Positions::Apply),
+            input.apply(
+                &event(POINTER, report.to_bytes()),
+                Positions::Apply,
+                PointerKind::Absolute
+            ),
             [InputAction::PointerMoveTo {
                 x: 10 * 256,
                 y: 20 * 256
             }]
+        );
+    }
+
+    /// Each mode applies only its own device's motion, and buttons from both.
+    #[test]
+    fn applies_the_current_modes_motion() {
+        let mut input = devices();
+        let mouse = MouseReport {
+            buttons: PointerButtons::RIGHT,
+            motion_x_total: 512,
+            motion_y_total: 0,
+            wheel_total: 0,
+            pan_total: 0,
+        };
+        assert_eq!(
+            input.apply(
+                &event(MOUSE, mouse.to_bytes()),
+                Positions::Apply,
+                PointerKind::Absolute
+            ),
+            [InputAction::ButtonDown(PointerButton::Right)]
+        );
+        let pointer = PointerReport {
+            buttons: PointerButtons::default(),
+            x: 5 * 256,
+            y: 5 * 256,
+            wheel_total: 0,
+            pan_total: 0,
+        };
+        assert!(
+            input
+                .apply(
+                    &event(POINTER, pointer.to_bytes()),
+                    Positions::Apply,
+                    PointerKind::Relative
+                )
+                .is_empty()
         );
     }
 
@@ -540,7 +627,11 @@ mod tests {
             pan_total: 0,
         };
         assert_eq!(
-            input.apply(&event(MOUSE, report.to_bytes()), Positions::Apply),
+            input.apply(
+                &event(MOUSE, report.to_bytes()),
+                Positions::Apply,
+                PointerKind::Relative
+            ),
             [
                 InputAction::MouseMoveBy { dx: 512, dy: -256 },
                 InputAction::ButtonDown(PointerButton::Right)
@@ -552,12 +643,20 @@ mod tests {
         );
         assert!(
             input
-                .apply(&event(MOUSE, report.to_bytes()), Positions::Apply)
+                .apply(
+                    &event(MOUSE, report.to_bytes()),
+                    Positions::Apply,
+                    PointerKind::Relative
+                )
                 .is_empty()
         );
         assert!(
             input
-                .apply(&event(KEYBOARD, vec![1, 2]), Positions::Apply)
+                .apply(
+                    &event(KEYBOARD, vec![1, 2]),
+                    Positions::Apply,
+                    PointerKind::Absolute
+                )
                 .is_empty()
         );
     }

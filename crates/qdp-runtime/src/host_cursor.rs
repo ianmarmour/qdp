@@ -191,6 +191,21 @@ impl HostCursor {
         index
     }
 
+    /// Returns a warp to where the pointer is now, as the host sends when it
+    /// switches to absolute mode (Section 8.9), if a capture has seen it.
+    pub(crate) fn warp_to_current(&mut self) -> Option<CursorWarp> {
+        let (x, y) = self.last_position?;
+        self.expected = Some((x, y));
+        self.last_warp += 1;
+        let subunits = |value: i64| SignedVarInt::new(value * SUBUNITS).unwrap_or_default();
+        Some(CursorWarp {
+            warp_id: self.latest_warp(),
+            flags: WarpFlags::default(),
+            x: subunits(x),
+            y: subunits(y),
+        })
+    }
+
     /// Returns a warp if the pointer moved to `position` without the
     /// client's input.
     fn warp(&mut self, (x, y): (i32, i32), now: Instant) -> Option<CursorWarp> {
@@ -386,6 +401,20 @@ mod tests {
         );
         assert_eq!(cursor.latest_warp().0.into_inner(), 2);
         assert!(!moved[0].flags.contains(WarpFlags::FOLLOW));
+    }
+
+    /// The warp sent on switching to absolute mode names the last position.
+    #[test]
+    fn warps_to_the_current_position() {
+        let mut cursor = HostCursor::default();
+        assert!(cursor.warp_to_current().is_none());
+        cursor.update(&visible((7, 9), &shape(4, 1)), Instant::now());
+        let warp = cursor.warp_to_current().unwrap();
+        assert_eq!(
+            (warp.x.into_inner(), warp.y.into_inner()),
+            (7 * 256, 9 * 256)
+        );
+        assert_eq!(warp.warp_id, cursor.latest_warp());
     }
 
     /// Oversized shapes are cropped to 512 pixels.

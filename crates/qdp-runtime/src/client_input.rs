@@ -183,9 +183,40 @@ impl Default for ClientDevices {
 }
 
 impl ClientDevices {
-    /// Sets the mode `POINTER_MODE` announced (Section 8.9).
-    pub(crate) fn set_pointer_mode(&mut self, mode: PointerKind) {
+    /// Switches to the mode `POINTER_MODE` announced (Section 8.9), returning
+    /// the reports that move held buttons to the new mode's device: first the
+    /// new device holding them, then the old one releasing them (Section 8.6,
+    /// rule 8).
+    pub(crate) fn set_pointer_mode(&mut self, mode: PointerKind) -> Vec<PendingReport> {
+        let relative = |kind: PointerKind| kind == PointerKind::Relative;
+        if relative(mode) == relative(self.pointer_mode) {
+            self.pointer_mode = mode;
+            return Vec::new();
+        }
+        let held = std::mem::take(match self.pointer_mode {
+            PointerKind::Relative => &mut self.mouse.buttons,
+            _ => &mut self.pointer.buttons,
+        });
         self.pointer_mode = mode;
+        if held == PointerButtons::default() {
+            return Vec::new();
+        }
+        match mode {
+            PointerKind::Relative => {
+                self.mouse.buttons = held;
+                vec![
+                    self.mouse_report(ReportKind::Transition),
+                    self.pointer_report(ReportKind::Transition),
+                ]
+            }
+            _ => {
+                self.pointer.buttons = held;
+                vec![
+                    self.pointer_report(ReportKind::Transition),
+                    self.mouse_report(ReportKind::Transition),
+                ]
+            }
+        }
     }
 
     /// Sets the desktop position of the monitor the window shows.
@@ -402,7 +433,8 @@ mod tests {
         assert_eq!(pressed[0].device_id, POINTER_ID);
         assert_eq!(pressed[0].kind, ReportKind::Transition);
 
-        devices.set_pointer_mode(PointerKind::Relative);
+        // The held button moves to the mouse.
+        assert_eq!(devices.set_pointer_mode(PointerKind::Relative).len(), 2);
         let scrolled = devices.reports(UserInput::Scroll {
             vertical: 120,
             horizontal: -3,
@@ -426,5 +458,31 @@ mod tests {
         let reports = devices.reports(UserInput::Text("é".repeat(200)));
         assert_eq!(reports.len(), 2);
         assert!(reports.iter().all(|report| report.device_id == TEXT_ID));
+    }
+
+    /// Switching modes moves held buttons to the new mode's device before the
+    /// old one releases them.
+    #[test]
+    fn moves_held_buttons_between_modes() {
+        let mut devices = ClientDevices::default();
+        devices.reports(UserInput::Button {
+            button: PointerButton::Left,
+            pressed: true,
+        });
+        let reports = devices.set_pointer_mode(PointerKind::Relative);
+        let devices_and_buttons: Vec<(DeviceId, u8)> = reports
+            .iter()
+            .map(|report| (report.device_id, report.data[0]))
+            .collect();
+        assert_eq!(devices_and_buttons, [(MOUSE_ID, 0x01), (POINTER_ID, 0x00)]);
+        assert!(
+            reports
+                .iter()
+                .all(|report| report.kind == ReportKind::Transition)
+        );
+        let back = devices.set_pointer_mode(PointerKind::Absolute);
+        assert_eq!(back[0].device_id, POINTER_ID);
+        assert_eq!(back[1].device_id, MOUSE_ID);
+        assert!(devices.set_pointer_mode(PointerKind::Absolute).is_empty());
     }
 }

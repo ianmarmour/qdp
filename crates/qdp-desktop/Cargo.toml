@@ -53,8 +53,5 @@ cpal = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
-[target.'cfg(windows)'.dev-dependencies]
-windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
-
 [lints]
 workspace = true

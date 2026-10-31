@@ -177,6 +177,8 @@ struct ActiveHost {
     clipboard: Option<ClipboardLink>,
     /// The audio streams.
     audio: HostAudioStreams,
+    /// The pointer mode the client was last told.
+    pointer_mode: PointerKind,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
@@ -188,7 +190,7 @@ pub async fn serve(
     connection: QdpConnection,
     options: &HostOptions,
     source: Box<dyn FrameSource>,
-    injector: Box<dyn InputInjector>,
+    mut injector: Box<dyn InputInjector>,
     clipboard: Option<SharedClipboard>,
     audio: HostAudio,
 ) -> Result<HostSummary, RuntimeError> {
@@ -234,6 +236,14 @@ pub async fn serve(
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
                 answer_attach(&mut driver, &attach, &mut devices, &*injector)?;
+            }
+            HostEvent::Message(ControlMessage::KeyboardInfo(keyboard)) => {
+                info!(
+                    language = keyboard.language,
+                    layout = keyboard.layout,
+                    "client keyboard"
+                );
+                injector.set_keyboard_layout(&keyboard);
             }
             HostEvent::Message(ControlMessage::DisplayRequest(request)) => {
                 request_id = request.request_id;
@@ -311,6 +321,7 @@ pub async fn serve(
         cursor: HostCursor::default(),
         clipboard,
         audio,
+        pointer_mode: PointerKind::Absolute,
     };
     for keyboard in active.devices.keyboards() {
         active.send_keyboard_output(keyboard)?;
@@ -453,6 +464,7 @@ impl ActiveHost {
                 self.send(ack.to_bytes())?;
             }
             if self.pending_since.is_none() && now >= next_frame_at {
+                self.follow_pointer_mode()?;
                 if self.network_behind(frame_interval) {
                     self.stats.frame_skipped();
                 } else {
@@ -485,7 +497,7 @@ impl ActiveHost {
             } else {
                 Positions::Apply
             };
-            let actions = self.devices.apply(event, positions);
+            let actions = self.devices.apply(event, positions, self.pointer_mode);
             self.inject(&actions);
         }
     }
@@ -499,6 +511,29 @@ impl ActiveHost {
                 warn!(?action, error, "input not applied");
             }
         }
+    }
+
+    /// Tells the client when the host's applications capture or release the
+    /// pointer (Section 8.9). On returning to absolute mode the host warps the
+    /// client's cursor to where the pointer is.
+    fn follow_pointer_mode(&mut self) -> Result<(), RuntimeError> {
+        let mode = self.injector.pointer_mode();
+        if mode == self.pointer_mode {
+            return Ok(());
+        }
+        self.pointer_mode = mode;
+        info!(?mode, "pointer mode");
+        let session = self.driver.session();
+        session.send(&ControlMessage::PointerMode(PointerMode {
+            mode,
+            confinement: None,
+        }))?;
+        if mode == PointerKind::Absolute {
+            if let Some(warp) = self.cursor.warp_to_current() {
+                session.send(&ControlMessage::CursorWarp(warp))?;
+            }
+        }
+        Ok(())
     }
 
     /// Carries out what clipboard sharing asks for.
@@ -679,6 +714,14 @@ impl ActiveHost {
             HostEvent::Message(ControlMessage::DeviceDetach(detach)) => {
                 let actions = self.devices.detach(detach.device_id);
                 self.inject(&actions);
+            }
+            HostEvent::Message(ControlMessage::KeyboardInfo(keyboard)) => {
+                info!(
+                    language = keyboard.language,
+                    layout = keyboard.layout,
+                    "client keyboard"
+                );
+                self.injector.set_keyboard_layout(&keyboard);
             }
             HostEvent::Message(ControlMessage::AudioRequest(request)) => {
                 // The host answers every request (Section 7.3).

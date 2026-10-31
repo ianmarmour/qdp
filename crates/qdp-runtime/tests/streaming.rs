@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use qdp::auth::scram::ScramCredentials;
-use qdp::message::CursorImage;
+use qdp::message::{CursorImage, KeyboardInfo, LayoutPlatform, PointerKind, PointerMode};
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
@@ -163,9 +163,13 @@ fn expected_actions() -> Vec<InputAction> {
     ]
 }
 
-/// Records the actions the host performs.
+/// Records the actions the host performs, and the keyboard layout it is asked
+/// to select.
 #[derive(Debug, Clone, Default)]
-struct Recorder(Arc<Mutex<Vec<InputAction>>>);
+struct Recorder(
+    Arc<Mutex<Vec<InputAction>>>,
+    Arc<Mutex<Option<KeyboardInfo>>>,
+);
 
 impl InputInjector for Recorder {
     fn inject(&mut self, action: &InputAction) -> Result<(), String> {
@@ -179,6 +183,10 @@ impl InputInjector for Recorder {
 
     fn supports_text(&self) -> bool {
         true
+    }
+
+    fn set_keyboard_layout(&mut self, info: &KeyboardInfo) {
+        *self.1.lock().unwrap() = Some(info.clone());
     }
 }
 
@@ -265,6 +273,11 @@ fn client_options(credentials: ClientCredentials) -> ClientOptions {
         },
         decoder_threads: 2,
         decoder: CodecPreference::Software,
+        keyboard_info: Some(KeyboardInfo {
+            language: "en-GB".to_owned(),
+            layout_platform: LayoutPlatform::XKB,
+            layout: "gb".to_owned(),
+        }),
     }
 }
 
@@ -434,6 +447,16 @@ async fn input_reaches_the_host() {
         .unwrap();
     assert!(summary.input_reports >= 6);
     assert_eq!(*recorder.0.lock().unwrap(), expected_actions());
+    let keyboard = recorder
+        .1
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the client's keyboard");
+    assert_eq!(
+        (keyboard.language.as_str(), keyboard.layout.as_str()),
+        ("en-GB", "gb")
+    );
 }
 
 /// A pointer the host captures apart from its frames reaches the client as
@@ -818,4 +841,117 @@ async fn audio_flows_both_ways() {
         .frequency()
         .expect("the client's microphone played");
     assert!((200.0..240.0).contains(&heard), "heard {heard} Hz");
+}
+
+/// An injector that records actions and reports a pointer captured by an
+/// application, as a game would.
+#[derive(Debug, Clone, Default)]
+struct CapturedPointer(Recorder);
+
+impl InputInjector for CapturedPointer {
+    fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        self.0.inject(action)
+    }
+
+    fn description(&self) -> &str {
+        "captured pointer"
+    }
+
+    fn pointer_mode(&mut self) -> PointerKind {
+        PointerKind::Relative
+    }
+}
+
+/// Moves the mouse once the host switches to relative mode, then streams a
+/// little longer.
+struct ModeWatcher {
+    /// Where the input goes.
+    input: InputHandle,
+    /// The pointer modes the host announced.
+    modes: Vec<PointerKind>,
+    /// The frames presented since the switch.
+    frames_since: Option<usize>,
+    /// The frames presented.
+    frames: usize,
+}
+
+impl FrameSink for ModeWatcher {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        if let Some(frames) = &mut self.frames_since {
+            *frames += 1;
+        }
+        if self.frames_since.is_some_and(|frames| frames > 30) || self.frames >= CLIPBOARD_FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+
+    fn set_pointer_mode(&mut self, mode: &PointerMode) {
+        self.modes.push(mode.mode);
+        if mode.mode == PointerKind::Relative {
+            assert!(self.input.send(UserInput::MouseMoved { dx: 5.0, dy: -3.0 }));
+            self.frames_since = Some(0);
+        }
+    }
+}
+
+/// When an application captures the host's pointer, the client switches to
+/// relative mode and its motion arrives as relative moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relative_mode_moves_the_mouse() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let injector = CapturedPointer::default();
+    let (address, pin, _host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(injector.clone()),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let (handle, queue) = input_channel();
+    let mut watcher = ModeWatcher {
+        input: handle,
+        modes: Vec::new(),
+        frames_since: None,
+        frames: 0,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut watcher,
+            Some(queue),
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("the session finishes in time")
+    .unwrap();
+    assert_eq!(
+        watcher.modes,
+        [PointerKind::Absolute, PointerKind::Relative]
+    );
+    let actions = injector.0.0.lock().unwrap().clone();
+    assert!(
+        actions.contains(&InputAction::MouseMoveBy {
+            dx: 5 * 256,
+            dy: -3 * 256
+        }),
+        "{actions:?}"
+    );
 }

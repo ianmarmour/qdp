@@ -433,6 +433,7 @@ async fn receive(
         display: DEFAULT_DISPLAY,
         decoder_threads: 0,
         decoder: args.decoder,
+        keyboard_info: qdp_desktop::keyboard_info(),
     };
     let result = tokio::select! {
         result = qdp_runtime::run(

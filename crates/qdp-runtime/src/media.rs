@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use qdp::message::{BLOCK_SIZE, BlockGrid, BlockSet, CursorImage, FrameNumber};
+use qdp::message::{BLOCK_SIZE, BlockGrid, BlockSet, CursorImage, FrameNumber, PointerMode};
 use qdp_codec::Yuv420Frame;
 
 use crate::RuntimeError;
@@ -228,6 +228,13 @@ pub trait FrameSink {
     /// Moves the cursor where the host's pointer went (Section 9.4).
     fn warp_cursor(&mut self, warp: CursorWarp) {
         let _ = warp;
+    }
+
+    /// Follows the host's pointer mode (Section 8.9): in relative mode the
+    /// sink captures the pointer and reports raw motion, and in absolute mode
+    /// it releases it, keeping it within any confinement.
+    fn set_pointer_mode(&mut self, mode: &PointerMode) {
+        let _ = mode;
     }
 }
 

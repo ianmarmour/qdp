@@ -105,7 +105,11 @@ wlroots compositors), and the X11 clipboard otherwise, which GNOME keeps in step
 with its Wayland clipboard.
 
 The client sends its keyboard, mouse and scrolling to the host while its
-window has focus. On Linux the host performs them through uinput virtual
+window has focus. When an application on a Windows host hides and confines the
+pointer, as games do, the client captures its pointer and sends raw mouse
+motion; Ctrl+Alt+Shift+Z releases it, and a click captures it again. The client
+also tells the host its keyboard layout, and Windows hosts switch to the same
+one. On Linux the host performs them through uinput virtual
 devices, which works under any Wayland compositor or X11, and needs write
 access to `/dev/uinput`. To allow it for members of the `input` group:
 
