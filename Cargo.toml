@@ -17,6 +17,8 @@ license = "Apache-2.0"
 repository = "https://github.com/ianmarmour/qdp"
 
 [workspace.dependencies]
+# The system clipboard on Linux, macOS and Windows.
+arboard = { version = "3.7.0", default-features = false }
 # The ScreenCast portal, for screen capture on Linux.
 ashpd = { version = "0.13.13", default-features = false, features = ["screencast", "tokio"] }
 bytes = { version = "1.10", default-features = false, features = ["std"] }
@@ -24,7 +26,7 @@ libc = { version = "0.2.172", default-features = false }
 # Apple's frameworks, for hardware video decoding on macOS.
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSCursor", "NSGraphicsContext", "NSImage", "NSImageRep", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSCursor", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-foundation", "objc2-core-graphics"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGEvent", "CGEventSource", "CGEventTypes", "CGImage", "CGRemoteOperation"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSObject", "NSString"] }
@@ -37,6 +39,10 @@ qdp-codec = { path = "crates/qdp-codec" }
 qdp-desktop = { path = "crates/qdp-desktop", default-features = false }
 qdp-quic = { path = "crates/qdp-quic" }
 qdp-runtime = { path = "crates/qdp-runtime" }
+# The X11 and Wayland clipboards, to find content password managers mark
+# secret, which arboard does not report.
+wl-clipboard-rs = { version = "0.9.3", default-features = false }
+x11rb = { version = "0.13", default-features = false }
 # PipeWire, which delivers captured screens on Linux.
 pipewire = { version = "0.10.1", default-features = false }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
@@ -54,7 +60,7 @@ tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["ansi", "fmt", "std"] }
 unicode-normalization = { version = "0.1.24", default-features = false }
 # Windows' own interfaces, for screen capture and input on Windows hosts.
-windows = { version = "0.62.2", default-features = false, features = ["std", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.62.2", default-features = false, features = ["std", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse"] }
 # Client-side decorations (wayland-csd-adwaita) give the window a title bar on
 # GNOME, which draws none for Wayland clients.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita", "wayland-dlopen", "x11"] }

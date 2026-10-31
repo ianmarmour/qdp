@@ -21,6 +21,7 @@ mod auth;
 mod client;
 mod client_cursor;
 mod client_input;
+mod clipboard;
 mod encode_thread;
 mod host;
 mod host_cursor;
@@ -38,6 +39,7 @@ use thiserror::Error;
 pub use auth::{ClientCredentials, HostAuthenticator};
 pub use client::{ClientOptions, ClientSummary, DisplaySize, run};
 pub use client_input::{InputHandle, InputQueue, UserInput, input_channel};
+pub use clipboard::{Clipboard, ClipboardDirections, SharedClipboard};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
 pub use host_input::{InputAction, InputInjector, NoInput, PointerButton};
 pub use media::{
@@ -81,6 +83,9 @@ pub enum RuntimeError {
     /// The frame source failed.
     #[error("capture failed: {0}")]
     Capture(String),
+    /// The system clipboard could not be shared.
+    #[error("clipboard failed: {0}")]
+    Clipboard(String),
 }
 
 /// Returns whether `error` is the peer closing the connection normally, with

@@ -22,6 +22,10 @@ use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportEr
 use tracing::{debug, info, warn};
 
 use crate::auth::HostAuthExchange;
+use crate::clipboard::{
+    self, ClipboardDirections, ClipboardLink, ClipboardOutput, ClipboardWorker, SharedClipboard,
+    Side,
+};
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
 use crate::host_cursor::{CursorUpdate, HostCursor};
 use crate::host_input::{InputAction, InputInjector, Positions, StandardInput};
@@ -102,9 +106,10 @@ pub struct HostSummary {
     pub input_reports: u64,
 }
 
-/// Returns the capabilities the host advertises.
-fn capabilities() -> Vec<Capability> {
-    vec![
+/// Returns the capabilities the host advertises, with clipboard sharing in
+/// `clipboard`'s directions if it shares one.
+fn capabilities(clipboard: Option<ClipboardDirections>) -> Vec<Capability> {
+    let mut capabilities = vec![
         Capability::VideoCodec(VideoCodecCapability {
             codec: VideoCodec::AV1,
             profiles: Av1Profiles::MAIN,
@@ -120,7 +125,11 @@ fn capabilities() -> Vec<Capability> {
                 .union(InputClasses::POINTER)
                 .union(InputClasses::MOUSE),
         ),
-    ]
+    ];
+    if let Some(directions) = clipboard {
+        capabilities.push(clipboard::capability(directions));
+    }
+    capabilities
 }
 
 /// Converts a size to a variable-length integer, saturating.
@@ -161,25 +170,35 @@ struct ActiveHost {
     output_sequence: u64,
     /// The cursor the client draws.
     cursor: HostCursor,
+    /// Clipboard sharing, if the session negotiated it.
+    clipboard: Option<ClipboardLink>,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
 /// client disconnects, streaming frames from `source`, which is captured and
-/// encoded on a thread of its own, and performing the client's input with
-/// `injector`.
+/// encoded on a thread of its own, performing the client's input with
+/// `injector`, and sharing `clipboard`, if given, with the client.
 pub async fn serve(
     connection: QdpConnection,
     options: &HostOptions,
     source: Box<dyn FrameSource>,
     injector: Box<dyn InputInjector>,
+    clipboard: Option<SharedClipboard>,
 ) -> Result<HostSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
+    // The clipboard is read from the start, so that its content is known
+    // when the session becomes active.
+    let directions = clipboard.as_ref().map(|shared| shared.directions);
+    let worker = clipboard
+        .map(|shared| ClipboardWorker::spawn(shared.clipboard))
+        .transpose()
+        .map_err(RuntimeError::Clipboard)?;
     let config = HostConfig {
         host_hello: HostHello {
             minor_version: MinorVersion::CURRENT,
             host_name: options.host_name.clone(),
             auth_methods: options.authenticator.methods(),
-            capabilities: capabilities(),
+            capabilities: capabilities(directions),
         },
         failure_reason: FAILURE_REASON.to_owned(),
     };
@@ -238,8 +257,13 @@ pub async fn serve(
         image_serial: ImageSerial::default(),
     }))?;
     session.start()?;
+    let clipboard = match (worker, session.negotiated()) {
+        (Some(worker), Some(negotiated)) => ClipboardLink::new(Side::Host, negotiated, worker),
+        _ => None,
+    };
     driver.flush().await?;
-    driver.accept_streams(client_stream_policy);
+    let receive_limit = clipboard.as_ref().and_then(ClipboardLink::receive_limit);
+    driver.accept_streams(move |header| client_stream_policy(header, receive_limit));
     info!(
         width,
         height,
@@ -276,9 +300,14 @@ pub async fn serve(
         summary: HostSummary::default(),
         output_sequence: 0,
         cursor: HostCursor::default(),
+        clipboard,
     };
     for keyboard in active.devices.keyboards() {
         active.send_keyboard_output(keyboard)?;
+    }
+    if let Some(link) = &mut active.clipboard {
+        let outputs = link.start();
+        active.apply_clipboard(outputs)?;
     }
     let result = active
         .run(Duration::from_secs(1) / options.frame_rate.max(1))
@@ -290,13 +319,13 @@ pub async fn serve(
 }
 
 /// Returns what the host does with a stream the client opened (Section
-/// 3.5.2). Clipboard data is not requested yet, so none is expected.
-fn client_stream_policy(header: &StreamHeader) -> StreamPolicy {
+/// 3.5.2), given the clipboard data the host accepts.
+fn client_stream_policy(header: &StreamHeader, clipboard_limit: Option<usize>) -> StreamPolicy {
     match header {
         StreamHeader::CursorImage | StreamHeader::HidOutput { .. } => {
             StreamPolicy::Forbid(ErrorCode::STREAM_CREATION_ERROR)
         }
-        StreamHeader::ClipboardData { .. } => StreamPolicy::Refuse(ErrorCode::REQUEST_CANCELLED),
+        StreamHeader::ClipboardData { .. } => clipboard::data_stream_policy(clipboard_limit),
         StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
     }
 }
@@ -376,6 +405,7 @@ impl ActiveHost {
                 self.sender.poll_timeout(smoothed_rtt),
                 self.input.poll_timeout(smoothed_rtt),
                 Some(self.stats.next_log_at()),
+                self.clipboard.as_ref().map(ClipboardLink::poll_timeout),
             ]
             .into_iter()
             .flatten()
@@ -387,7 +417,8 @@ impl ActiveHost {
             match input {
                 Ok(DriverInput::Event(event)) => self.handle_event(event)?,
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(&datagram)?,
-                Ok(DriverInput::Deadline | DriverInput::Wake | DriverInput::Stream(_)) => {}
+                Ok(DriverInput::Stream(stream)) => self.handle_stream(stream)?,
+                Ok(DriverInput::Deadline | DriverInput::Wake) => {}
                 Err(error) if is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
             }
@@ -404,6 +435,10 @@ impl ActiveHost {
             }
             let events = self.input.handle_timeout(smoothed_rtt, now);
             self.apply_input(&events);
+            if let Some(link) = &mut self.clipboard {
+                let outputs = link.service(now);
+                self.apply_clipboard(outputs)?;
+            }
             if let Some(ack) = self.input.poll_ack(now) {
                 self.send(ack.to_bytes())?;
             }
@@ -454,6 +489,38 @@ impl ActiveHost {
                 warn!(?action, error, "input not applied");
             }
         }
+    }
+
+    /// Carries out what clipboard sharing asks for.
+    fn apply_clipboard(&mut self, outputs: Vec<ClipboardOutput>) -> Result<(), RuntimeError> {
+        for output in outputs {
+            match output {
+                ClipboardOutput::Message(message) => self.driver.session().send(&message)?,
+                ClipboardOutput::Data { request_id, data } => {
+                    let header = StreamHeader::ClipboardData { request_id }.to_bytes();
+                    self.driver
+                        .connection()
+                        .send_stream([header, data].concat());
+                }
+                ClipboardOutput::Publish(text) => {
+                    if let Some(link) = &self.clipboard {
+                        link.publish(text);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Acts on a stream from the client.
+    fn handle_stream(&mut self, stream: qdp_quic::ReceivedStream) -> Result<(), RuntimeError> {
+        let (StreamHeader::ClipboardData { request_id }, Some(link)) =
+            (stream.header, &mut self.clipboard)
+        else {
+            return Ok(());
+        };
+        let outputs = link.handle_data(request_id, stream.data);
+        self.apply_clipboard(outputs)
     }
 
     /// Tells the client about the pointer a capture saw: new images on
@@ -602,6 +669,12 @@ impl ActiveHost {
             HostEvent::Message(ControlMessage::DeviceDetach(detach)) => {
                 let actions = self.devices.detach(detach.device_id);
                 self.inject(&actions);
+            }
+            HostEvent::Message(message) => {
+                if let Some(link) = &mut self.clipboard {
+                    let outputs = link.handle_message(&message, Instant::now());
+                    self.apply_clipboard(outputs)?;
+                }
             }
             _ => {}
         }

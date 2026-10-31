@@ -10,10 +10,11 @@ use qdp::message::CursorImage;
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
-    ClientCredentials, ClientOptions, CursorShape, CursorState, CursorWarp, DisplaySize,
-    EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAuthenticator, HostOptions, InputAction,
-    InputHandle, InputInjector, InputQueue, NoInput, PointerButton, RuntimeError, SinkControl,
-    TestPattern, UserInput, WarpKind, input_channel, run, serve,
+    ClientCredentials, ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState,
+    CursorWarp, DisplaySize, EncoderTuning, FrameInfo, FrameSink, FrameSource, HostAuthenticator,
+    HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput, PointerButton,
+    RuntimeError, SharedClipboard, SinkControl, TestPattern, UserInput, WarpKind, input_channel,
+    run, serve,
 };
 
 /// The width of the streamed frames.
@@ -219,6 +220,7 @@ fn start_host(
     authenticator: HostAuthenticator,
     source: Box<dyn FrameSource>,
     injector: Box<dyn InputInjector>,
+    clipboard: Option<SharedClipboard>,
 ) -> (
     SocketAddr,
     KeyPin,
@@ -241,9 +243,24 @@ fn start_host(
     };
     let task = tokio::spawn(async move {
         let connection = endpoint.accept().await.expect("a client")?;
-        serve(connection, &options, source, injector).await
+        serve(connection, &options, source, injector, clipboard).await
     });
     (address, pin, task)
+}
+
+/// Returns the options of the test client.
+fn client_options(credentials: ClientCredentials) -> ClientOptions {
+    ClientOptions {
+        client_name: "qdp-streaming-test/0.1.0".to_owned(),
+        credentials,
+        display: DisplaySize {
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            refresh_millihertz: 60_000,
+        },
+        decoder_threads: 2,
+        decoder: CodecPreference::Software,
+    }
 }
 
 /// Connects a client with `credentials` and streams until the collector stops,
@@ -262,23 +279,13 @@ async fn stream(
             HostVerification::PinnedKeys(vec![pin]),
         )
         .await?;
-    let options = ClientOptions {
-        client_name: "qdp-streaming-test/0.1.0".to_owned(),
-        credentials,
-        display: DisplaySize {
-            width: WIDTH as u32,
-            height: HEIGHT as u32,
-            refresh_millihertz: 60_000,
-        },
-        decoder_threads: 2,
-        decoder: CodecPreference::Software,
-    };
+    let options = client_options(credentials);
     let (handle, queue) = input.unzip();
     let mut collector = Collector {
         input: handle,
         ..Collector::default()
     };
-    let summary = run(connection, &options, &mut collector, queue).await?;
+    let summary = run(connection, &options, &mut collector, queue, None).await?;
     assert_eq!(summary.frames_presented, FRAMES as u64);
     assert_eq!(summary.decode_failures, 0);
     endpoint.wait_idle().await;
@@ -309,7 +316,7 @@ fn check_frames(collector: &Collector) {
 async fn stream_with_token() {
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
-    let (address, pin, host) = start_host(authenticator, test_pattern(), Box::new(NoInput));
+    let (address, pin, host) = start_host(authenticator, test_pattern(), Box::new(NoInput), None);
     let collector = tokio::time::timeout(
         TEST_TIMEOUT,
         stream(address, pin, ClientCredentials::Token(TOKEN.to_vec()), None),
@@ -336,7 +343,7 @@ async fn stream_with_password() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput));
+    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput), None);
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "pencil".to_owned(),
@@ -356,7 +363,7 @@ async fn wrong_password_is_refused() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput));
+    let (address, pin, _host) = start_host(authenticator, test_pattern(), Box::new(NoInput), None);
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "wrong".to_owned(),
@@ -374,8 +381,12 @@ async fn input_reaches_the_host() {
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
     let recorder = Recorder::default();
-    let (address, pin, host) =
-        start_host(authenticator, test_pattern(), Box::new(recorder.clone()));
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(recorder.clone()),
+        None,
+    );
     let credentials = ClientCredentials::Token(TOKEN.to_vec());
     tokio::time::timeout(
         TEST_TIMEOUT,
@@ -404,7 +415,8 @@ async fn cursor_reaches_the_client() {
         captures: 0,
         shapes: [pointer_shape(4, 0x11), pointer_shape(6, 0x22)],
     };
-    let (address, pin, _host) = start_host(authenticator, Box::new(source), Box::new(NoInput));
+    let (address, pin, _host) =
+        start_host(authenticator, Box::new(source), Box::new(NoInput), None);
     let credentials = ClientCredentials::Token(TOKEN.to_vec());
     let collector = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials, None))
         .await
@@ -423,4 +435,123 @@ async fn cursor_reaches_the_client() {
     let warp = collector.warps[0];
     assert_eq!(warp.position, (40.0, 30.0));
     assert_eq!(warp.kind, WarpKind::Move);
+}
+
+/// A clipboard in memory, shared with the test.
+#[derive(Debug, Clone, Default)]
+struct MemoryClipboard(Arc<Mutex<Option<String>>>);
+
+impl MemoryClipboard {
+    /// Returns a clipboard holding `text`.
+    fn holding(text: &str) -> Self {
+        Self(Arc::new(Mutex::new(Some(text.to_owned()))))
+    }
+
+    /// Returns the clipboard's text.
+    fn get(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Replaces the clipboard's text, as a user copying would.
+    fn put(&self, text: &str) {
+        *self.0.lock().unwrap() = Some(text.to_owned());
+    }
+}
+
+impl Clipboard for MemoryClipboard {
+    fn text(&mut self) -> Result<Option<String>, String> {
+        Ok(self.get())
+    }
+
+    fn set_text(&mut self, text: &str) -> Result<(), String> {
+        self.put(text);
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "memory"
+    }
+}
+
+/// The text the host copies once the client's clipboard reached it.
+const HOST_COPY: &str = "copied on the host";
+
+/// The most frames the clipboard test streams before giving up.
+const CLIPBOARD_FRAMES: usize = 1200;
+
+/// Streams until the host's copy reaches the client's clipboard, copying it
+/// on the host once the client's clipboard has reached the host.
+struct ClipboardWatcher {
+    /// The host's clipboard.
+    host: MemoryClipboard,
+    /// The client's clipboard.
+    client: MemoryClipboard,
+    /// Whether the client's text reached the host.
+    reached_host: bool,
+    /// The frames presented.
+    frames: usize,
+}
+
+impl FrameSink for ClipboardWatcher {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        if !self.reached_host && self.host.get().as_deref() == Some("copied on the client") {
+            self.reached_host = true;
+            self.host.put(HOST_COPY);
+        }
+        let done = self.client.get().as_deref() == Some(HOST_COPY);
+        if done || self.frames >= CLIPBOARD_FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+}
+
+/// Text copied on the client reaches the host's clipboard at the start of the
+/// session, and text copied on the host later reaches the client's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clipboard_is_shared() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let host_clipboard = MemoryClipboard::holding("the host's old text");
+    let client_clipboard = MemoryClipboard::holding("copied on the client");
+    let (address, pin, _host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        Some(SharedClipboard {
+            clipboard: Box::new(host_clipboard.clone()),
+            directions: ClipboardDirections::Both,
+        }),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let mut watcher = ClipboardWatcher {
+        host: host_clipboard.clone(),
+        client: client_clipboard.clone(),
+        reached_host: false,
+        frames: 0,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    let clipboard = SharedClipboard {
+        clipboard: Box::new(client_clipboard.clone()),
+        directions: ClipboardDirections::Both,
+    };
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(connection, &options, &mut watcher, None, Some(clipboard)),
+    )
+    .await
+    .expect("the clipboard is shared in time")
+    .unwrap();
+    assert!(watcher.reached_host, "the client's text reached the host");
+    assert_eq!(client_clipboard.get().as_deref(), Some(HOST_COPY));
 }
