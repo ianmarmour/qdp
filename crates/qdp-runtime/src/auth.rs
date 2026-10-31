@@ -1,18 +1,22 @@
 //! Authentication policy for hosts and credentials for clients (Section 4.4).
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use qdp::auth::precis::prepare_username;
 use qdp::auth::scram::{
     ChannelBinding, ClientFirst, ScramClient, ScramClientFinal, ScramCredentials, ScramServer,
 };
-use qdp::message::{AuthMethod, AuthResult, AuthStatus};
+use qdp::message::{AuthMethod, AuthResult, AuthStatus, ResumptionToken};
 use qdp::session::AuthResponse;
 use ring::rand::{SecureRandom, SystemRandom};
 use tracing::{debug, info};
 
 use crate::RuntimeError;
 use crate::admission::AdmissionTicket;
+use crate::resumption::{
+    ClientIdentity, DEFAULT_RESUMPTION_LIFETIME, IssuedToken, ResumptionTokens,
+};
 
 /// The number of random bytes in a SCRAM nonce.
 const NONCE_LENGTH: usize = 18;
@@ -32,7 +36,7 @@ const UNKNOWN_USER_ITERATIONS: u32 = PASSWORD_ITERATIONS;
 const SALT_LENGTH: usize = 16;
 
 /// Returns `length` bytes from the system's secure random number generator.
-fn random_bytes<const LENGTH: usize>() -> Result<[u8; LENGTH], RuntimeError> {
+pub(crate) fn random_bytes<const LENGTH: usize>() -> Result<[u8; LENGTH], RuntimeError> {
     let mut bytes = [0; LENGTH];
     SystemRandom::new()
         .fill(&mut bytes)
@@ -41,7 +45,7 @@ fn random_bytes<const LENGTH: usize>() -> Result<[u8; LENGTH], RuntimeError> {
 }
 
 /// Compares two byte strings in time that depends only on their lengths.
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len()
         && left
             .iter()
@@ -50,7 +54,8 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-/// Which clients a host accepts.
+/// Which clients a host accepts. Clones share the resumption tokens they
+/// issue.
 #[derive(Debug, Clone)]
 pub struct HostAuthenticator {
     /// Tokens accepted with the `TOKEN` method.
@@ -59,16 +64,32 @@ pub struct HostAuthenticator {
     users: HashMap<String, ScramCredentials>,
     /// The secret from which credentials for unknown user names derive.
     secret: [u8; HOST_SECRET_LENGTH],
+    /// The resumption tokens issued to sessions (Section 4.4.7).
+    resumption: ResumptionTokens,
+    /// How long resumption tokens remain valid after their connection ends,
+    /// or `None` if the host issues none.
+    resumption_lifetime: Option<Duration>,
 }
 
 impl HostAuthenticator {
-    /// Creates an authenticator that accepts no one.
+    /// Creates an authenticator that accepts no one, and that gives the
+    /// clients it accepts resumption tokens valid for
+    /// [`DEFAULT_RESUMPTION_LIFETIME`].
     pub fn new() -> Result<Self, RuntimeError> {
         Ok(Self {
             tokens: Vec::new(),
             users: HashMap::new(),
             secret: random_bytes()?,
+            resumption: ResumptionTokens::default(),
+            resumption_lifetime: Some(DEFAULT_RESUMPTION_LIFETIME),
         })
+    }
+
+    /// Sets how long the resumption tokens given to clients remain valid
+    /// after their connection ends, or with `None` stops giving them
+    /// (Section 4.4.7).
+    pub fn set_resumption_lifetime(&mut self, lifetime: Option<Duration>) {
+        self.resumption_lifetime = lifetime;
     }
 
     /// Accepts `token` with the `TOKEN` method.
@@ -93,16 +114,52 @@ impl HostAuthenticator {
         Ok(())
     }
 
-    /// Returns the methods to offer, in order of preference.
+    /// Returns the methods to offer, in order of preference: `TOKEN` also
+    /// for resumption tokens, if the host accepts anyone to issue them to.
     pub fn methods(&self) -> Vec<AuthMethod> {
         let mut methods = Vec::new();
-        if !self.tokens.is_empty() {
+        let accepts_anyone = !self.tokens.is_empty() || !self.users.is_empty();
+        if !self.tokens.is_empty() || (accepts_anyone && self.resumption_lifetime.is_some()) {
             methods.push(AuthMethod::TOKEN);
         }
         if !self.users.is_empty() {
             methods.push(AuthMethod::SCRAM_SHA_256_PLUS);
         }
         methods
+    }
+
+    /// Issues a resumption token that resumes `identity`, if the host gives
+    /// them, returning the message that gives it to the client and the guard
+    /// that starts its lifetime when dropped, as the connection ends.
+    pub(crate) fn issue_resumption(
+        &self,
+        identity: ClientIdentity,
+    ) -> Result<Option<(ResumptionToken, IssuedToken)>, RuntimeError> {
+        self.resumption_lifetime
+            .map(|lifetime| self.resumption.issue(identity, lifetime))
+            .transpose()
+    }
+
+    /// Returns who presents `token` with the `TOKEN` method: the holder of
+    /// one of the host's tokens, or the identity a valid resumption token
+    /// resumes, which it redeems.
+    fn token_identity(&self, token: &[u8]) -> Option<ClientIdentity> {
+        if let Some(position) = self
+            .tokens
+            .iter()
+            .position(|accepted| constant_time_eq(accepted, token))
+        {
+            return Some(ClientIdentity::Token(position));
+        }
+        self.resumption_lifetime?;
+        let identity = self.resumption.redeem(token, Instant::now())?;
+        // A token resumes only an identity the host still accepts.
+        let accepted = match &identity {
+            ClientIdentity::Token(position) => *position < self.tokens.len(),
+            ClientIdentity::User(user) => self.users.contains_key(user),
+        };
+        info!(accepted, "resumption token redeemed");
+        accepted.then_some(identity)
     }
 }
 
@@ -120,6 +177,8 @@ pub(crate) struct HostAuthExchange<'a> {
     /// Whether that user is locked after repeated failures, so that the
     /// attempt fails whatever the client proves.
     locked: bool,
+    /// Who the client authenticated as, once it has.
+    identity: Option<ClientIdentity>,
 }
 
 impl<'a> HostAuthExchange<'a> {
@@ -131,7 +190,13 @@ impl<'a> HostAuthExchange<'a> {
             scram: None,
             user: None,
             locked: false,
+            identity: None,
         }
+    }
+
+    /// Returns who the client authenticated as, once it has.
+    pub(crate) fn identity(&self) -> Option<&ClientIdentity> {
+        self.identity.as_ref()
     }
 
     /// Returns the user the last attempt was for, if it was a SCRAM attempt
@@ -149,18 +214,17 @@ impl<'a> HostAuthExchange<'a> {
     ) -> AuthResponse {
         self.user = None;
         self.locked = false;
+        self.identity = None;
         match method {
             AuthMethod::TOKEN => {
-                let accepted = self
-                    .authenticator
-                    .tokens
-                    .iter()
-                    .any(|token| constant_time_eq(token, auth_data));
-                info!(accepted, "token authentication");
-                if accepted {
-                    AuthResponse::Accept(Vec::new())
-                } else {
-                    AuthResponse::Reject
+                let identity = self.authenticator.token_identity(auth_data);
+                info!(accepted = identity.is_some(), "token authentication");
+                match identity {
+                    Some(identity) => {
+                        self.identity = Some(identity);
+                        AuthResponse::Accept(Vec::new())
+                    }
+                    None => AuthResponse::Reject,
                 }
             }
             AuthMethod::SCRAM_SHA_256_PLUS => self.start_scram(auth_data, ticket),
@@ -208,6 +272,7 @@ impl<'a> HostAuthExchange<'a> {
             }
             Ok(server_final) => {
                 info!("SCRAM authentication succeeded");
+                self.identity = self.user.clone().map(ClientIdentity::User);
                 AuthResponse::Accept(server_final)
             }
             Err(error) => {
@@ -371,6 +436,53 @@ mod tests {
             AuthResponse::Reject
         );
         assert_eq!(exchange.user(), None);
+    }
+
+    /// A resumption token works once, and only for an identity the host
+    /// accepts; a host that issues none offers `TOKEN` only for its own
+    /// tokens.
+    #[test]
+    fn resumption_tokens() {
+        let mut authenticator = HostAuthenticator::new().unwrap();
+        authenticator.add_user(
+            "ian".to_owned(),
+            ScramCredentials::derive("pencil", b"salt".to_vec(), 4096).unwrap(),
+        );
+        assert_eq!(
+            authenticator.methods(),
+            [AuthMethod::TOKEN, AuthMethod::SCRAM_SHA_256_PLUS]
+        );
+        let admission = Admission::default();
+        let ticket = ticket(&admission);
+        let mut exchange = HostAuthExchange::new(&authenticator, binding());
+        for (user, accepted) in [("ian", true), ("ada", false)] {
+            let identity = ClientIdentity::User(user.to_owned());
+            let (message, _guard) = authenticator
+                .issue_resumption(identity.clone())
+                .unwrap()
+                .unwrap();
+            let response = exchange.start(AuthMethod::TOKEN, &message.token, &ticket);
+            assert_eq!(
+                response == AuthResponse::Accept(Vec::new()),
+                accepted,
+                "{user}"
+            );
+            assert_eq!(exchange.identity() == Some(&identity), accepted, "{user}");
+            assert_eq!(
+                exchange.start(AuthMethod::TOKEN, &message.token, &ticket),
+                AuthResponse::Reject
+            );
+        }
+
+        authenticator.set_resumption_lifetime(None);
+        assert_eq!(authenticator.methods(), [AuthMethod::SCRAM_SHA_256_PLUS]);
+        assert!(
+            authenticator
+                .issue_resumption(ClientIdentity::User("ian".to_owned()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(HostAuthenticator::new().unwrap().methods().is_empty());
     }
 
     /// A client and host complete a SCRAM exchange, and a wrong password

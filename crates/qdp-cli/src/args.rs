@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use qdp_codec::CodecPreference;
 use qdp_desktop::DeviceSelector;
@@ -41,6 +42,9 @@ Serve options:
                        through to this machine's applications (default games,
                        game controllers only; all includes keyboards, mice
                        and security keys)
+  --resume SECONDS     How long a client whose connection dropped may
+                       reconnect without its credentials, 0 for never
+                       (default 300)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -86,6 +90,9 @@ const DEFAULT_QUANTIZER: u8 = 100;
 
 /// The default directory of the host's identity.
 const DEFAULT_IDENTITY_DIR: &str = "qdp-identity";
+
+/// The longest `--resume` a host accepts: a day.
+const MAX_RESUME_SECONDS: u64 = 86_400;
 
 /// The default server name sent in the TLS handshake.
 pub const DEFAULT_SERVER_NAME: &str = "qdp-host";
@@ -149,6 +156,9 @@ pub struct ServeArgs {
     pub audio: Audio,
     /// Which HID devices clients may pass through.
     pub passthrough: PassthroughPolicy,
+    /// How long resumption tokens remain valid after their connection
+    /// ends, or `None` to issue none.
+    pub resumption: Option<Duration>,
 }
 
 /// What the client's touchpad does (Section 8.4.6).
@@ -336,6 +346,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         clipboard: Some(ClipboardDirections::Both),
         audio: Audio::On,
         passthrough: PassthroughPolicy::GameControllers,
+        resumption: Some(qdp_runtime::DEFAULT_RESUMPTION_LIFETIME),
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -368,6 +379,15 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             "--audio" => serve.audio = parse_audio(&value("--audio", &mut arguments)?)?,
             "--passthrough" => {
                 serve.passthrough = parse_passthrough(&value("--passthrough", &mut arguments)?)?;
+            }
+            "--resume" => {
+                let seconds: u64 = parse("--resume", &mut arguments)?;
+                if seconds > MAX_RESUME_SECONDS {
+                    return Err(error(format!(
+                        "--resume must be at most {MAX_RESUME_SECONDS} seconds"
+                    )));
+                }
+                serve.resumption = (seconds > 0).then(|| Duration::from_secs(seconds));
             }
             other => return Err(error(format!("unknown option: {other}"))),
         }
@@ -540,6 +560,19 @@ mod tests {
         };
         assert_eq!(serve.audio, Audio::Off);
         assert!(parse_line("serve --token abc --audio loud").is_err());
+        assert_eq!(
+            serve.resumption,
+            Some(qdp_runtime::DEFAULT_RESUMPTION_LIFETIME)
+        );
+        let Command::Serve(serve) = parse_line("serve --token abc --resume 0").unwrap() else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.resumption, None);
+        let Command::Serve(serve) = parse_line("serve --token abc --resume 60").unwrap() else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.resumption, Some(Duration::from_secs(60)));
+        assert!(parse_line("serve --token abc --resume 100000").is_err());
         assert!(parse_line("serve").is_err());
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }

@@ -26,9 +26,9 @@ use qdp_runtime::{
     GamepadFeedback, HostAudio, HostAuthenticator, HostDesktop, HostOptions, InputAction,
     InputHandle, InputInjector, InputQueue, Microphone, NoInput, OpenedDesktop, PassthroughDevice,
     PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton,
-    PointerPosition, Presentation, PresentationTiming, RefreshMode, RuntimeError, SAMPLE_RATE,
-    SharedClipboard, SinkControl, TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind,
-    input_channel, input_classes, run, serve,
+    PointerPosition, Presentation, PresentationTiming, RefreshMode, ResumptionSlot, RuntimeError,
+    SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, TouchPhase, TouchPoint, UserInput,
+    WarpKind, input_channel, input_classes, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -379,7 +379,22 @@ fn start_host_with(
     let pin = identity.key_pin().unwrap();
     let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = endpoint.local_address().unwrap();
-    let options = HostOptions {
+    let options = host_options(authenticator);
+    let task = tokio::spawn(async move {
+        let incoming = endpoint.accept().await.expect("a client");
+        let ticket = Admission::default()
+            .admit(incoming.remote_address().ip())
+            .expect("the client is admitted");
+        let connection = incoming.establish().await?;
+        serve(connection, ticket, &options, desktop).await
+    });
+    (address, pin, task)
+}
+
+/// Returns the options of a test host that accepts clients with
+/// `authenticator`.
+fn host_options(authenticator: HostAuthenticator) -> HostOptions {
+    HostOptions {
         host_name: "loopback".to_owned(),
         authenticator,
         frame_rate: 60,
@@ -390,16 +405,7 @@ fn start_host_with(
             threads: 2,
         },
         passthrough: PassthroughPolicy::default(),
-    };
-    let task = tokio::spawn(async move {
-        let incoming = endpoint.accept().await.expect("a client");
-        let ticket = Admission::default()
-            .admit(incoming.remote_address().ip())
-            .expect("the client is admitted");
-        let connection = incoming.establish().await?;
-        serve(connection, ticket, &options, desktop).await
-    });
-    (address, pin, task)
+    }
 }
 
 /// Returns the options of the test client.
@@ -420,6 +426,7 @@ fn client_options(credentials: ClientCredentials) -> ClientOptions {
             layout_platform: LayoutPlatform::XKB,
             layout: "gb".to_owned(),
         }),
+        resumption: ResumptionSlot::default(),
     }
 }
 
@@ -431,20 +438,18 @@ async fn stream(
     credentials: ClientCredentials,
     input: Option<(InputHandle, InputQueue)>,
 ) -> Result<Collector, RuntimeError> {
-    let display = client_options(credentials.clone()).display;
-    stream_on(address, pin, credentials, input, display).await
+    stream_with(address, pin, client_options(credentials), input).await
 }
 
-/// Connects a client with `credentials` whose display is `display`, and
-/// streams until the collector stops, sending the test input if `input` is
-/// given.
-async fn stream_on(
+/// Connects a client with `options`, and streams until the collector stops,
+/// sending the test input if `input` is given.
+async fn stream_with(
     address: SocketAddr,
     pin: KeyPin,
-    credentials: ClientCredentials,
+    options: ClientOptions,
     input: Option<(InputHandle, InputQueue)>,
-    display: DisplaySize,
 ) -> Result<Collector, RuntimeError> {
+    let display = options.display;
     let endpoint = ClientEndpoint::bind(loopback()).unwrap();
     let connection = endpoint
         .connect(
@@ -453,10 +458,6 @@ async fn stream_on(
             HostVerification::PinnedKeys(vec![pin]),
         )
         .await?;
-    let options = ClientOptions {
-        display,
-        ..client_options(credentials)
-    };
     let (handle, queue) = input.unzip();
     let full_size = (display.width as usize, display.height as usize) >= (WIDTH, HEIGHT);
     let mut collector = Collector {
@@ -658,10 +659,13 @@ async fn video_scales_to_the_display() {
         refresh_millihertz: 60_000,
         scale_percent: DisplaySize::UNSCALED,
     };
-    let credentials = ClientCredentials::Token(TOKEN.to_vec());
+    let options = ClientOptions {
+        display,
+        ..client_options(ClientCredentials::Token(TOKEN.to_vec()))
+    };
     let collector = tokio::time::timeout(
         TEST_TIMEOUT,
-        stream_on(address, pin, credentials, Some(input_channel()), display),
+        stream_with(address, pin, options, Some(input_channel())),
     )
     .await
     .expect("streaming finishes in time")
@@ -2220,18 +2224,7 @@ async fn newer_session_replaces_older() {
     let address = endpoint.local_address().unwrap();
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
-    let options = Arc::new(HostOptions {
-        host_name: "loopback".to_owned(),
-        authenticator,
-        frame_rate: 60,
-        encoder: EncoderTuning {
-            preference: CodecPreference::Software,
-            speed: 10,
-            quantizer: 60,
-            threads: 2,
-        },
-        passthrough: PassthroughPolicy::default(),
-    });
+    let options = Arc::new(host_options(authenticator));
     let admission = Admission::default();
     let _host = tokio::spawn(async move {
         for _ in 0..2 {
@@ -2294,4 +2287,74 @@ async fn newer_session_replaces_older() {
         format!("{replaced:?}").contains("error_code: 11"),
         "{replaced:?}"
     );
+}
+
+/// A client that authenticated once reconnects with the resumption token
+/// the host gave it, which works only once, and is given a fresh one
+/// (Section 4.4.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnects_with_a_resumption_token() {
+    let identity = HostIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let pin = identity.key_pin().unwrap();
+    let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
+    let address = endpoint.local_address().unwrap();
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_user(
+        "ian".to_owned(),
+        ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
+    );
+    let options = Arc::new(host_options(authenticator));
+    let admission = Admission::default();
+    let _host = tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let ticket = admission.admit(incoming.remote_address().ip()).unwrap();
+            let options = Arc::clone(&options);
+            tokio::spawn(async move {
+                let connection = incoming.establish().await?;
+                let desktop = host_desktop(
+                    test_pattern(),
+                    Box::new(NoInput),
+                    None,
+                    HostAudio::default(),
+                );
+                serve(connection, ticket, &options, desktop).await
+            });
+        }
+    });
+
+    let resumption = ResumptionSlot::default();
+    let password = ClientCredentials::Password {
+        username: "ian".to_owned(),
+        password: "pencil".to_owned(),
+    };
+    let first = ClientOptions {
+        resumption: resumption.clone(),
+        ..client_options(password)
+    };
+    tokio::time::timeout(TEST_TIMEOUT, stream_with(address, pin, first, None))
+        .await
+        .expect("the first session finishes in time")
+        .unwrap();
+    let token = resumption
+        .take_credentials(Instant::now())
+        .expect("the host gave a resumption token");
+
+    let resumed = ClientOptions {
+        resumption: resumption.clone(),
+        ..client_options(token.clone())
+    };
+    let collector = tokio::time::timeout(TEST_TIMEOUT, stream_with(address, pin, resumed, None))
+        .await
+        .expect("the resumed session finishes in time")
+        .unwrap();
+    check_frames(&collector);
+    assert!(
+        resumption.is_valid(Instant::now()),
+        "a fresh token was given"
+    );
+
+    let reused = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, token, None))
+        .await
+        .expect("the attempt finishes in time");
+    assert!(matches!(reused, Err(RuntimeError::AuthenticationFailed(_))));
 }

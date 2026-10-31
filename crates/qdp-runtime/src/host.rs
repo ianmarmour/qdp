@@ -338,6 +338,7 @@ async fn serve_session(
             break;
         }
     }
+    let identity = auth.identity().cloned();
 
     // Only now is the desktop opened, before the messages the client
     // pipelined are processed (Section 11.2); the clipboard is read from now
@@ -412,6 +413,19 @@ async fn serve_session(
         image_serial: ImageSerial::default(),
     }))?;
     session.start()?;
+    // The client may reconnect with this token, once, until its lifetime
+    // after this connection ends (Section 4.4.7).
+    let resumption = match identity {
+        Some(identity) => options.authenticator.issue_resumption(identity)?,
+        None => None,
+    };
+    let _resumption = match resumption {
+        Some((message, guard)) => {
+            session.send(&ControlMessage::ResumptionToken(message))?;
+            Some(guard)
+        }
+        None => None,
+    };
     let clipboard = match (worker, session.negotiated()) {
         (Some(worker), Some(negotiated)) => ClipboardLink::new(Side::Host, negotiated, worker),
         _ => None,

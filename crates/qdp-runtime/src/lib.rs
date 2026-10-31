@@ -43,6 +43,7 @@ mod layout;
 mod lock_keys;
 mod media;
 mod rate_control;
+mod resumption;
 mod send_stats;
 mod stream_format;
 mod stream_ids;
@@ -81,6 +82,7 @@ pub use media::{
     PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl, TestPattern,
     WarpKind, changed_blocks,
 };
+pub use resumption::{DEFAULT_RESUMPTION_LIFETIME, ResumptionSlot};
 
 /// An error that ends a session.
 #[derive(Debug, Error)]

@@ -44,6 +44,7 @@ use crate::clipboard::{
 use crate::decode_thread::DecodeThread;
 use crate::lock_keys::LockSync;
 use crate::media::{CursorWarp, FrameInfo, FrameSink, PresentationTiming, SinkControl, WarpKind};
+use crate::resumption::ResumptionSlot;
 use crate::stream_format::StreamFormat;
 use crate::{ClientCredentials, RuntimeError, close_on_error};
 
@@ -110,6 +111,10 @@ pub struct ClientOptions {
     /// The user's input language and keyboard layout, sent so that the host
     /// can match them (Section 8.2.3).
     pub keyboard_info: Option<KeyboardInfo>,
+    /// Where the client keeps the resumption token the host gives it, with
+    /// which it can reconnect without the user's credentials (Section
+    /// 4.4.7).
+    pub resumption: ResumptionSlot,
 }
 
 /// What happened during one session.
@@ -316,6 +321,8 @@ struct ActiveClient<'a> {
     display_timing: DisplayTimingReports,
     /// The host monitor the client shows, once configured.
     monitor_id: Option<MonitorId>,
+    /// Where the host's resumption token is kept.
+    resumption: ResumptionSlot,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
@@ -332,6 +339,8 @@ pub async fn run(
 ) -> Result<ClientSummary, RuntimeError> {
     let quic = connection.quic().clone();
     let result = run_session(connection, options, sink, input, clipboard, audio).await;
+    // The resumption token's lifetime starts as the connection ends.
+    options.resumption.connection_ended(Instant::now());
     close_on_error(&quic, result)
 }
 
@@ -440,6 +449,7 @@ async fn run_session(
         display,
         display_timing: DisplayTimingReports::default(),
         monitor_id: None,
+        resumption: options.resumption.clone(),
     };
     if let Some(config) = display_config {
         active.configure(&config)?;
@@ -748,6 +758,10 @@ impl ActiveClient<'_> {
                     kind,
                 });
                 self.input.set_warp(warp.warp_id);
+            }
+            ControlMessage::ResumptionToken(token) => {
+                debug!(lifetime = ?token.lifetime, "resumption token received");
+                self.resumption.received(&token);
             }
             message => {
                 if let Some(link) = &mut self.clipboard {
