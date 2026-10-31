@@ -1,6 +1,10 @@
-//! The session clock (Section 5.1).
+//! The session clock and clock synchronization (Sections 5.1 and 5.2).
+
+mod sync;
 
 use std::time::Instant;
+
+pub use sync::{ClockSample, ClockSync, SAMPLE_COUNT, answer_ping};
 
 use crate::message::Timestamp;
 use crate::wire::VarInt;

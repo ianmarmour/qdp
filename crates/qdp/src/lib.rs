@@ -19,8 +19,8 @@
 //!   reassembly, retransmission, loss recovery and composition (Section 6).
 //! - [`input`] holds the sans-I/O delivery of input reports: retention and repeats
 //!   on the client, ordering and acknowledgement on the host (Section 8).
-//! - [`time`] holds the session clock that timestamps are measured on
-//!   (Section 5.1).
+//! - [`time`] holds the session clock that timestamps are measured on and the
+//!   estimation of the peer's clock offset (Sections 5.1 and 5.2).
 
 pub mod auth;
 pub mod input;
