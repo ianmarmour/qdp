@@ -66,6 +66,10 @@ Connect options:
   --frames N           Disconnect after N frames
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
   --headless           Open no window; only log statistics
+  --resolution WxH     Ask the host for video WIDTHxHEIGHT pixels, whatever
+                       the window's size, and stretch it to fill the window,
+                       to stream less at a large or full-screen window
+                       (default: the window's size)
   --decoder KIND       auto, hardware or software (default auto: the GPU's
                        decoder when it has one, otherwise software)
   --decoder-process on|off
@@ -280,7 +284,16 @@ pub struct ConnectArgs {
     pub passthrough: Vec<DeviceSelector>,
     /// What the touchpad does.
     pub touchpad: TouchpadMode,
+    /// The video size to ask the host for, in pixels, whatever the window's,
+    /// if the user chose one.
+    pub resolution: Option<(u32, u32)>,
 }
+
+/// The smallest side of a video the host can send (Section 6.3).
+const MIN_VIDEO_SIDE: u32 = 16;
+
+/// The largest side of a video the host can send (Section 6.3).
+const MAX_VIDEO_SIDE: u32 = 16384;
 
 /// An error in the command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +337,24 @@ fn parse_size(text: &str) -> Result<(usize, usize), ArgsError> {
         return Err(invalid());
     }
     Ok((width, height))
+}
+
+/// Parses a video size written as `WIDTHxHEIGHT`, each side from 16 to
+/// 16384 pixels.
+fn parse_resolution(text: &str) -> Result<(u32, u32), ArgsError> {
+    let invalid = || {
+        error(format!(
+            "invalid resolution: {text}; each side is {MIN_VIDEO_SIDE} to {MAX_VIDEO_SIDE} pixels"
+        ))
+    };
+    let (width, height) = parse_size(text).map_err(|_| invalid())?;
+    let side = |value: usize| {
+        u32::try_from(value)
+            .ok()
+            .filter(|value| (MIN_VIDEO_SIDE..=MAX_VIDEO_SIDE).contains(value))
+            .ok_or_else(invalid)
+    };
+    Ok((side(width)?, side(height)?))
 }
 
 /// Parses a key pin written as 64 hexadecimal digits.
@@ -554,6 +585,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         microphone: Microphone::Off,
         passthrough: Vec::new(),
         touchpad: TouchpadMode::Pointer,
+        resolution: None,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -587,6 +619,10 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--audio" => connect.audio = parse_audio(&value("--audio", &mut arguments)?)?,
             "--microphone" => connect.microphone = Microphone::On,
             "--touchpad" => connect.touchpad = TouchpadMode::Raw,
+            "--resolution" => {
+                connect.resolution =
+                    Some(parse_resolution(&value("--resolution", &mut arguments)?)?);
+            }
             "--passthrough" => {
                 let selector = value("--passthrough", &mut arguments)?;
                 connect.passthrough.push(selector.parse().map_err(error)?);
@@ -746,6 +782,23 @@ mod tests {
             panic!("expected connect");
         };
         assert_eq!(connect.touchpad, TouchpadMode::Raw);
+        assert_eq!(connect.resolution, None);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --resolution 1920x1080"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.resolution, Some((1920, 1080)));
+        for invalid in ["1920", "8x8", "20000x1080", "x1080"] {
+            assert!(
+                parse_line(&format!(
+                    "connect 192.0.2.7 --pin {pin} --token t --resolution {invalid}"
+                ))
+                .is_err(),
+                "{invalid}"
+            );
+        }
         let Command::Connect(connect) = parse_line(&format!(
             "connect 192.0.2.7 --pin {pin} --token t --passthrough 054c:09cc --passthrough 057e:2009"
         ))
