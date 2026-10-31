@@ -456,6 +456,11 @@ impl StandardInput {
         self.devices.values().any(holds)
     }
 
+    /// Returns whether the client holds any pointer button, on any device.
+    pub(crate) fn holds_buttons(&self) -> bool {
+        self.buttons != PointerButtons::default()
+    }
+
     /// Returns whether a device has been accepted.
     pub(crate) fn contains(&self, device_id: DeviceId) -> bool {
         self.devices.contains_key(&device_id)

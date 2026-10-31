@@ -84,7 +84,9 @@ Connect options:
                        lsusb shows it, through to the host as it is
                        (repeatable; Linux clients)
 
-Set QDP_LOG to error, warn, info, debug or trace to change the log level.";
+Set QDP_LOG to error, warn, info, debug or trace to change the log level, and
+add TARGET=LEVEL after a comma to change it for one part, as in
+QDP_LOG=info,qdp::window=debug.";
 
 /// The port QDP listens on by default.
 const DEFAULT_PORT: u16 = 4433;

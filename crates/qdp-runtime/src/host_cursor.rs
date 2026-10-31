@@ -10,6 +10,7 @@ use qdp::message::{
     WarpFlags, WarpId,
 };
 use qdp::wire::{SignedVarInt, VarInt};
+use tracing::debug;
 
 use crate::host_input::InputAction;
 use crate::media::{CursorShape, CursorState, PointerPosition};
@@ -259,6 +260,13 @@ impl HostCursor {
         if !following && !(quiet && unexplained) {
             return None;
         }
+        debug!(
+            x,
+            y,
+            expected = ?self.expected,
+            following,
+            "the pointer moved without the client's input; warping the client's"
+        );
         self.expected = Some(position);
         self.last_warp += 1;
         let subunits = |value: i64| SignedVarInt::new(value * SUBUNITS).unwrap_or_default();

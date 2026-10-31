@@ -805,7 +805,19 @@ impl ActiveHost {
             // Positions computed with a layout the host no longer keeps are
             // ignored (Section 8.7, rule 6).
             let layout = self.display.layout_for(event.display_config_id);
-            let positions = if event.warp_id < self.cursor.latest_warp() || layout.is_none() {
+            let latest_warp = self.cursor.latest_warp();
+            let positions = if event.warp_id < latest_warp {
+                debug!(
+                    warp_id = event.warp_id.0.into_inner(),
+                    latest_warp = latest_warp.0.into_inner(),
+                    "positions from before the latest warp ignored"
+                );
+                Positions::Ignore
+            } else if layout.is_none() {
+                debug!(
+                    display_config_id = event.display_config_id.0.into_inner(),
+                    "positions from a configuration no longer kept ignored"
+                );
                 Positions::Ignore
             } else {
                 Positions::Apply
@@ -821,6 +833,15 @@ impl ActiveHost {
         let now = Instant::now();
         for action in actions {
             let action = layout.action_in_capture(action.clone());
+            match action {
+                InputAction::ButtonDown(_) | InputAction::ButtonUp(_) => {
+                    debug!(?action, "pointer button");
+                }
+                InputAction::PointerMoveTo { x, y } if self.devices.holds_buttons() => {
+                    debug!(x, y, "pointer moved with a button held");
+                }
+                _ => {}
+            }
             self.cursor.input(&action, now);
             if let Err(error) = self.injector.inject(&action) {
                 warn!(?action, error, "input not applied");
