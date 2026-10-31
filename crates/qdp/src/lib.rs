@@ -16,12 +16,15 @@
 //! - [`auth`] implements SCRAM-SHA-256-PLUS for the Auth Data of the session
 //!   (Section 4.4.4).
 //! - [`video`] holds the sans-I/O logic of video streams: fragmentation,
-//!   retransmission and loss recovery (Section 6).
+//!   reassembly, retransmission, loss recovery and composition (Section 6).
+//! - [`time`] holds the session clock that timestamps are measured on
+//!   (Section 5.1).
 
 pub mod auth;
 pub mod message;
 pub mod registry;
 pub mod session;
+pub mod time;
 pub mod video;
 pub mod wire;
 
