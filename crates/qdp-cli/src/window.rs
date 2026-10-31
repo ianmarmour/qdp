@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use qdp::message::{CursorImage, PointerKind, PointerMode};
 use qdp_codec::Yuv420Frame;
 use qdp_runtime::{
-    CursorWarp, FrameInfo, FrameSink, InputHandle, PointerButton, SinkControl, TouchPhase,
-    UserInput, WarpKind,
+    CursorWarp, FrameInfo, FrameSink, InputHandle, PenInput, PointerButton, SinkControl,
+    TouchPhase, UserInput, WarpKind,
 };
 use softbuffer::{Context, Surface};
 use tokio::sync::Notify;
@@ -67,6 +67,11 @@ pub enum WindowMessage {
     Warp(CursorWarp),
     /// The host's pointer mode changed.
     PointerMode(PointerMode),
+    /// The pen changed over the window, at a position in the window's
+    /// physical pixels. The window library reports pens only as touches, so
+    /// the pen is read apart from it where the platform allows.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Pen(PenInput),
     /// The session ended, so the window closes.
     SessionEnded,
 }
@@ -172,6 +177,9 @@ impl FrameSink for WindowSink {
 
 /// The window and its drawing surface.
 struct Display {
+    /// The pen over the window, read until dropped, before the window is.
+    #[cfg(windows)]
+    _pen: Option<qdp_desktop::WindowPen>,
     /// The window.
     window: Rc<Window>,
     /// The surface pixels are drawn into.
@@ -194,6 +202,9 @@ pub struct WindowApp {
     error: Option<String>,
     /// Sends the user's input to the session.
     input: InputHandle,
+    /// Wakes the event loop with input read apart from the window library.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    proxy: EventLoopProxy<WindowMessage>,
     /// Scrolling not yet sent, below one unit.
     scroll_remainder: (f64, f64),
     /// The host's cursor image, or `None` while the host hides it.
@@ -230,6 +241,7 @@ impl WindowApp {
         slot: FrameSlot,
         close: Arc<CloseSignal>,
         input: InputHandle,
+        proxy: EventLoopProxy<WindowMessage>,
     ) -> Self {
         Self {
             title,
@@ -249,6 +261,7 @@ impl WindowApp {
             captured: false,
             modifiers: ModifiersState::empty(),
             fingers: HashSet::new(),
+            proxy,
             #[cfg(feature = "gamepad")]
             gamepads: qdp_desktop::GamepadCapture::start(input.clone())
                 .inspect_err(|error| warn!(error, "gamepads are not sent"))
@@ -554,7 +567,20 @@ impl WindowApp {
         let surface = Context::new(Rc::clone(&window))
             .and_then(|context| Surface::new(&context, Rc::clone(&window)))
             .map_err(|error| format!("cannot draw in the window: {error}"))?;
-        Ok(Display { window, surface })
+        Ok(Display {
+            #[cfg(windows)]
+            _pen: attach_pen(&window, self.proxy.clone()),
+            window,
+            surface,
+        })
+    }
+
+    /// Sends the pen's state, at its position on the host's monitor.
+    fn pen(&self, pen: PenInput) {
+        let Some((x, y)) = self.monitor_position(PhysicalPosition::new(pen.x, pen.y)) else {
+            return;
+        };
+        self.input.send(UserInput::Pen(PenInput { x, y, ..pen }));
     }
 
     /// Asks the window system to redraw the window.
@@ -643,6 +669,7 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             }
             WindowMessage::Warp(warp) => self.warp(warp),
             WindowMessage::PointerMode(mode) => self.set_pointer_mode(&mode),
+            WindowMessage::Pen(pen) => self.pen(pen),
             WindowMessage::SessionEnded => event_loop.exit(),
         }
     }
@@ -720,6 +747,26 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
             _ => {}
         }
     }
+}
+
+/// Starts reading the pen over `window`, sending its input through `proxy`.
+#[cfg(windows)]
+fn attach_pen(
+    window: &Window,
+    proxy: EventLoopProxy<WindowMessage>,
+) -> Option<qdp_desktop::WindowPen> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    qdp_desktop::WindowPen::attach(handle.hwnd.get(), move |pen| {
+        // The event loop may have ended already.
+        let _ = proxy.send_event(WindowMessage::Pen(pen));
+    })
+    .inspect(|_| debug!("reading the pen over the window"))
+    .inspect_err(|error| warn!(error, "the pen is not sent"))
+    .ok()
 }
 
 /// Creates the event loop the window runs on. It must be created on the main

@@ -11,7 +11,9 @@ mod image;
 mod input;
 mod keycodes;
 mod pen;
+mod pen_capture;
 mod touch;
 
 pub use capture::DesktopDuplication;
 pub use input::SendInputInjector;
+pub use pen_capture::WindowPen;

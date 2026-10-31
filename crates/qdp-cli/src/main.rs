@@ -360,7 +360,13 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
         })
         .map_err(|error| format!("cannot start the session: {error}"))?;
 
-    let mut app = WindowApp::new(title, slot, Arc::clone(&close), input);
+    let mut app = WindowApp::new(
+        title,
+        slot,
+        Arc::clone(&close),
+        input,
+        event_loop.create_proxy(),
+    );
     let window_result = event_loop
         .run_app(&mut app)
         .map_err(|error| format!("the window failed: {error}"));
