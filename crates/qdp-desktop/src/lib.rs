@@ -39,6 +39,7 @@ mod win32;
 
 use std::path::Path;
 
+pub use qdp_runtime::Microphone;
 use qdp_runtime::{
     ClientAudio, Clipboard, DisplayTiming, FrameSource, HostAudio, InputInjector, NoInput,
 };
@@ -110,16 +111,6 @@ pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, Stri
     Err("screen capture is not supported on this platform yet".to_owned())
 }
 
-/// Whether the user turned the client's microphone on for a session (Section
-/// 7.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Microphone {
-    /// The microphone is off: nothing is captured.
-    Off,
-    /// The microphone is on: the host hears it.
-    On,
-}
-
 /// Returns a host's audio devices: the desktop's sound, which clients play,
 /// and, where the platform allows, a virtual microphone that plays the
 /// client's microphone to the host's applications.
@@ -151,27 +142,25 @@ pub fn host_audio() -> HostAudio {
     HostAudio::default()
 }
 
-/// Returns a client's audio devices: its speakers, and its microphone if the
-/// user turned it on.
+/// Returns a client's audio devices: its speakers, and its microphone,
+/// which captures only while `microphone` says the user turned it on.
 #[cfg(all(feature = "audio", target_os = "linux"))]
 pub fn client_audio(microphone: Microphone) -> ClientAudio {
     ClientAudio {
         speakers: Some(Box::new(linux::PipeWireOutput::speakers())),
-        microphone: (microphone == Microphone::On).then(|| {
-            Box::new(linux::PipeWireInput::microphone()) as Box<dyn qdp_runtime::AudioInput>
-        }),
+        microphone: Some(Box::new(linux::PipeWireInput::microphone())),
+        microphone_state: microphone,
     }
 }
 
-/// Returns a client's audio devices: its speakers, and its microphone if the
-/// user turned it on.
+/// Returns a client's audio devices: its speakers, and its microphone,
+/// which captures only while `microphone` says the user turned it on.
 #[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
 pub fn client_audio(microphone: Microphone) -> ClientAudio {
     ClientAudio {
         speakers: cpal_audio::speakers(),
-        microphone: (microphone == Microphone::On)
-            .then(cpal_audio::microphone)
-            .flatten(),
+        microphone: cpal_audio::microphone(),
+        microphone_state: microphone,
     }
 }
 

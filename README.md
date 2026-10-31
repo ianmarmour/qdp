@@ -89,7 +89,8 @@ on other Linux desktops it is part of the video.
 The host streams its sound, and the client plays it; `--audio off` on either
 side turns it off. `qdp connect --microphone` sends the client's microphone to
 the host, which on Linux presents it to its applications as a source named
-"QDP microphone"; the window's title says when the microphone is on. Sound is
+"QDP microphone"; Ctrl+Alt+Shift+M turns it on or off during the session, and
+the window's title says when the microphone is on. Sound is
 coded with Opus, in pure Rust, or sent as PCM. On Linux the host captures what
 plays on its default output through PipeWire; on Windows it captures the
 default output by loopback; on macOS 13 and later it captures the desktop's

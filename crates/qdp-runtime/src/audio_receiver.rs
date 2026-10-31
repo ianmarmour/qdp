@@ -8,6 +8,8 @@ use std::time::Instant;
 use qdp_codec::{AudioDecoder, AudioFormat};
 use tracing::debug;
 
+use crate::audio::SAMPLE_RATE;
+
 /// The smallest target depth, in seconds (Section 7.6).
 const MIN_TARGET_SECONDS: f64 = 0.005;
 
@@ -189,7 +191,9 @@ impl AudioReceiver {
             self.playing = true;
         }
         self.flush_excess();
-        let ratio = self.playout_ratio();
+        // The stream's samples are played at the devices' rate.
+        let ratio =
+            self.playout_ratio() * f64::from(self.format.sample_rate) / f64::from(SAMPLE_RATE);
         for frame in 0..frames {
             let index = self.phase as usize;
             if !self.ensure_decoded(index + 2) {

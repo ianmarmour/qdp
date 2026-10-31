@@ -24,10 +24,10 @@ use qdp_runtime::{
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
     DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource,
     GamepadFeedback, HostAudio, HostAuthenticator, HostOptions, InputAction, InputHandle,
-    InputInjector, InputQueue, NoInput, PassthroughDevice, PassthroughFeedback, PassthroughPolicy,
-    PenInput, Playout, PointerButton, PointerPosition, Presentation, PresentationTiming,
-    RefreshMode, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, TouchPhase,
-    TouchPoint, UserInput, WarpKind, input_channel, run, serve,
+    InputInjector, InputQueue, Microphone, NoInput, PassthroughDevice, PassthroughFeedback,
+    PassthroughPolicy, PenInput, Playout, PointerButton, PointerPosition, Presentation,
+    PresentationTiming, RefreshMode, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
+    TestPattern, TouchPhase, TouchPoint, UserInput, WarpKind, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -1130,6 +1130,7 @@ async fn audio_flows_both_ways() {
             channels: 1,
             frequency: 220.0,
         })),
+        microphone_state: Microphone::On,
     };
     let endpoint = ClientEndpoint::bind(loopback()).unwrap();
     let connection = endpoint
@@ -1156,6 +1157,99 @@ async fn audio_flows_both_ways() {
     // Half a second of a tone of f hertz crosses zero f times.
     let played = speakers.frequency().expect("the host's audio played");
     assert!((420.0..460.0).contains(&played), "played {played} Hz");
+    let heard = host_microphone
+        .frequency()
+        .expect("the client's microphone played");
+    assert!((200.0..240.0).contains(&heard), "heard {heard} Hz");
+}
+
+/// Turns the client's microphone on during the session and stops once the
+/// host has heard it.
+struct MicrophoneSwitch {
+    /// Where to turn the microphone on.
+    input: InputHandle,
+    /// The host's virtual microphone.
+    host_microphone: RecordingOutput,
+    /// The frames presented.
+    frames: usize,
+    /// What the host had heard when the microphone was turned on.
+    heard_before: Option<usize>,
+}
+
+impl FrameSink for MicrophoneSwitch {
+    fn present(&mut self, _frame: &Yuv420Frame, _info: FrameInfo) -> SinkControl {
+        self.frames += 1;
+        let heard = self.host_microphone.recorded.lock().unwrap().len();
+        if self.frames == INPUT_FRAME {
+            self.heard_before = Some(heard);
+            assert!(self.input.send(UserInput::Microphone(Microphone::On)));
+        }
+        if heard >= SAMPLE_RATE as usize / 2 || self.frames >= CLIPBOARD_FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+}
+
+/// A microphone that starts off sends nothing until the user turns it on
+/// during the session; the host then hears it (Section 7.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn microphone_turns_on_during_the_session() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let host_microphone = RecordingOutput::new(1);
+    let host_audio = HostAudio {
+        desktop: None,
+        microphone: Some(Box::new(host_microphone.clone())),
+    };
+    let (address, pin, _host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        host_audio,
+    );
+    let client_audio = ClientAudio {
+        speakers: None,
+        microphone: Some(Box::new(ToneInput {
+            channels: 1,
+            frequency: 220.0,
+        })),
+        microphone_state: Microphone::Off,
+    };
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let (input, queue) = input_channel();
+    let mut switch = MicrophoneSwitch {
+        input,
+        host_microphone: host_microphone.clone(),
+        frames: 0,
+        heard_before: None,
+    };
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut switch,
+            Some(queue),
+            None,
+            client_audio,
+        ),
+    )
+    .await
+    .expect("the session ends in time")
+    .unwrap();
+    assert_eq!(switch.heard_before, Some(0));
     let heard = host_microphone
         .frequency()
         .expect("the client's microphone played");
