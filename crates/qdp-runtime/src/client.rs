@@ -5,12 +5,13 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use qdp::input::{DeviceClass, InputSender};
 use qdp::message::{
     Av1Profiles, Capability, ClientHello, ClientMonitor, ClientMonitorFlags, ClientMonitorId,
     ControlMessage, Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind,
-    DisplayConfig, DisplayRequest, DisplayRequestId, FeedbackRecord, InputClasses, KeyframeRequest,
-    MinorVersion, NO_LEVEL_LIMIT, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags,
-    VideoFeedback, VideoLayer,
+    DeviceStatusCode, DisplayConfig, DisplayRequest, DisplayRequestId, FeedbackRecord,
+    InputClasses, KeyframeRequest, MinorVersion, NO_LEVEL_LIMIT, StreamId, VideoCodec,
+    VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer,
 };
 use qdp::session::ClientEvent;
 use qdp::time::{ClockSync, SessionClock, answer_ping};
@@ -21,6 +22,7 @@ use qdp_quic::{ClientDriver, DriverInput, QdpConnection, TransportError};
 use tracing::{debug, info, warn};
 
 use crate::auth::ClientAuthExchange;
+use crate::client_input::{ClientDevices, InputQueue, KEYBOARD_ID, MOUSE_ID, POINTER_ID, TEXT_ID};
 use crate::media::{FrameInfo, FrameSink, SinkControl};
 use crate::{ClientCredentials, RuntimeError};
 
@@ -81,11 +83,24 @@ pub struct ClientSummary {
 }
 
 /// The devices every client attaches during configuration (Section 8.2.1).
-const STANDARD_DEVICES: [(u32, DeviceKind, &str); 3] = [
-    (1, DeviceKind::KEYBOARD, "Keyboard"),
-    (2, DeviceKind::POINTER, "Pointer"),
-    (3, DeviceKind::MOUSE, "Mouse"),
+const STANDARD_DEVICES: [(DeviceId, DeviceKind, &str); 4] = [
+    (KEYBOARD_ID, DeviceKind::KEYBOARD, "Keyboard"),
+    (POINTER_ID, DeviceKind::POINTER, "Pointer"),
+    (MOUSE_ID, DeviceKind::MOUSE, "Mouse"),
+    (TEXT_ID, DeviceKind::TEXT, "Text"),
 ];
+
+/// Returns how the input sender treats a standard device's reports.
+fn device_class(device_id: DeviceId) -> Option<DeviceClass> {
+    let (_, kind, _) = STANDARD_DEVICES
+        .iter()
+        .find(|(id, _, _)| *id == device_id)?;
+    Some(if *kind == DeviceKind::TEXT {
+        DeviceClass::Text
+    } else {
+        DeviceClass::Standard
+    })
+}
 
 /// Returns the client's hello.
 fn client_hello(options: &ClientOptions) -> ClientHello {
@@ -197,19 +212,28 @@ struct ActiveClient<'a> {
     decoder_preference: CodecPreference,
     /// The session's statistics.
     summary: ClientSummary,
+    /// Sends input reports reliably.
+    input: InputSender,
+    /// The state of the standard devices.
+    devices: ClientDevices,
+    /// The user's input, if the client has a user interface.
+    input_queue: Option<InputQueue>,
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
-/// frames to `sink` until it asks to stop or the host disconnects.
+/// frames to `sink` until it asks to stop or the host disconnects, and sending
+/// the user's input from `input`, if given.
 pub async fn run(
     connection: QdpConnection,
     options: &ClientOptions,
     sink: &mut dyn FrameSink,
+    input: Option<InputQueue>,
 ) -> Result<ClientSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
     let mut driver = ClientDriver::client(connection, client_hello(options))?;
     let mut auth = ClientAuthExchange::new(options.credentials.clone(), binding);
     let mut display_config = None;
+    let mut early_messages = Vec::new();
     loop {
         match driver.next_event().await? {
             ClientEvent::HostHello(hello) => {
@@ -230,9 +254,9 @@ pub async fn run(
                 session.send(&ControlMessage::DisplayRequest(display_request(
                     options.display,
                 )))?;
-                for (id, kind, name) in STANDARD_DEVICES {
+                for (device_id, kind, name) in STANDARD_DEVICES {
                     session.send(&ControlMessage::DeviceAttach(DeviceAttach {
-                        device_id: DeviceId(VarInt::from_u32(id)),
+                        device_id,
                         kind,
                         features: DeviceFeatures::default(),
                         name: name.to_owned(),
@@ -245,7 +269,7 @@ pub async fn run(
             ClientEvent::Message(ControlMessage::DisplayConfig(config)) => {
                 display_config = Some(config);
             }
-            ClientEvent::Message(_) => {}
+            ClientEvent::Message(message) => early_messages.push(message),
             ClientEvent::SessionStarted => break,
         }
     }
@@ -263,16 +287,53 @@ pub async fn run(
         decoder_threads: options.decoder_threads,
         decoder_preference: options.decoder,
         summary: ClientSummary::default(),
+        input: InputSender::new(clock),
+        devices: ClientDevices::default(),
+        input_queue: input,
     };
     if let Some(config) = display_config {
         active.configure(&config)?;
+    }
+    for message in early_messages {
+        active.handle_message(message)?;
     }
     active.run().await
 }
 
 impl ActiveClient<'_> {
+    /// Acts on a control message from the host.
+    fn handle_message(&mut self, message: ControlMessage) -> Result<(), RuntimeError> {
+        match message {
+            ControlMessage::DisplayConfig(config) => self.configure(&config)?,
+            ControlMessage::DeviceStatus(status) => {
+                if status.status == DeviceStatusCode::Accepted {
+                    if let Some(class) = device_class(status.device_id) {
+                        self.input.add_device(status.device_id, class);
+                    }
+                } else {
+                    debug!(
+                        device = status.device_id.0.into_inner(),
+                        reason = status.reason,
+                        "device not accepted"
+                    );
+                    self.input.remove_device(status.device_id);
+                }
+            }
+            ControlMessage::PointerMode(mode) => self.devices.set_pointer_mode(mode.mode),
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Replaces the video streams with those of `config` (Section 6.3.1).
     fn configure(&mut self, config: &DisplayConfig) -> Result<(), RuntimeError> {
+        self.input.set_display_config(config.config_id);
+        if let Some(monitor) = config.monitors.first() {
+            let coordinate =
+                |value: SignedVarInt| i32::try_from(value.into_inner()).unwrap_or_default();
+            self.devices
+                .set_monitor_origin(coordinate(monitor.x), coordinate(monitor.y));
+        }
         let mut streams = HashMap::new();
         for stream in &config.streams {
             if stream.layer != VideoLayer::Motion {
@@ -330,11 +391,13 @@ impl ActiveClient<'_> {
                 .values()
                 .filter_map(|stream| stream.receiver.poll_timeout(smoothed_rtt))
                 .chain(Some(self.sync.next_ping_at()))
+                .chain(self.input.poll_timeout(smoothed_rtt))
                 .min();
-            match self.driver.next_input(deadline, None).await {
-                Ok(DriverInput::Event(ClientEvent::Message(ControlMessage::DisplayConfig(
-                    config,
-                )))) => self.configure(&config)?,
+            let wake = self.input_queue.as_ref().map(InputQueue::wake);
+            match self.driver.next_input(deadline, wake).await {
+                Ok(DriverInput::Event(ClientEvent::Message(message))) => {
+                    self.handle_message(message)?;
+                }
                 Ok(DriverInput::Event(_) | DriverInput::Deadline | DriverInput::Wake) => {}
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(datagram)?,
                 Err(error) if crate::is_normal_close(&error) => return Ok(self.summary),
@@ -354,7 +417,29 @@ impl ActiveClient<'_> {
             if let Some(ping) = self.sync.poll_ping(now) {
                 self.send(ping.to_bytes())?;
             }
+            self.send_input(smoothed_rtt, now)?;
         }
+    }
+
+    /// Turns the user's waiting input into reports and sends the `INPUT`
+    /// datagrams that are due.
+    fn send_input(&mut self, smoothed_rtt: Duration, now: Instant) -> Result<(), RuntimeError> {
+        if let Some(queue) = &self.input_queue {
+            while let Some(action) = queue.try_next() {
+                for report in self.devices.reports(action) {
+                    self.input
+                        .push(report.device_id, report.data, report.kind, report.rest, now);
+                }
+            }
+        }
+        let max_datagram_size = self.driver.connection().max_datagram_size();
+        while let Some(datagram) = self
+            .input
+            .poll_transmit(smoothed_rtt, max_datagram_size, now)
+        {
+            self.send(datagram)?;
+        }
+        Ok(())
     }
 
     /// Sends a datagram, dropping it if it no longer fits the path.
@@ -400,6 +485,7 @@ impl ActiveClient<'_> {
                 let pong = answer_ping(&ping, &self.clock, now, Instant::now());
                 self.send(pong.to_bytes())?;
             }
+            Datagram::InputAck(ack) => self.input.handle_ack(&ack, now),
             _ => {}
         }
         Ok(())

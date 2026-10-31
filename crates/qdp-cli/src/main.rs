@@ -9,6 +9,8 @@ mod args;
 #[cfg(feature = "window")]
 mod color;
 mod identity;
+#[cfg(feature = "window")]
+mod keymap;
 mod sink;
 #[cfg(feature = "window")]
 mod window;
@@ -20,7 +22,7 @@ use std::sync::Arc;
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     ClientCredentials, ClientOptions, ClientSummary, DisplaySize, EncoderTuning, FrameSink,
-    HostAuthenticator, HostOptions, TestPattern,
+    HostAuthenticator, HostOptions, InputQueue, NoInput, TestPattern,
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::filter::LevelFilter;
@@ -180,7 +182,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                     let peer = connection.quic().remote_address();
                     info!(%peer, "client connected");
                     let source = Box::new(TestPattern::new(width, height));
-                    match qdp_runtime::serve(connection, &options, source).await {
+                    match qdp_runtime::serve(connection, &options, source, Box::new(NoInput)).await {
                         Ok(summary) => info!(
                             %peer,
                             frames = summary.frames_sent,
@@ -233,7 +235,7 @@ fn connect(args: ConnectArgs) -> CliResult {
 /// Receives the stream without a window, until the frame limit, an interrupt,
 /// or the host closing.
 fn connect_headless(args: &ConnectArgs, mut sink: CliSink) -> CliResult {
-    let result = run_async(receive(args, &mut sink, interrupted()));
+    let result = run_async(receive(args, &mut sink, interrupted(), None));
     finish(&mut sink, result)
 }
 
@@ -244,6 +246,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
     use crate::window::{CloseSignal, FrameSlot, WindowApp, WindowMessage, WindowSink};
 
     let event_loop = window::event_loop()?;
+    let (input, input_queue) = qdp_runtime::input_channel();
     let slot = FrameSlot::default();
     let close = Arc::new(CloseSignal::default());
     let title = format!("QDP: {}", args.address);
@@ -259,7 +262,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
                     () = window_closed(&session_close) => {}
                 }
             };
-            let result = run_async(receive(&args, &mut sink, stop));
+            let result = run_async(receive(&args, &mut sink, stop, Some(input_queue)));
             let result = finish(sink.inner_mut(), result);
             // The window may have closed already, so nobody may listen.
             let _ = proxy.send_event(WindowMessage::SessionEnded);
@@ -267,7 +270,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
         })
         .map_err(|error| format!("cannot start the session: {error}"))?;
 
-    let mut app = WindowApp::new(title, slot, Arc::clone(&close));
+    let mut app = WindowApp::new(title, slot, Arc::clone(&close), input);
     let window_result = event_loop
         .run_app(&mut app)
         .map_err(|error| format!("the window failed: {error}"));
@@ -301,12 +304,14 @@ async fn interrupted() {
 }
 
 /// Connects to the host and presents its stream in `sink` until the sink stops,
-/// the host closes, or `stop` completes. Returns the session's summary, or
-/// `None` if `stop` cut it off.
+/// the host closes, or `stop` completes, sending the user's input from
+/// `input`, if given. Returns the session's summary, or `None` if `stop` cut
+/// it off.
 async fn receive(
     args: &ConnectArgs,
     sink: &mut dyn FrameSink,
     stop: impl Future<Output = ()>,
+    input: Option<InputQueue>,
 ) -> Result<Option<ClientSummary>, String> {
     let credentials = match (&args.token, &args.user) {
         (Some(token), _) => ClientCredentials::Token(token.as_bytes().to_vec()),
@@ -340,7 +345,7 @@ async fn receive(
         decoder: args.decoder,
     };
     let result = tokio::select! {
-        result = qdp_runtime::run(connection, &options, sink) => result.map(Some),
+        result = qdp_runtime::run(connection, &options, sink, input) => result.map(Some),
         () = stop => Ok(None),
     };
     let summary = result.map_err(|error| format!("session failed: {error}"))?;

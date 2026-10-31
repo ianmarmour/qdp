@@ -2,6 +2,7 @@
 //! QUIC connection on the loopback interface.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qdp::auth::scram::ScramCredentials;
@@ -9,7 +10,8 @@ use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostIdentity, HostVerification, KeyPin};
 use qdp_runtime::{
     ClientCredentials, ClientOptions, DisplaySize, EncoderTuning, FrameInfo, FrameSink,
-    HostAuthenticator, HostOptions, RuntimeError, SinkControl, TestPattern, run, serve,
+    HostAuthenticator, HostOptions, InputAction, InputHandle, InputInjector, InputQueue, NoInput,
+    PointerButton, RuntimeError, SinkControl, TestPattern, UserInput, input_channel, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -42,12 +44,81 @@ fn loopback() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
 }
 
-/// Collects what the client presents and stops after [`FRAMES`] frames.
+/// The frame after which the collector sends the test input, once the devices
+/// are accepted.
+const INPUT_FRAME: usize = 5;
+
+/// Collects what the client presents and stops after [`FRAMES`] frames,
+/// sending the test input after [`INPUT_FRAME`] frames if it has a handle.
 #[derive(Default)]
 struct Collector {
     /// The frame number, luma PSNR against the pattern, and frame information
     /// of each presented frame.
     frames: Vec<(u64, f64, FrameInfo)>,
+    /// Where to send the test input.
+    input: Option<InputHandle>,
+}
+
+/// The input the input test sends, as the user would produce it.
+fn test_input() -> Vec<UserInput> {
+    vec![
+        UserInput::Key {
+            usage: 0x04,
+            pressed: true,
+        },
+        UserInput::Key {
+            usage: 0x04,
+            pressed: false,
+        },
+        UserInput::PointerMoved { x: 10.0, y: 20.0 },
+        UserInput::Button {
+            button: PointerButton::Left,
+            pressed: true,
+        },
+        UserInput::Button {
+            button: PointerButton::Left,
+            pressed: false,
+        },
+        UserInput::Scroll {
+            vertical: 120,
+            horizontal: 0,
+        },
+        UserInput::Text("hé".to_owned()),
+    ]
+}
+
+/// The actions the host should perform for [`test_input`].
+fn expected_actions() -> Vec<InputAction> {
+    vec![
+        InputAction::KeyDown(0x04),
+        InputAction::KeyUp(0x04),
+        InputAction::PointerMoveTo {
+            x: 10 * 256,
+            y: 20 * 256,
+        },
+        InputAction::ButtonDown(PointerButton::Left),
+        InputAction::ButtonUp(PointerButton::Left),
+        InputAction::Scroll {
+            vertical: 120,
+            horizontal: 0,
+        },
+        InputAction::Text("hé".to_owned()),
+    ]
+}
+
+/// Records the actions the host performs.
+#[derive(Debug, Clone, Default)]
+struct Recorder(Arc<Mutex<Vec<InputAction>>>);
+
+impl InputInjector for Recorder {
+    fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        self.0.lock().unwrap().push(action.clone());
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "recorder"
+    }
 }
 
 impl FrameSink for Collector {
@@ -58,6 +129,13 @@ impl FrameSink for Collector {
         let expected = TestPattern::frame(WIDTH, HEIGHT, number - 1);
         let psnr = frame.luma_psnr(&expected).unwrap_or(0.0);
         self.frames.push((number, psnr, info));
+        if self.frames.len() == INPUT_FRAME {
+            if let Some(input) = &self.input {
+                for action in test_input() {
+                    assert!(input.send(action));
+                }
+            }
+        }
         if self.frames.len() >= FRAMES {
             SinkControl::Stop
         } else {
@@ -70,6 +148,7 @@ impl FrameSink for Collector {
 /// and the task that returns the host's summary.
 fn start_host(
     authenticator: HostAuthenticator,
+    injector: Box<dyn InputInjector>,
 ) -> (
     SocketAddr,
     KeyPin,
@@ -96,17 +175,20 @@ fn start_host(
             connection,
             &options,
             Box::new(TestPattern::new(WIDTH, HEIGHT)),
+            injector,
         )
         .await
     });
     (address, pin, task)
 }
 
-/// Connects a client with `credentials` and streams until the collector stops.
+/// Connects a client with `credentials` and streams until the collector stops,
+/// sending the test input if `input` is given.
 async fn stream(
     address: SocketAddr,
     pin: KeyPin,
     credentials: ClientCredentials,
+    input: Option<(InputHandle, InputQueue)>,
 ) -> Result<Collector, RuntimeError> {
     let endpoint = ClientEndpoint::bind(loopback()).unwrap();
     let connection = endpoint
@@ -127,8 +209,12 @@ async fn stream(
         decoder_threads: 2,
         decoder: CodecPreference::Software,
     };
-    let mut collector = Collector::default();
-    let summary = run(connection, &options, &mut collector).await?;
+    let (handle, queue) = input.unzip();
+    let mut collector = Collector {
+        input: handle,
+        ..Collector::default()
+    };
+    let summary = run(connection, &options, &mut collector, queue).await?;
     assert_eq!(summary.frames_presented, FRAMES as u64);
     assert_eq!(summary.decode_failures, 0);
     endpoint.wait_idle().await;
@@ -159,10 +245,10 @@ fn check_frames(collector: &Collector) {
 async fn stream_with_token() {
     let mut authenticator = HostAuthenticator::new().unwrap();
     authenticator.add_token(TOKEN.to_vec());
-    let (address, pin, host) = start_host(authenticator);
+    let (address, pin, host) = start_host(authenticator, Box::new(NoInput));
     let collector = tokio::time::timeout(
         TEST_TIMEOUT,
-        stream(address, pin, ClientCredentials::Token(TOKEN.to_vec())),
+        stream(address, pin, ClientCredentials::Token(TOKEN.to_vec()), None),
     )
     .await
     .expect("streaming finishes in time")
@@ -186,12 +272,12 @@ async fn stream_with_password() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator);
+    let (address, pin, _host) = start_host(authenticator, Box::new(NoInput));
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "pencil".to_owned(),
     };
-    let collector = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials))
+    let collector = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials, None))
         .await
         .expect("streaming finishes in time")
         .unwrap();
@@ -206,13 +292,38 @@ async fn wrong_password_is_refused() {
         "ian".to_owned(),
         ScramCredentials::derive("pencil", b"streaming salt".to_vec(), 4096).unwrap(),
     );
-    let (address, pin, _host) = start_host(authenticator);
+    let (address, pin, _host) = start_host(authenticator, Box::new(NoInput));
     let credentials = ClientCredentials::Password {
         username: "ian".to_owned(),
         password: "wrong".to_owned(),
     };
-    let result = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials))
+    let result = tokio::time::timeout(TEST_TIMEOUT, stream(address, pin, credentials, None))
         .await
         .expect("the attempt finishes in time");
     assert!(matches!(result, Err(RuntimeError::AuthenticationFailed(_))));
+}
+
+/// Keys, pointer, buttons, scrolling and text sent by the client are
+/// performed on the host, in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn input_reaches_the_host() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let recorder = Recorder::default();
+    let (address, pin, host) = start_host(authenticator, Box::new(recorder.clone()));
+    let credentials = ClientCredentials::Token(TOKEN.to_vec());
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        stream(address, pin, credentials, Some(input_channel())),
+    )
+    .await
+    .expect("streaming finishes in time")
+    .unwrap();
+    let summary = tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    assert!(summary.input_reports >= 6);
+    assert_eq!(*recorder.0.lock().unwrap(), expected_actions());
 }

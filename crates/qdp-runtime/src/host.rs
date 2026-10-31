@@ -1,17 +1,16 @@
 //! The host's media pipeline: capture, encode, send, and answer feedback.
 
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use qdp::input::InputReceiver;
+use qdp::input::{InputEvent, InputReceiver};
 use qdp::message::{
     AudioConfig, AudioConfigId, Av1Profiles, BlockGrid, Capability, Chroma, ClientMonitorId,
     ControlMessage, CursorId, CursorSet, Datagram, DatagramPayload, DeviceAttach, DeviceId,
-    DeviceKind, DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequestId,
-    FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags, ImageSerial,
-    InputClasses, MinorVersion, MonitorId, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamId,
-    VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoLayer, VideoStreamConfig,
-    VideoStreamFlags,
+    DeviceKind, DeviceOutput, DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId,
+    DisplayRequestId, FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags,
+    ImageSerial, InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT,
+    PointerKind, PointerMode, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags,
+    VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
 use qdp::session::{HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
@@ -23,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::auth::HostAuthExchange;
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
+use crate::host_input::{InputAction, InputInjector, StandardInput};
 use crate::media::FrameSource;
 use crate::send_stats::{SendStats, queue_delay};
 use crate::{HostAuthenticator, RuntimeError, is_normal_close};
@@ -120,11 +120,6 @@ fn capabilities() -> Vec<Capability> {
     ]
 }
 
-/// Returns whether the host accepts a device of `kind`.
-fn accepts(kind: DeviceKind) -> bool {
-    [DeviceKind::KEYBOARD, DeviceKind::POINTER, DeviceKind::MOUSE].contains(&kind)
-}
-
 /// Converts a size to a variable-length integer, saturating.
 fn varint(value: usize) -> VarInt {
     VarInt::try_from(value).unwrap_or(VarInt::MAX)
@@ -147,8 +142,10 @@ struct ActiveHost {
     input: InputReceiver,
     /// The host's session clock.
     clock: SessionClock,
-    /// The devices the host accepted.
-    devices: BTreeSet<DeviceId>,
+    /// The devices the host accepted, and their last applied state.
+    devices: StandardInput,
+    /// Performs the client's input on the host's desktop.
+    injector: Box<dyn InputInjector>,
     /// The Config ID of the last `DISPLAY_CONFIG`.
     display_config_id: u64,
     /// The display configuration, resent unchanged when the client asks again.
@@ -157,15 +154,19 @@ struct ActiveHost {
     summary: HostSummary,
     /// The statistics logged every second.
     stats: SendStats,
+    /// The Output Sequence of the last keyboard output report.
+    output_sequence: u64,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
 /// client disconnects, streaming frames from `source`, which is captured and
-/// encoded on a thread of its own.
+/// encoded on a thread of its own, and performing the client's input with
+/// `injector`.
 pub async fn serve(
     connection: QdpConnection,
     options: &HostOptions,
     source: Box<dyn FrameSource>,
+    injector: Box<dyn InputInjector>,
 ) -> Result<HostSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
     let config = HostConfig {
@@ -179,7 +180,7 @@ pub async fn serve(
     };
     let mut driver = HostDriver::host(connection, config);
     let mut auth = HostAuthExchange::new(&options.authenticator, binding);
-    let mut devices = BTreeSet::new();
+    let mut devices = StandardInput::default();
     let mut request_id = DisplayRequestId::NONE;
     let mut audio_requested = false;
 
@@ -233,7 +234,12 @@ pub async fn serve(
     }))?;
     session.start()?;
     driver.flush().await?;
-    info!(width, height, "session active");
+    info!(
+        width,
+        height,
+        input = injector.description(),
+        "session active"
+    );
 
     let settings = EncoderSettings {
         width,
@@ -258,23 +264,33 @@ pub async fn serve(
         input: InputReceiver::new(),
         clock: SessionClock::new(Instant::now()),
         devices,
+        injector,
         display_config_id: 1,
         display_config,
         summary: HostSummary::default(),
+        output_sequence: 0,
     };
-    active
+    for keyboard in active.devices.keyboards() {
+        active.send_keyboard_output(keyboard)?;
+    }
+    let result = active
         .run(Duration::from_secs(1) / options.frame_rate.max(1))
-        .await
+        .await;
+    // Nothing the client held stays held on the host.
+    let actions = active.devices.release_all();
+    active.inject(&actions);
+    result
 }
 
-/// Answers a `DEVICE_ATTACH`, accepting the standard devices this host supports.
+/// Answers a `DEVICE_ATTACH`, accepting the standard devices this host
+/// supports, and returns whether the device was accepted.
 fn answer_attach(
     driver: &mut HostDriver,
     attach: &DeviceAttach,
-    devices: &mut BTreeSet<DeviceId>,
-) -> Result<(), RuntimeError> {
-    let status = if accepts(attach.kind) {
-        devices.insert(attach.device_id);
+    devices: &mut StandardInput,
+) -> Result<bool, RuntimeError> {
+    let accepted = devices.attach(attach.device_id, attach.kind);
+    let status = if accepted {
         DeviceStatusCode::Accepted
     } else {
         DeviceStatusCode::Unsupported
@@ -286,7 +302,7 @@ fn answer_attach(
             status,
             reason: String::new(),
         }))?;
-    Ok(())
+    Ok(accepted)
 }
 
 /// Returns the configuration of one monitor of `width × height` with one AV1
@@ -365,7 +381,7 @@ impl ActiveHost {
                 self.send(datagram)?;
             }
             let events = self.input.handle_timeout(smoothed_rtt, now);
-            self.summary.input_reports += events.len() as u64;
+            self.apply_input(&events);
             if let Some(ack) = self.input.poll_ack(now) {
                 self.send(ack.to_bytes())?;
             }
@@ -390,6 +406,40 @@ impl ActiveHost {
                     .map(|since| now.saturating_duration_since(since)),
             );
         }
+    }
+
+    /// Applies input reports through the injector.
+    fn apply_input(&mut self, events: &[InputEvent]) {
+        self.summary.input_reports += events.len() as u64;
+        for event in events {
+            let actions = self.devices.apply(event);
+            self.inject(&actions);
+        }
+    }
+
+    /// Performs input actions, logging the ones that fail.
+    fn inject(&mut self, actions: &[InputAction]) {
+        for action in actions {
+            if let Err(error) = self.injector.inject(action) {
+                warn!(?action, error, "input not applied");
+            }
+        }
+    }
+
+    /// Sends a keyboard's output report: the host's LED state (Section 8.4.1).
+    fn send_keyboard_output(&mut self, device_id: DeviceId) -> Result<(), RuntimeError> {
+        self.output_sequence += 1;
+        let report = KeyboardOutput {
+            leds: self.injector.keyboard_leds(),
+        }
+        .to_bytes();
+        let datagram = DeviceOutput {
+            device_id,
+            output_sequence: varint_u64(self.output_sequence),
+            data: &report,
+        }
+        .to_bytes();
+        self.send(datagram)
     }
 
     /// Returns whether the datagrams waiting to be sent would take longer than
@@ -481,10 +531,14 @@ impl ActiveHost {
                     .send(&ControlMessage::DisplayConfig(self.display_config.clone()))?;
             }
             HostEvent::Message(ControlMessage::DeviceAttach(attach)) => {
-                answer_attach(&mut self.driver, &attach, &mut self.devices)?;
+                let accepted = answer_attach(&mut self.driver, &attach, &mut self.devices)?;
+                if accepted && attach.kind == DeviceKind::KEYBOARD {
+                    self.send_keyboard_output(attach.device_id)?;
+                }
             }
             HostEvent::Message(ControlMessage::DeviceDetach(detach)) => {
-                self.devices.remove(&detach.device_id);
+                let actions = self.devices.detach(detach.device_id);
+                self.inject(&actions);
             }
             _ => {}
         }
@@ -516,11 +570,11 @@ impl ActiveHost {
                 let devices = &self.devices;
                 let events = self.input.handle_input(
                     &input,
-                    |device| devices.contains(&device),
+                    |device| devices.contains(device),
                     smoothed_rtt,
                     now,
                 );
-                self.summary.input_reports += events.len() as u64;
+                self.apply_input(&events);
             }
             _ => {}
         }

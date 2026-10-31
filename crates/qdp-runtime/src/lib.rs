@@ -17,8 +17,10 @@
 
 mod auth;
 mod client;
+mod client_input;
 mod encode_thread;
 mod host;
+mod host_input;
 mod media;
 mod send_stats;
 
@@ -31,7 +33,9 @@ use thiserror::Error;
 
 pub use auth::{ClientCredentials, HostAuthenticator};
 pub use client::{ClientOptions, ClientSummary, DisplaySize, run};
+pub use client_input::{InputHandle, InputQueue, UserInput, input_channel};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
+pub use host_input::{InputAction, InputInjector, NoInput, PointerButton};
 pub use media::{FrameInfo, FrameSink, FrameSource, SinkControl, TestPattern, changed_blocks};
 
 /// An error that ends a session.
