@@ -17,7 +17,9 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["screen-capture", "window"]
+default = ["audio", "screen-capture", "window"]
+# Plays and captures sound; on Linux it needs PipeWire's development files.
+audio = ["qdp-desktop/audio"]
 # Captures the host's screen; without it, hosts stream a test pattern.
 screen-capture = ["qdp-desktop/screen-capture"]
 # Shows the stream in a window. Without it, `qdp connect` runs headless only,

@@ -33,7 +33,7 @@ use super::cursor::SystemCursor;
 use crate::latest_frame::LatestFrame;
 
 /// How long to wait for ScreenCaptureKit's answers and the first frame.
-const TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The frames per second asked for.
 const FRAME_RATE: i32 = 60;
@@ -116,7 +116,9 @@ fn convert(image: &CVPixelBuffer) -> Option<Yuv420Frame> {
 }
 
 /// Returns a completion handler that sends an error or success.
-fn completion(sender: mpsc::Sender<Result<(), String>>) -> RcBlock<dyn Fn(*mut NSError)> {
+pub(super) fn completion(
+    sender: mpsc::Sender<Result<(), String>>,
+) -> RcBlock<dyn Fn(*mut NSError)> {
     RcBlock::new(move |error: *mut NSError| {
         // SAFETY: a non-null error is a valid NSError for the call.
         let result = match unsafe { error.as_ref() } {
@@ -241,7 +243,7 @@ impl MacScreenCapture {
 }
 
 /// Returns the displays and windows that can be captured.
-fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
+pub(super) fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
     let (sender, receiver) = mpsc::channel();
     let handler = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
