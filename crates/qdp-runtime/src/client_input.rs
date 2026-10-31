@@ -353,8 +353,8 @@ impl InputQueue {
     }
 
     /// Returns the signal notified when input arrives.
-    pub(crate) fn wake(&self) -> &Notify {
-        &self.wake
+    pub(crate) fn wake(&self) -> Arc<Notify> {
+        Arc::clone(&self.wake)
     }
 }
 

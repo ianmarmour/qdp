@@ -31,6 +31,7 @@ mod client_input;
 mod client_passthrough;
 mod client_touch;
 mod clipboard;
+mod decode_thread;
 mod encode_thread;
 mod host;
 mod host_cursor;
@@ -109,6 +110,9 @@ pub enum RuntimeError {
     /// The frame source failed.
     #[error("capture failed: {0}")]
     Capture(String),
+    /// The client's decoding stopped.
+    #[error("decoding failed: {0}")]
+    Decode(String),
     /// The system clipboard could not be shared.
     #[error("clipboard failed: {0}")]
     Clipboard(String),
