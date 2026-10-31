@@ -339,13 +339,16 @@ impl Config {
       return Err(InvalidRenderHeight(render_height));
     }
 
+    // Low-latency encoding may skip the RDO lookahead entirely, so that each
+    // frame is encoded as soon as it is received.
+    let min_rdo_lookahead_frames = if config.low_latency { 0 } else { 1 };
     if config.speed_settings.rdo_lookahead_frames > MAX_RDO_LOOKAHEAD_FRAMES
-      || config.speed_settings.rdo_lookahead_frames < 1
+      || config.speed_settings.rdo_lookahead_frames < min_rdo_lookahead_frames
     {
       return Err(InvalidRdoLookaheadFrames {
         actual: config.speed_settings.rdo_lookahead_frames,
         max: MAX_RDO_LOOKAHEAD_FRAMES,
-        min: 1,
+        min: min_rdo_lookahead_frames,
       });
     }
     if config.max_key_frame_interval > MAX_MAX_KEY_FRAME_INTERVAL {

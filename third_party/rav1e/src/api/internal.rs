@@ -418,12 +418,34 @@ impl<T: Pixel> ContextInner<T> {
     Ok(())
   }
 
+  /// Returns whether the encoder runs without any lookahead, encoding each
+  /// frame as soon as it is received.
+  ///
+  /// This requires low-latency mode, no scene detection (so keyframes are
+  /// placed only where they are forced or by the keyframe interval) and an
+  /// RDO lookahead of zero frames, which is only accepted in low-latency mode.
+  fn is_zero_lookahead(&self) -> bool {
+    self.config.low_latency
+      && self.config.speed_settings.scene_detection_mode
+        == crate::api::SceneDetectionSpeed::None
+      && self.config.speed_settings.rdo_lookahead_frames == 0
+  }
+
+  /// Returns how many frames after `input_frameno` must be in the frame queue
+  /// before keyframe placement can decide it.
+  fn keyframe_lookahead_frames(&self) -> u64 {
+    if self.is_zero_lookahead() {
+      0
+    } else {
+      self.inter_cfg.keyframe_lookahead_distance() + 1
+    }
+  }
+
   /// Indicates whether more frames need to be read into the frame queue
   /// in order for frame queue lookahead to be full.
   fn needs_more_frame_q_lookahead(&self, input_frameno: u64) -> bool {
     let lookahead_end = self.frame_q.keys().last().cloned().unwrap_or(0);
-    let frames_needed =
-      input_frameno + self.inter_cfg.keyframe_lookahead_distance() + 1;
+    let frames_needed = input_frameno + self.keyframe_lookahead_frames();
     lookahead_end < frames_needed && self.needs_more_frames(lookahead_end)
   }
 

@@ -393,6 +393,53 @@ fn switch_frame_interval() {
 }
 
 #[test]
+fn zero_lookahead_frame_delay() {
+  // In low-latency mode without scene detection and with no RDO lookahead,
+  // every frame is encoded as soon as it is received.
+  let mut ctx = setup_encoder::<u8>(
+    64,
+    80,
+    10,
+    100,
+    8,
+    ChromaSampling::Cs420,
+    5,
+    5,
+    0,
+    true,
+    0,
+    true,
+    0,
+    None,
+  );
+
+  for input_frameno in 0..10 {
+    let input = ctx.new_frame();
+    ctx.send_frame(input).unwrap();
+    let packet = loop {
+      match ctx.receive_packet() {
+        Ok(packet) => break packet,
+        Err(EncoderStatus::Encoded) => continue,
+        Err(status) => panic!("frame {input_frameno}: {status:?}"),
+      }
+    };
+    assert_eq!(packet.input_frameno, input_frameno);
+  }
+}
+
+#[test]
+fn zero_rdo_lookahead_requires_low_latency() {
+  let mut enc = EncoderConfig::default();
+  enc.speed_settings.rdo_lookahead_frames = 0;
+  enc.low_latency = false;
+  let config = Config::new().with_encoder_config(enc.clone());
+  assert!(config.validate().is_err());
+  enc.low_latency = true;
+  let config = Config::new().with_encoder_config(enc);
+  assert!(config.validate().is_ok());
+}
+
+#[test]
 fn minimum_frame_delay() {
   let mut ctx = setup_encoder::<u8>(
     64,
