@@ -1,0 +1,17 @@
+[package]
+name = "qdp"
+description = "Quick Desktop Protocol (QDP): a low-latency protocol for remote desktop and game streaming"
+readme = "../../README.md"
+keywords = ["remote-desktop", "game-streaming", "low-latency", "rdp", "vnc"]
+categories = ["network-programming", "multimedia::video"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
