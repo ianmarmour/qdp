@@ -931,6 +931,7 @@ dependencies = [
 [[package]]
 name = "rav1e"
 version = "0.8.1"
+source = "git+https://github.com/ianmarmour/rav1e?rev=9cedec14a47010f0e078640707a6a0403abfa4de#9cedec14a47010f0e078640707a6a0403abfa4de"
 dependencies = [
  "aligned-vec",
  "arbitrary",
