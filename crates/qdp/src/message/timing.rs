@@ -39,7 +39,7 @@ pub struct TimePing {
     pub origin_timestamp: Timestamp,
 }
 
-impl DatagramPayload for TimePing {
+impl DatagramPayload<'_> for TimePing {
     const DATAGRAM_TYPE: DatagramType = DatagramType::TIME_PING;
 
     fn encode(&self, writer: &mut Writer) {
@@ -68,7 +68,7 @@ pub struct TimePong {
     pub transmit_timestamp: Timestamp,
 }
 
-impl DatagramPayload for TimePong {
+impl DatagramPayload<'_> for TimePong {
     const DATAGRAM_TYPE: DatagramType = DatagramType::TIME_PONG;
 
     fn encode(&self, writer: &mut Writer) {

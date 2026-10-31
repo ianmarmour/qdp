@@ -6,14 +6,33 @@
 //! rules of Section 1.6: bytes after the last known field of an extensible structure
 //! are ignored, and a structure shorter than its fields is an error.
 
+mod audio;
+mod block_map;
 mod capability;
+mod feedback;
+mod ids;
 mod session;
 mod timing;
+mod video;
+
+pub use audio::{
+    AudioConfig, AudioDirection, AudioPacket, AudioRequest, AudioStreamConfig, MAX_AUDIO_CHANNELS,
+    OpusMapping,
+};
+pub use block_map::{BLOCK_SIZE, BlockGrid, BlockSet};
 
 pub use capability::{
     AudioCodec, AudioCodecCapability, Av1Profiles, Capability, ClipboardCapability, Directions,
     HdrFormats, InputClasses, MAX_CAPABILITIES, MAX_CAPABILITY_LENGTH, NO_LEVEL_LIMIT, VideoCodec,
     VideoCodecCapability, VideoCodecFlags,
+};
+pub use feedback::{
+    DecodedRecord, DisplayTimingFlags, DisplayTimingRecord, FeedbackRecord, FrameTimingRecord,
+    LossRecord, MissingRange, NackRecord, VideoFeedback,
+};
+pub use ids::{
+    AudioConfigId, ClientMonitorId, DisplayConfigId, DisplayRequestId, FrameNumber, MonitorId,
+    StreamId,
 };
 pub use session::{
     AuthContinue, AuthMethod, AuthResult, AuthStart, AuthStatus, ClientHello, ClientReady,
@@ -21,6 +40,12 @@ pub use session::{
     PasswordAuthData, ResumptionToken, SessionStart,
 };
 pub use timing::{PingId, TimePing, TimePong, Timestamp};
+pub use video::{
+    Chroma, ClientMonitor, ClientMonitorFlags, DisplayConfig, DisplayRequest, FragmentFlags,
+    FrameHeader, FramePayload, HostMonitor, HostMonitorFlags, KeyframeRequest,
+    MAX_FRAGMENTS_PER_FRAME, MAX_FRAME_PAYLOAD_LENGTH, VideoFragment, VideoLayer,
+    VideoStreamConfig, VideoStreamFlags,
+};
 
 use crate::registry::{DatagramType, MessageType};
 use crate::wire::{ControlMessageFrame, DatagramFrame, Reader, WireError, Writer};
@@ -44,8 +69,9 @@ pub trait MessagePayload: Sized {
     }
 }
 
-/// The payload of a datagram of one type.
-pub trait DatagramPayload: Sized {
+/// The payload of a datagram of one type, which may borrow from the datagram's
+/// bytes for the lifetime `'a`.
+pub trait DatagramPayload<'a>: Sized {
     /// The Datagram Type that carries this payload.
     const DATAGRAM_TYPE: DatagramType;
 
@@ -53,7 +79,7 @@ pub trait DatagramPayload: Sized {
     fn encode(&self, writer: &mut Writer);
 
     /// Reads the payload's fields from `reader`.
-    fn decode(reader: &mut Reader<'_>) -> Result<Self, WireError>;
+    fn decode(reader: &mut Reader<'a>) -> Result<Self, WireError>;
 
     /// Returns the encoded datagram, including its type.
     fn to_bytes(&self) -> Vec<u8> {
@@ -88,6 +114,16 @@ pub enum ControlMessage {
     SessionStart(SessionStart),
     /// `RESUMPTION_TOKEN` (Section 4.4.7).
     ResumptionToken(ResumptionToken),
+    /// `DISPLAY_REQUEST` (Section 6.2).
+    DisplayRequest(DisplayRequest),
+    /// `DISPLAY_CONFIG` (Section 6.3).
+    DisplayConfig(DisplayConfig),
+    /// `KEYFRAME_REQUEST` (Section 6.10).
+    KeyframeRequest(KeyframeRequest),
+    /// `AUDIO_REQUEST` (Section 7.2).
+    AudioRequest(AudioRequest),
+    /// `AUDIO_CONFIG` (Section 7.3).
+    AudioConfig(AudioConfig),
     /// A message of a type this implementation does not decode, which the receiver
     /// ignores (Section 3.6.2).
     Unknown(ControlMessageFrame),
@@ -105,6 +141,11 @@ impl ControlMessage {
             MessageType::CLIENT_READY => Self::ClientReady(decode_message(frame)?),
             MessageType::SESSION_START => Self::SessionStart(decode_message(frame)?),
             MessageType::RESUMPTION_TOKEN => Self::ResumptionToken(decode_message(frame)?),
+            MessageType::DISPLAY_REQUEST => Self::DisplayRequest(decode_message(frame)?),
+            MessageType::DISPLAY_CONFIG => Self::DisplayConfig(decode_message(frame)?),
+            MessageType::KEYFRAME_REQUEST => Self::KeyframeRequest(decode_message(frame)?),
+            MessageType::AUDIO_REQUEST => Self::AudioRequest(decode_message(frame)?),
+            MessageType::AUDIO_CONFIG => Self::AudioConfig(decode_message(frame)?),
             _ => Self::Unknown(frame.clone()),
         };
         Ok(message)
@@ -121,6 +162,11 @@ impl ControlMessage {
             Self::ClientReady(message) => message.to_frame(),
             Self::SessionStart(message) => message.to_frame(),
             Self::ResumptionToken(message) => message.to_frame(),
+            Self::DisplayRequest(message) => message.to_frame(),
+            Self::DisplayConfig(message) => message.to_frame(),
+            Self::KeyframeRequest(message) => message.to_frame(),
+            Self::AudioRequest(message) => message.to_frame(),
+            Self::AudioConfig(message) => message.to_frame(),
             Self::Unknown(frame) => frame.clone(),
         }
     }
@@ -136,6 +182,11 @@ impl ControlMessage {
             Self::ClientReady(_) => ClientReady::MESSAGE_TYPE,
             Self::SessionStart(_) => SessionStart::MESSAGE_TYPE,
             Self::ResumptionToken(_) => ResumptionToken::MESSAGE_TYPE,
+            Self::DisplayRequest(_) => DisplayRequest::MESSAGE_TYPE,
+            Self::DisplayConfig(_) => DisplayConfig::MESSAGE_TYPE,
+            Self::KeyframeRequest(_) => KeyframeRequest::MESSAGE_TYPE,
+            Self::AudioRequest(_) => AudioRequest::MESSAGE_TYPE,
+            Self::AudioConfig(_) => AudioConfig::MESSAGE_TYPE,
             Self::Unknown(frame) => frame.message_type,
         }
     }
@@ -144,6 +195,12 @@ impl ControlMessage {
 /// Any datagram, borrowing the bytes of the QUIC DATAGRAM frame it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Datagram<'a> {
+    /// `VIDEO_FRAGMENT` (Section 6.6.1).
+    VideoFragment(VideoFragment<'a>),
+    /// `VIDEO_FEEDBACK` (Section 6.7).
+    VideoFeedback(VideoFeedback),
+    /// `AUDIO_PACKET` (Section 7.4).
+    AudioPacket(AudioPacket<'a>),
     /// `TIME_PING` (Section 5.2.1).
     TimePing(TimePing),
     /// `TIME_PONG` (Section 5.2.1).
@@ -159,6 +216,13 @@ impl<'a> Datagram<'a> {
         let frame = DatagramFrame::decode(bytes)?;
         let mut payload = Reader::new(frame.payload);
         let datagram = match frame.datagram_type {
+            DatagramType::VIDEO_FRAGMENT => {
+                Self::VideoFragment(VideoFragment::decode(&mut payload)?)
+            }
+            DatagramType::VIDEO_FEEDBACK => {
+                Self::VideoFeedback(VideoFeedback::decode(&mut payload)?)
+            }
+            DatagramType::AUDIO_PACKET => Self::AudioPacket(AudioPacket::decode(&mut payload)?),
             DatagramType::TIME_PING => Self::TimePing(TimePing::decode(&mut payload)?),
             DatagramType::TIME_PONG => Self::TimePong(TimePong::decode(&mut payload)?),
             _ => Self::Unknown(frame),
@@ -169,6 +233,9 @@ impl<'a> Datagram<'a> {
     /// Returns the encoded datagram, including its type.
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
+            Self::VideoFragment(datagram) => datagram.to_bytes(),
+            Self::VideoFeedback(datagram) => datagram.to_bytes(),
+            Self::AudioPacket(datagram) => datagram.to_bytes(),
             Self::TimePing(datagram) => datagram.to_bytes(),
             Self::TimePong(datagram) => datagram.to_bytes(),
             Self::Unknown(frame) => {
@@ -182,6 +249,9 @@ impl<'a> Datagram<'a> {
     /// Returns the Datagram Type of this datagram.
     pub fn datagram_type(&self) -> DatagramType {
         match self {
+            Self::VideoFragment(_) => VideoFragment::DATAGRAM_TYPE,
+            Self::VideoFeedback(_) => VideoFeedback::DATAGRAM_TYPE,
+            Self::AudioPacket(_) => AudioPacket::DATAGRAM_TYPE,
             Self::TimePing(_) => TimePing::DATAGRAM_TYPE,
             Self::TimePong(_) => TimePong::DATAGRAM_TYPE,
             Self::Unknown(frame) => frame.datagram_type,
@@ -254,6 +324,38 @@ mod tests {
         );
         assert_eq!(datagram.to_bytes(), bytes);
         assert_eq!(datagram.datagram_type(), DatagramType::TIME_PING);
+    }
+
+    /// Every media datagram dispatches to its own variant and round-trips.
+    #[test]
+    fn media_datagram_dispatch() {
+        let stream_id = StreamId(VarInt::from_u32(1));
+        let datagrams = [
+            Datagram::VideoFragment(VideoFragment {
+                stream_id,
+                frame_number: FrameNumber::FIRST,
+                fragment_index: VarInt::ZERO,
+                flags: FragmentFlags::KEY_FRAME.union(FragmentFlags::LAST),
+                data: &[0xaa],
+            }),
+            Datagram::VideoFeedback(VideoFeedback {
+                records: vec![FeedbackRecord::Decoded(DecodedRecord {
+                    stream_id,
+                    last_decoded_frame: FrameNumber::FIRST,
+                })],
+            }),
+            Datagram::AudioPacket(AudioPacket {
+                stream_id,
+                sequence_number: VarInt::from_u32(1),
+                sample_position: VarInt::ZERO,
+                capture_timestamp: Timestamp::default(),
+                payload: &[0xbb],
+            }),
+        ];
+        for datagram in datagrams {
+            let bytes = datagram.to_bytes();
+            assert_eq!(Datagram::decode(&bytes).unwrap(), datagram);
+        }
     }
 
     /// Unknown datagram types decode without error so the receiver can drop them.
