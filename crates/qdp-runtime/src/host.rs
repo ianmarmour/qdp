@@ -9,21 +9,23 @@ use qdp::message::{
     DeviceKind, DeviceOutput, DeviceStatus, DeviceStatusCode, DisplayConfig, DisplayConfigId,
     DisplayRequestId, FeedbackRecord, FrameHeader, HostHello, HostMonitor, HostMonitorFlags,
     ImageSerial, InputClasses, KeyboardOutput, MinorVersion, MonitorId, NO_LEVEL_LIMIT,
-    PointerKind, PointerMode, StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags,
-    VideoLayer, VideoStreamConfig, VideoStreamFlags,
+    PointerKind, PointerMode, StreamHeader, StreamId, VideoCodec, VideoCodecCapability,
+    VideoCodecFlags, VideoLayer, VideoStreamConfig, VideoStreamFlags,
 };
+use qdp::registry::ErrorCode;
 use qdp::session::{HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, VideoSender};
 use qdp::wire::{SignedVarInt, VarInt};
 use qdp_codec::{CodecPreference, EncoderSettings, KeyFrameRequest};
-use qdp_quic::{DriverInput, HostDriver, QdpConnection, TransportError};
+use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportError};
 use tracing::{debug, info, warn};
 
 use crate::auth::HostAuthExchange;
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
-use crate::host_input::{InputAction, InputInjector, StandardInput};
-use crate::media::FrameSource;
+use crate::host_cursor::{CursorUpdate, HostCursor};
+use crate::host_input::{InputAction, InputInjector, Positions, StandardInput};
+use crate::media::{CursorState, FrameSource};
 use crate::send_stats::{SendStats, queue_delay};
 use crate::{HostAuthenticator, RuntimeError, is_normal_close};
 
@@ -48,8 +50,9 @@ const BIT_DEPTH: u8 = 8;
 /// The AV1 profile of the streams this host sends: profile 0, 4:2:0.
 const AV1_PROFILE: u8 = 0;
 
-/// The interface scale the host reports, in percent.
-const SCALE_PERCENT: u32 = 100;
+/// The interface scale the host reports, in percent, for its monitor and the
+/// cursor images drawn for it.
+pub(crate) const SCALE_PERCENT: u32 = 100;
 
 /// The millihertz in one hertz.
 const MILLIHERTZ_PER_HERTZ: u32 = 1000;
@@ -156,6 +159,8 @@ struct ActiveHost {
     stats: SendStats,
     /// The Output Sequence of the last keyboard output report.
     output_sequence: u64,
+    /// The cursor the client draws.
+    cursor: HostCursor,
 }
 
 /// Runs the host's side of one session on an accepted connection until the
@@ -234,6 +239,7 @@ pub async fn serve(
     }))?;
     session.start()?;
     driver.flush().await?;
+    driver.accept_streams(client_stream_policy);
     info!(
         width,
         height,
@@ -269,6 +275,7 @@ pub async fn serve(
         display_config,
         summary: HostSummary::default(),
         output_sequence: 0,
+        cursor: HostCursor::default(),
     };
     for keyboard in active.devices.keyboards() {
         active.send_keyboard_output(keyboard)?;
@@ -280,6 +287,18 @@ pub async fn serve(
     let actions = active.devices.release_all();
     active.inject(&actions);
     result
+}
+
+/// Returns what the host does with a stream the client opened (Section
+/// 3.5.2). Clipboard data is not requested yet, so none is expected.
+fn client_stream_policy(header: &StreamHeader) -> StreamPolicy {
+    match header {
+        StreamHeader::CursorImage | StreamHeader::HidOutput { .. } => {
+            StreamPolicy::Forbid(ErrorCode::STREAM_CREATION_ERROR)
+        }
+        StreamHeader::ClipboardData { .. } => StreamPolicy::Refuse(ErrorCode::REQUEST_CANCELLED),
+        StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
+    }
 }
 
 /// Answers a `DEVICE_ATTACH`, accepting the standard devices this host
@@ -368,7 +387,7 @@ impl ActiveHost {
             match input {
                 Ok(DriverInput::Event(event)) => self.handle_event(event)?,
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(&datagram)?,
-                Ok(DriverInput::Deadline | DriverInput::Wake) => {}
+                Ok(DriverInput::Deadline | DriverInput::Wake | DriverInput::Stream(_)) => {}
                 Err(error) if is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
             }
@@ -411,22 +430,54 @@ impl ActiveHost {
         }
     }
 
-    /// Applies input reports through the injector.
+    /// Applies input reports through the injector. Positions the client
+    /// computed before the latest warp are ignored (Section 8.7).
     fn apply_input(&mut self, events: &[InputEvent]) {
         self.summary.input_reports += events.len() as u64;
         for event in events {
-            let actions = self.devices.apply(event);
+            let positions = if event.warp_id < self.cursor.latest_warp() {
+                Positions::Ignore
+            } else {
+                Positions::Apply
+            };
+            let actions = self.devices.apply(event, positions);
             self.inject(&actions);
         }
     }
 
     /// Performs input actions, logging the ones that fail.
     fn inject(&mut self, actions: &[InputAction]) {
+        let now = Instant::now();
         for action in actions {
+            self.cursor.input(action, now);
             if let Err(error) = self.injector.inject(action) {
                 warn!(?action, error, "input not applied");
             }
         }
+    }
+
+    /// Tells the client about the pointer a capture saw: new images on
+    /// streams of their own, and `CURSOR_SET` and `CURSOR_WARP` messages.
+    fn send_cursor(&mut self, state: &CursorState, now: Instant) -> Result<(), RuntimeError> {
+        for update in self.cursor.update(state, now) {
+            match update {
+                CursorUpdate::Image(image) => {
+                    let stream = [StreamHeader::CursorImage.to_bytes(), image.to_bytes()].concat();
+                    self.driver.connection().send_stream(stream);
+                }
+                CursorUpdate::Set(set) => {
+                    self.driver
+                        .session()
+                        .send(&ControlMessage::CursorSet(set))?;
+                }
+                CursorUpdate::Warp(warp) => {
+                    self.driver
+                        .session()
+                        .send(&ControlMessage::CursorWarp(warp))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Sends a keyboard's output report: the host's LED state (Section 8.4.1).
@@ -480,8 +531,12 @@ impl ActiveHost {
         Ok(())
     }
 
-    /// Fragments and sends one encoded frame.
+    /// Fragments and sends one encoded frame, and the pointer captured with
+    /// it.
     fn send_encoded(&mut self, output: EncodedOutput, now: Instant) -> Result<(), RuntimeError> {
+        if let Some(cursor) = &output.cursor {
+            self.send_cursor(cursor, now)?;
+        }
         let kind = match (output.frame.is_key_frame, output.job.recovery) {
             (true, true) => FrameKind::KeyRecovery,
             (true, false) => FrameKind::Key,

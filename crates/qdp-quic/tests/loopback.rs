@@ -10,15 +10,16 @@ use qdp::message::{
     ClientMonitorFlags, ClientMonitorId, ControlMessage, CursorId, CursorSet, Datagram,
     DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind, DeviceStatus,
     DeviceStatusCode, DisplayConfig, DisplayConfigId, DisplayRequest, DisplayRequestId, HostHello,
-    ImageSerial, MinorVersion, NO_LEVEL_LIMIT, PointerKind, PointerMode, VideoCodec,
+    ImageSerial, MinorVersion, NO_LEVEL_LIMIT, PointerKind, PointerMode, StreamHeader, VideoCodec,
     VideoCodecCapability, VideoCodecFlags,
 };
+use qdp::registry::{ErrorCode, StreamType};
 use qdp::session::{AuthResponse, ClientEvent, HostConfig, HostEvent, Phase};
 use qdp::time::{ClockSync, SessionClock, answer_ping};
 use qdp::wire::{SignedVarInt, VarInt};
 use qdp_quic::{
-    ClientDriver, ClientEndpoint, HostDriver, HostEndpoint, HostIdentity, HostVerification, KeyPin,
-    TransportError,
+    ClientDriver, ClientEndpoint, DriverInput, HostDriver, HostEndpoint, HostIdentity,
+    HostVerification, KeyPin, StreamFailure, StreamLimit, StreamPolicy, TransportError,
 };
 
 /// The longest a test may run before it is considered hung.
@@ -35,6 +36,32 @@ const ITERATIONS: u32 = 4096;
 
 /// The server name the client sends.
 const SERVER_NAME: &str = "qdp-host";
+
+/// The data of the cursor image stream the host sends.
+const STREAM_DATA: &[u8] = b"cursor image";
+
+/// The most data the client accepts on a cursor image stream.
+const STREAM_LIMIT: usize = 16;
+
+/// A stream type no version defines.
+const UNKNOWN_STREAM_TYPE: StreamType = StreamType(VarInt::from_u32(0x3f));
+
+/// Returns a stream's bytes: its header, then `data`.
+fn stream(header: StreamHeader, data: &[u8]) -> Vec<u8> {
+    [header.to_bytes(), data.to_vec()].concat()
+}
+
+/// The client's policy for the host's streams.
+fn stream_policy(header: &StreamHeader) -> StreamPolicy {
+    match header {
+        StreamHeader::CursorImage => StreamPolicy::Read(StreamLimit {
+            max_bytes: STREAM_LIMIT,
+            overflow: ErrorCode::PROTOCOL_VIOLATION,
+        }),
+        StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
+        _ => StreamPolicy::Forbid(ErrorCode::STREAM_CREATION_ERROR),
+    }
+}
 
 /// Returns an unspecified loopback address with an ephemeral port.
 fn loopback() -> SocketAddr {
@@ -160,14 +187,23 @@ async fn run_host(host: HostEndpoint, credentials: ScramCredentials) -> Transpor
     let pong = answer_ping(&ping, &clock, now, now);
     driver.connection().send_datagram(pong.to_bytes()).unwrap();
 
+    let connection = driver.connection();
+    connection.send_stream(stream(
+        StreamHeader::Unknown(UNKNOWN_STREAM_TYPE),
+        b"ignored",
+    ));
+    connection.send_stream(stream(StreamHeader::CursorImage, STREAM_DATA));
+    connection.send_stream(stream(StreamHeader::CursorImage, &[0; STREAM_LIMIT + 1]));
+
     driver
         .next_event()
         .await
         .expect_err("the client closes the session")
 }
 
-/// Runs the client's side of one session: SCRAM authentication, configuration and
-/// one clock synchronization exchange, then closes the session.
+/// Runs the client's side of one session: SCRAM authentication, configuration,
+/// one clock synchronization exchange and the host's streams, then closes the
+/// session.
 async fn run_client(address: SocketAddr, pin: KeyPin) {
     let endpoint = ClientEndpoint::bind(loopback()).unwrap();
     let connection = endpoint
@@ -229,6 +265,18 @@ async fn run_client(address: SocketAddr, pin: KeyPin) {
         .handle_pong(&pong, Instant::now())
         .expect("a clock sample");
     assert!(sample.delay < Duration::from_secs(1));
+
+    // The unknown stream is refused, so only the cursor images arrive.
+    driver.accept_streams(stream_policy);
+    let mut received = Vec::new();
+    while received.len() < 2 {
+        if let DriverInput::Stream(stream) = driver.next_input(None, None).await.unwrap() {
+            assert_eq!(stream.header, StreamHeader::CursorImage);
+            received.push(stream.data);
+        }
+    }
+    assert!(received.contains(&Ok(STREAM_DATA.to_vec())));
+    assert!(received.contains(&Err(StreamFailure::TooLong)));
 
     driver.close("test complete");
     endpoint.wait_idle().await;

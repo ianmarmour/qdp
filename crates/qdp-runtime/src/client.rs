@@ -8,22 +8,27 @@ use bytes::Bytes;
 use qdp::input::{DeviceClass, InputSender};
 use qdp::message::{
     Av1Profiles, Capability, ClientHello, ClientMonitor, ClientMonitorFlags, ClientMonitorId,
-    ControlMessage, Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId, DeviceKind,
-    DeviceStatusCode, DisplayConfig, DisplayRequest, DisplayRequestId, FeedbackRecord,
-    InputClasses, KeyframeRequest, MinorVersion, NO_LEVEL_LIMIT, StreamId, VideoCodec,
-    VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer,
+    ControlMessage, CursorImage, Datagram, DatagramPayload, DeviceAttach, DeviceFeatures, DeviceId,
+    DeviceKind, DeviceStatusCode, DisplayConfig, DisplayRequest, DisplayRequestId, FeedbackRecord,
+    InputClasses, KeyframeRequest, MAX_CURSOR_SIZE, MinorVersion, NO_LEVEL_LIMIT, StreamHeader,
+    StreamId, VideoCodec, VideoCodecCapability, VideoCodecFlags, VideoFeedback, VideoLayer,
+    WarpFlags,
 };
+use qdp::registry::ErrorCode;
 use qdp::session::ClientEvent;
 use qdp::time::{ClockSync, SessionClock, answer_ping};
 use qdp::video::VideoReceiver;
 use qdp::wire::{SignedVarInt, VarInt};
 use qdp_codec::{CodecPreference, VideoDecoder, open_decoder};
-use qdp_quic::{ClientDriver, DriverInput, QdpConnection, TransportError};
+use qdp_quic::{
+    ClientDriver, DriverInput, QdpConnection, StreamLimit, StreamPolicy, TransportError,
+};
 use tracing::{debug, info, warn};
 
 use crate::auth::ClientAuthExchange;
+use crate::client_cursor::{ClientCursor, CursorChange};
 use crate::client_input::{ClientDevices, InputQueue, KEYBOARD_ID, MOUSE_ID, POINTER_ID, TEXT_ID};
-use crate::media::{FrameInfo, FrameSink, SinkControl};
+use crate::media::{CursorWarp, FrameInfo, FrameSink, SinkControl, WarpKind};
 use crate::{ClientCredentials, RuntimeError};
 
 /// The client's identifier for its one display area.
@@ -46,6 +51,13 @@ const EARLY_BUFFER_AGE: Duration = Duration::from_secs(2);
 
 /// The overhead of one feedback record's type and length fields, bounded.
 const RECORD_OVERHEAD: usize = 16;
+
+/// QDP positions are in 1/256 pixel (Section 1.5.6).
+const SUBUNITS: f64 = 256.0;
+
+/// The most bytes a `CURSOR_IMAGE` stream carries after its Stream Type: the
+/// largest image's pixels and eight variable-length integers.
+const MAX_CURSOR_STREAM: usize = (MAX_CURSOR_SIZE * MAX_CURSOR_SIZE) as usize * 4 + 8 * 8;
 
 /// The client's display, as it describes it to the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +230,10 @@ struct ActiveClient<'a> {
     devices: ClientDevices,
     /// The user's input, if the client has a user interface.
     input_queue: Option<InputQueue>,
+    /// The host's cursor images and the one to draw.
+    cursor: ClientCursor,
+    /// The desktop position of the monitor's top-left corner, in pixels.
+    monitor_origin: (f64, f64),
 }
 
 /// Runs the client's side of one session on a new connection, presenting decoded
@@ -274,6 +290,7 @@ pub async fn run(
         }
     }
     info!("session active");
+    driver.accept_streams(host_stream_policy);
 
     let now = Instant::now();
     let clock = SessionClock::new(now);
@@ -290,6 +307,8 @@ pub async fn run(
         input: InputSender::new(clock),
         devices: ClientDevices::default(),
         input_queue: input,
+        cursor: ClientCursor::default(),
+        monitor_origin: (0.0, 0.0),
     };
     if let Some(config) = display_config {
         active.configure(&config)?;
@@ -300,7 +319,54 @@ pub async fn run(
     active.run().await
 }
 
+/// Returns what the client does with a stream the host opened (Section
+/// 3.5.2). The client requests no clipboard data and attaches no passthrough
+/// devices yet, so it expects neither.
+fn host_stream_policy(header: &StreamHeader) -> StreamPolicy {
+    match header {
+        StreamHeader::CursorImage => StreamPolicy::Read(StreamLimit {
+            max_bytes: MAX_CURSOR_STREAM,
+            overflow: ErrorCode::PROTOCOL_VIOLATION,
+        }),
+        StreamHeader::ClipboardData { .. } | StreamHeader::HidOutput { .. } => {
+            StreamPolicy::Refuse(ErrorCode::REQUEST_CANCELLED)
+        }
+        StreamHeader::Unknown(_) => StreamPolicy::Refuse(ErrorCode::STREAM_TYPE_UNKNOWN),
+    }
+}
+
+/// Shows a cursor change in the sink.
+fn show_cursor(sink: &mut dyn FrameSink, change: CursorChange<'_>) {
+    match change {
+        CursorChange::Hidden => sink.set_cursor(None),
+        CursorChange::Shown(image) => sink.set_cursor(Some(image)),
+    }
+}
+
 impl ActiveClient<'_> {
+    /// Acts on a unidirectional stream from the host.
+    fn handle_stream(&mut self, stream: qdp_quic::ReceivedStream) {
+        let data = match (stream.header, stream.data) {
+            (StreamHeader::CursorImage, Ok(data)) => data,
+            (header, Err(failure)) => {
+                debug!(?header, ?failure, "stream not received");
+                return;
+            }
+            (header, Ok(_)) => {
+                debug!(?header, "unexpected stream ignored");
+                return;
+            }
+        };
+        match CursorImage::decode(&data) {
+            Ok(image) => {
+                if let Some(change) = self.cursor.image(image) {
+                    show_cursor(self.sink, change);
+                }
+            }
+            Err(error) => warn!(%error, "malformed cursor image ignored"),
+        }
+    }
+
     /// Acts on a control message from the host.
     fn handle_message(&mut self, message: ControlMessage) -> Result<(), RuntimeError> {
         match message {
@@ -320,6 +386,27 @@ impl ActiveClient<'_> {
                 }
             }
             ControlMessage::PointerMode(mode) => self.devices.set_pointer_mode(mode.mode),
+            ControlMessage::CursorSet(set) => {
+                if let Some(change) = self.cursor.set(set) {
+                    show_cursor(self.sink, change);
+                }
+            }
+            ControlMessage::CursorWarp(warp) => {
+                let coordinate = |value: SignedVarInt| value.into_inner() as f64 / SUBUNITS;
+                let kind = if warp.flags.contains(WarpFlags::FOLLOW) {
+                    WarpKind::Follow
+                } else {
+                    WarpKind::Move
+                };
+                self.sink.warp_cursor(CursorWarp {
+                    position: (
+                        coordinate(warp.x) - self.monitor_origin.0,
+                        coordinate(warp.y) - self.monitor_origin.1,
+                    ),
+                    kind,
+                });
+                self.input.set_warp(warp.warp_id);
+            }
             _ => {}
         }
         Ok(())
@@ -333,6 +420,10 @@ impl ActiveClient<'_> {
                 |value: SignedVarInt| i32::try_from(value.into_inner()).unwrap_or_default();
             self.devices
                 .set_monitor_origin(coordinate(monitor.x), coordinate(monitor.y));
+            self.monitor_origin = (
+                f64::from(coordinate(monitor.x)),
+                f64::from(coordinate(monitor.y)),
+            );
         }
         let mut streams = HashMap::new();
         for stream in &config.streams {
@@ -400,6 +491,7 @@ impl ActiveClient<'_> {
                 }
                 Ok(DriverInput::Event(_) | DriverInput::Deadline | DriverInput::Wake) => {}
                 Ok(DriverInput::Datagram(datagram)) => self.handle_datagram(datagram)?,
+                Ok(DriverInput::Stream(stream)) => self.handle_stream(stream),
                 Err(error) if crate::is_normal_close(&error) => return Ok(self.summary),
                 Err(error) => return Err(error.into()),
             }

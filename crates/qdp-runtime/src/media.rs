@@ -1,12 +1,37 @@
 //! Frame sources on the host, frame sinks on the client, and the comparison of
 //! frames that fills block maps.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use qdp::message::{BLOCK_SIZE, BlockGrid, BlockSet, FrameNumber};
+use qdp::message::{BLOCK_SIZE, BlockGrid, BlockSet, CursorImage, FrameNumber};
 use qdp_codec::Yuv420Frame;
 
 use crate::RuntimeError;
+
+/// A pointer image, as a capture source reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CursorShape {
+    /// The width in pixels.
+    pub width: u32,
+    /// The height in pixels.
+    pub height: u32,
+    /// The pixel that marks the pointer's position: its column and row.
+    pub hotspot: (u32, u32),
+    /// Red, green, blue and alpha bytes per pixel, sRGB with straight alpha,
+    /// row by row from the top.
+    pub pixels: Vec<u8>,
+}
+
+/// The pointer, as a capture source last saw it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CursorState {
+    /// The hotspot's position in the frame, in pixels, or `None` while the
+    /// pointer is hidden or on another monitor.
+    pub position: Option<(i32, i32)>,
+    /// The pointer's image, shared until it changes.
+    pub shape: Option<Arc<CursorShape>>,
+}
 
 /// Produces the frames a host streams, such as a screen capture.
 pub trait FrameSource: Send {
@@ -15,6 +40,14 @@ pub trait FrameSource: Send {
 
     /// Returns the current frame.
     fn capture(&mut self) -> Result<Yuv420Frame, RuntimeError>;
+
+    /// Returns the pointer as of the last capture, for sources that capture
+    /// it apart from the frames, which then do not show it; the client draws
+    /// it (Section 9.1). Sources that return `None` show the pointer in their
+    /// frames, if at all.
+    fn cursor(&mut self) -> Option<CursorState> {
+        None
+    }
 }
 
 /// The luma value of the test pattern's background at the top-left corner.
@@ -160,10 +193,42 @@ pub struct FrameInfo {
     pub decoded_at: Instant,
 }
 
+/// How a warp moves the client's pointer (Section 9.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WarpKind {
+    /// An application moved the pointer: the client moves its own pointer to
+    /// match, when it has focus and the platform allows.
+    Move,
+    /// A device the client does not know moves the pointer: the client draws
+    /// the cursor there but leaves its own pointer alone.
+    Follow,
+}
+
+/// The host's pointer moved without the client's input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorWarp {
+    /// The pointer's new position on the host's monitor, in pixels.
+    pub position: (f64, f64),
+    /// How the client's pointer follows.
+    pub kind: WarpKind,
+}
+
 /// Receives the frames a client decodes, such as a window that shows them.
 pub trait FrameSink {
     /// Shows a decoded frame and says whether to keep streaming.
     fn present(&mut self, frame: &Yuv420Frame, info: FrameInfo) -> SinkControl;
+
+    /// Shows the host's cursor image at the user's pointer, or hides the
+    /// pointer when `None` (Section 9.3). The image is the size it has on the
+    /// host's monitor.
+    fn set_cursor(&mut self, cursor: Option<&CursorImage>) {
+        let _ = cursor;
+    }
+
+    /// Moves the cursor where the host's pointer went (Section 9.4).
+    fn warp_cursor(&mut self, warp: CursorWarp) {
+        let _ = warp;
+    }
 }
 
 #[cfg(test)]

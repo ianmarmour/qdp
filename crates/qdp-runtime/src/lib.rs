@@ -6,20 +6,24 @@
 //! - [`serve`] runs a host session: it authenticates the client with a
 //!   [`HostAuthenticator`], configures one monitor, and streams frames from a
 //!   [`FrameSource`], encoding them, sending their fragments, answering
-//!   retransmission requests and recovering from loss with key frames.
+//!   retransmission requests and recovering from loss with key frames. The
+//!   pointer the source reports goes to the client as cursor images, shapes
+//!   and warps.
 //! - [`run`] runs a client session: it authenticates with
 //!   [`ClientCredentials`], configures its display and input devices, and decodes
 //!   the host's video into a [`FrameSink`], sending feedback and synchronizing
-//!   clocks.
+//!   clocks. The sink also draws the host's cursor.
 //!
 //! [`TestPattern`] is a synthetic source for hosts without a screen capture
 //! backend, and for tests.
 
 mod auth;
 mod client;
+mod client_cursor;
 mod client_input;
 mod encode_thread;
 mod host;
+mod host_cursor;
 mod host_input;
 mod media;
 mod send_stats;
@@ -36,7 +40,10 @@ pub use client::{ClientOptions, ClientSummary, DisplaySize, run};
 pub use client_input::{InputHandle, InputQueue, UserInput, input_channel};
 pub use host::{EncoderTuning, HostOptions, HostSummary, serve};
 pub use host_input::{InputAction, InputInjector, NoInput, PointerButton};
-pub use media::{FrameInfo, FrameSink, FrameSource, SinkControl, TestPattern, changed_blocks};
+pub use media::{
+    CursorShape, CursorState, CursorWarp, FrameInfo, FrameSink, FrameSource, SinkControl,
+    TestPattern, WarpKind, changed_blocks,
+};
 
 /// An error that ends a session.
 #[derive(Debug, Error)]

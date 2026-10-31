@@ -7,8 +7,11 @@ use qdp::auth::scram::{CHANNEL_BINDING_LENGTH, ChannelBinding, EXPORTER_LABEL};
 use qdp::registry::ErrorCode;
 use quinn::{Connection, RecvStream, SendStream};
 
+use tracing::debug;
+
 use crate::TransportError;
 use crate::config::DATAGRAM_SEND_BUFFER;
+use crate::streams::write_stream;
 
 /// The largest chunk read from the control stream at once.
 const CONTROL_READ_CHUNK: usize = 64 << 10;
@@ -118,6 +121,18 @@ impl QdpConnection {
         Ok(self.connection.send_datagram(Bytes::from(datagram))?)
     }
 
+    /// Sends `data` on a new unidirectional stream, which it finishes, in the
+    /// background (Section 3.5.2). The stream starts with its header, which
+    /// is part of `data`. A stream the peer aborts is dropped.
+    pub fn send_stream(&self, data: Vec<u8>) {
+        let connection = self.connection.clone();
+        tokio::spawn(async move {
+            if let Err(error) = write_stream(&connection, &data).await {
+                debug!(%error, "stream not delivered");
+            }
+        });
+    }
+
     /// Writes bytes to the control stream.
     pub(crate) async fn write_control(&mut self, data: &[u8]) -> Result<(), TransportError> {
         Ok(self.control_send.write_all(data).await?)
@@ -138,7 +153,11 @@ impl QdpConnection {
 
     /// Closes the connection with a QDP error code (Section 3.10).
     pub fn close(&self, code: ErrorCode, reason: &str) {
-        let code = quinn::VarInt::from_u64(code.0.into_inner()).unwrap_or(FALLBACK_ERROR_CODE);
-        self.connection.close(code, reason.as_bytes());
+        self.connection.close(quic_code(code), reason.as_bytes());
     }
+}
+
+/// Returns the QUIC application error code carrying a QDP error code.
+pub(crate) fn quic_code(code: ErrorCode) -> quinn::VarInt {
+    quinn::VarInt::from_u64(code.0.into_inner()).unwrap_or(FALLBACK_ERROR_CODE)
 }
