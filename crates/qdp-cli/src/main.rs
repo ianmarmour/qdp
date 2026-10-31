@@ -424,6 +424,12 @@ async fn open_source(
     if kind == SourceKind::TestPattern {
         return Ok(test_pattern());
     }
+    if kind == SourceKind::Virtual {
+        let monitor = tokio::task::spawn_blocking(qdp_desktop::open_virtual_monitor)
+            .await
+            .map_err(|error| error.to_string())??;
+        return Ok((monitor, Streamed::Screen));
+    }
     let screen = tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory))
         .await
         .map_err(|error| error.to_string())?;

@@ -2,7 +2,8 @@
 //!
 //! - Input: uinput, a kernel interface reached through `ioctl`, so this module
 //!   uses `unsafe`: each block states the contract it relies on.
-//! - Screen capture: the ScreenCast portal and PipeWire.
+//! - Screen capture: the ScreenCast portal and PipeWire, and KWin's virtual
+//!   monitors.
 //! - Audio: PipeWire.
 
 #![allow(unsafe_code)]
@@ -12,6 +13,8 @@ mod audio;
 mod gamepad;
 mod hidraw;
 mod keycodes;
+#[cfg(feature = "screen-capture")]
+mod kwin_virtual;
 mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
@@ -24,6 +27,8 @@ mod uinput;
 
 #[cfg(feature = "audio")]
 pub use audio::{PipeWireInput, PipeWireOutput};
+#[cfg(feature = "screen-capture")]
+pub use kwin_virtual::VirtualMonitor;
 #[cfg(feature = "screen-capture")]
 pub use screencast::ScreenCapture;
 pub use uinput::UinputInjector;

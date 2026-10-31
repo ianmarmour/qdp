@@ -2316,6 +2316,8 @@ dependencies = [
  "qdp-runtime",
  "tokio",
  "tracing",
+ "wayland-client",
+ "wayland-protocols-plasma",
  "windows",
  "wl-clipboard-rs",
  "x11rb",

@@ -213,6 +213,12 @@ impl ScreenCapture {
         })
     }
 
+    /// Notes the monitor's size in the desktop's coordinates, which a stream
+    /// started without the portal does not report.
+    pub(super) fn set_desktop_size(&mut self, size: (i32, i32)) {
+        self.desktop_size = Some(size);
+    }
+
     /// Waits for the first frame and takes the monitor's size from it.
     fn wait_for_first_frame(&mut self) -> Result<(), String> {
         let first = self.wait_for_frame(FIRST_FRAME_TIMEOUT)?;
