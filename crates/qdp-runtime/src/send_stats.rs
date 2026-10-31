@@ -1,5 +1,5 @@
-//! The host's sending statistics, logged every second, and the rule that skips
-//! frames when the network falls behind.
+//! The host's sending statistics, logged every second, and the rules that skip
+//! frames when the network or the client's decoder falls behind.
 //!
 //! A frame that cannot leave yet waits in the QUIC stack's datagram queue, and
 //! every frame behind it waits longer. Skipping frames while the queue is long
@@ -22,6 +22,24 @@ const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
 /// A whole, in percent.
 const PERCENT: f64 = 100.0;
+
+/// The frames, beyond those one frame interval and one smoothed RTT account
+/// for, that may be sent ahead of the client's decoding, for the time
+/// decoding itself takes.
+const DECODE_WINDOW_SLACK: u64 = 1;
+
+/// Returns how many frames may be sent beyond the latest one the client
+/// reported decoded: about one frame interval plus one smoothed RTT of them
+/// (Section 6.11). A client whose decoder falls behind then receives frames
+/// only as fast as it decodes them, rather than queueing them and showing
+/// each later than the last.
+pub(crate) fn decode_window(frame_interval: Duration, smoothed_rtt: Duration) -> u64 {
+    if frame_interval.is_zero() {
+        return u64::MAX;
+    }
+    let intervals = (frame_interval + smoothed_rtt).as_secs_f64() / frame_interval.as_secs_f64();
+    intervals.ceil() as u64 + DECODE_WINDOW_SLACK
+}
 
 /// Returns how long the queued datagrams will take to leave at the rate the
 /// congestion window allows: one window per round trip.
@@ -52,6 +70,9 @@ pub(crate) struct SendStats {
     key_frames: u64,
     /// The frames skipped because the network was behind.
     skipped: u64,
+    /// The frames not sent because the client had not decoded enough of
+    /// those before.
+    decode_waits: u64,
     /// The bytes of encoded video sent, retransmissions excluded.
     bytes: u64,
     /// The fragments sent again.
@@ -75,6 +96,7 @@ impl SendStats {
             frames: 0,
             key_frames: 0,
             skipped: 0,
+            decode_waits: 0,
             bytes: 0,
             retransmissions: 0,
             encode_total: Duration::ZERO,
@@ -104,6 +126,12 @@ impl SendStats {
     /// Counts a frame skipped because the network was behind.
     pub(crate) fn frame_skipped(&mut self) {
         self.skipped += 1;
+    }
+
+    /// Counts a frame not sent because the client had not decoded enough of
+    /// those before.
+    pub(crate) fn decoder_waited(&mut self) {
+        self.decode_waits += 1;
     }
 
     /// Counts a retransmitted fragment.
@@ -155,6 +183,7 @@ impl SendStats {
             ),
             key_frames = self.key_frames,
             skipped = self.skipped,
+            decode_waits = self.decode_waits,
             quantizer,
             retransmissions = self.retransmissions,
             encode_ms = milliseconds(encode_average),
@@ -205,6 +234,18 @@ mod tests {
         assert_eq!(queue_delay(1, &path(0)), Duration::MAX);
     }
 
+    /// The client may fall about one frame interval and one smoothed RTT
+    /// behind, and a frame more.
+    #[test]
+    fn decode_window_follows_the_round_trip() {
+        let interval = Duration::from_micros(16_667);
+        assert_eq!(decode_window(interval, Duration::ZERO), 2);
+        assert_eq!(decode_window(interval, Duration::from_millis(8)), 3);
+        assert_eq!(decode_window(interval, Duration::from_millis(40)), 5);
+        assert_eq!(decode_window(interval * 4, Duration::from_millis(8)), 3);
+        assert_eq!(decode_window(Duration::ZERO, Duration::ZERO), u64::MAX);
+    }
+
     /// Counts accumulate within an interval and reset when it is logged.
     #[test]
     fn counts_and_resets() {
@@ -223,8 +264,10 @@ mod tests {
             Duration::from_millis(1),
         );
         stats.frame_skipped();
+        stats.decoder_waited();
         stats.retransmitted();
         assert_eq!((stats.frames, stats.key_frames, stats.skipped), (2, 1, 1));
+        assert_eq!(stats.decode_waits, 1);
         assert_eq!(stats.bytes, 1500);
         assert_eq!(stats.encode_max, Duration::from_millis(4));
         assert_eq!(stats.scale_total, Duration::from_millis(2));

@@ -40,7 +40,7 @@ use crate::host_passthrough::{
 use crate::layout::VideoLayout;
 use crate::media::{CursorState, FrameSource};
 use crate::rate_control::{QueueDetector, RateControl};
-use crate::send_stats::{SendStats, queue_delay};
+use crate::send_stats::{SendStats, decode_window, queue_delay};
 use crate::stream_ids::StreamIds;
 use crate::{HostAuthenticator, RuntimeError, close_on_error, is_normal_close};
 
@@ -744,11 +744,15 @@ impl ActiveHost {
             if self.pending_since.is_none() && ((now >= next_frame_at && !held) || recovery) {
                 self.follow_pointer_mode()?;
                 self.update_outputs(now)?;
-                if recovery || !self.network_behind(frame_interval) {
+                if recovery {
                     self.request_frame(now)?;
-                } else {
+                } else if self.network_behind(frame_interval) {
                     self.stats.frame_skipped();
                     self.rate.frame_skipped(now);
+                } else if self.client_behind(frame_interval, smoothed_rtt) {
+                    self.stats.decoder_waited();
+                } else {
+                    self.request_frame(now)?;
                 }
                 next_frame_at = if now >= next_frame_at {
                     next_frame_at + frame_interval
@@ -977,6 +981,12 @@ impl ActiveHost {
     fn network_behind(&self, frame_interval: Duration) -> bool {
         let connection = self.driver.connection();
         queue_delay(connection.queued_datagram_bytes(), &connection.path_stats()) > frame_interval
+    }
+
+    /// Returns whether the client has decoded too few of the frames sent for
+    /// another to be sent now (Section 6.11): it would only wait behind them.
+    fn client_behind(&self, frame_interval: Duration, smoothed_rtt: Duration) -> bool {
+        self.sender.undecoded_frames() >= decode_window(frame_interval, smoothed_rtt)
     }
 
     /// Sends a datagram, dropping it if it no longer fits the path.

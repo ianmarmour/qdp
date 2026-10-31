@@ -67,6 +67,8 @@ struct StatsWindow {
     latency_sum: Duration,
     /// The number of frames whose latency is known.
     timed_frames: u32,
+    /// The summed time the decoder took for the frames presented.
+    decode_time_sum: Duration,
 }
 
 impl StatsWindow {
@@ -77,6 +79,7 @@ impl StatsWindow {
             frames: 0,
             latency_sum: Duration::ZERO,
             timed_frames: 0,
+            decode_time_sum: Duration::ZERO,
         }
     }
 }
@@ -127,9 +130,15 @@ impl CliSink {
         let fps = self.window.frames as f64 / elapsed.as_secs_f64();
         let latency = (self.window.timed_frames > 0)
             .then(|| self.window.latency_sum / self.window.timed_frames);
+        let decode_time = self
+            .window
+            .decode_time_sum
+            .checked_div(u32::try_from(self.window.frames).unwrap_or(u32::MAX))
+            .unwrap_or_default();
         info!(
             fps = format!("{fps:.1}"),
             latency_ms = latency.map(|latency| format!("{:.1}", latency.as_secs_f64() * 1000.0)),
+            decode_ms = format!("{:.1}", decode_time.as_secs_f64() * 1000.0),
             width = frame.width(),
             height = frame.height(),
             total = self.frames,
@@ -147,6 +156,7 @@ impl FrameSink for CliSink {
             self.window.latency_sum += latency;
             self.window.timed_frames += 1;
         }
+        self.window.decode_time_sum += info.decode_time;
         if let Some(writer) = &mut self.output {
             if let Err(error) = writer.write(frame) {
                 warn!(%error, "writing the video failed; no more frames are written");

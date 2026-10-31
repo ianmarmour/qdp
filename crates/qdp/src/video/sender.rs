@@ -180,6 +180,12 @@ impl VideoSender {
         self.last_decoded
     }
 
+    /// Returns how many frames have been sent beyond the highest one the
+    /// client has reported decoded.
+    pub fn undecoded_frames(&self) -> u64 {
+        (self.next_frame_number - 1).saturating_sub(self.last_decoded.0.into_inner())
+    }
+
     /// Returns the Last Decoded Frame the next frame must recover from, if a
     /// recovery frame is due at `now`: [`FrameNumber::NONE`] means a key
     /// frame flagged `RECOVERY` is required; any other value allows a

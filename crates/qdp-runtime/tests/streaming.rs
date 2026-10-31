@@ -549,6 +549,102 @@ async fn stream_with_token() {
     assert!(summary.key_frames_sent >= 1);
 }
 
+/// How long the slow client takes to present each frame: longer than a frame
+/// interval at 60 frames per second.
+const SLOW_PRESENT: Duration = Duration::from_millis(40);
+
+/// The frames the slow client presents.
+const SLOW_FRAMES: usize = 60;
+
+/// The longest the slow client's frames may take from capture to decoding,
+/// past the first. Were the host to send every frame, they would queue behind
+/// the decoder, each waiting about 24 ms longer than the last.
+const SLOW_MAX_LATENCY: Duration = Duration::from_millis(500);
+
+/// A client that takes [`SLOW_PRESENT`] to present each frame.
+#[derive(Default)]
+struct SlowSink {
+    /// The latency of each frame presented, once known.
+    latencies: Vec<Option<Duration>>,
+}
+
+impl FrameSink for SlowSink {
+    fn present(&mut self, _frame: &Yuv420Frame, info: FrameInfo) -> SinkControl {
+        std::thread::sleep(SLOW_PRESENT);
+        self.latencies.push(info.latency);
+        if self.latencies.len() >= SLOW_FRAMES {
+            SinkControl::Stop
+        } else {
+            SinkControl::Continue
+        }
+    }
+}
+
+/// A client slower than the stream's frame rate receives frames only as fast
+/// as it decodes them, so that each stays current rather than waiting longer
+/// than the last behind the decoder (Section 6.11).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_client_stays_current() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let (address, pin, host) = start_host(
+        authenticator,
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
+    let endpoint = ClientEndpoint::bind(loopback()).unwrap();
+    let connection = endpoint
+        .connect(
+            address,
+            SERVER_NAME,
+            HostVerification::PinnedKeys(vec![pin]),
+        )
+        .await
+        .unwrap();
+    let mut sink = SlowSink::default();
+    let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        run(
+            connection,
+            &options,
+            &mut sink,
+            None,
+            None,
+            ClientAudio::default(),
+        ),
+    )
+    .await
+    .expect("streaming finishes in time")
+    .unwrap();
+    endpoint.wait_idle().await;
+    // Past the first frames, no frame waits long: without the host holding
+    // frames back, each would wait longer than the last, until the client
+    // dropped them all and started again from a key frame.
+    let latest: Vec<Duration> = sink.latencies[SLOW_FRAMES / 3..]
+        .iter()
+        .map(|latency| latency.expect("the clocks are synchronized by then"))
+        .collect();
+    assert!(
+        latest.iter().all(|&latency| latency < SLOW_MAX_LATENCY),
+        "the latest frames took {latest:?}"
+    );
+    let summary = tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    // The host sent about as many frames as the client presented, not the
+    // 60 a second it captures.
+    assert!(
+        summary.frames_sent < 2 * SLOW_FRAMES as u64,
+        "{} frames sent",
+        summary.frames_sent
+    );
+}
+
 /// A client with a password streams video from a host over SCRAM-SHA-256-PLUS.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stream_with_password() {

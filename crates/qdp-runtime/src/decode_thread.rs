@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use qdp::video::DecodableFrame;
 use qdp_codec::{CodecError, VideoDecoder, Yuv420Frame};
@@ -25,6 +25,8 @@ pub(crate) struct Decoded {
     pub(crate) picture: Result<Yuv420Frame, CodecError>,
     /// When decoding finished.
     pub(crate) decoded_at: Instant,
+    /// How long the decoder took.
+    pub(crate) decode_time: Duration,
 }
 
 /// A thread that owns one stream's decoder.
@@ -51,11 +53,14 @@ impl DecodeThread {
             .name(THREAD_NAME.to_owned())
             .spawn(move || {
                 while let Ok(frame) = frames.recv() {
+                    let started_at = Instant::now();
                     let picture = decoder.decode(frame.temporal_unit());
+                    let decoded_at = Instant::now();
                     let decoded = Decoded {
                         frame,
                         picture,
-                        decoded_at: Instant::now(),
+                        decoded_at,
+                        decode_time: decoded_at.saturating_duration_since(started_at),
                     };
                     if result_sender.send(decoded).is_err() {
                         return;
