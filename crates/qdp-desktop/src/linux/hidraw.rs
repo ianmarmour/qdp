@@ -74,6 +74,28 @@ const fn feature_request(number: u8, length: usize) -> libc::Ioctl {
 /// the interface, then the device.
 const USB_DEVICE_DEPTH: usize = 2;
 
+/// The USB interface class and subclass of Device Firmware Upgrade, as
+/// sysfs writes them.
+const DFU_INTERFACE: (&str, &str) = ("fe", "01");
+
+/// What a product name contains when its device is in a firmware update
+/// mode, in lower case.
+const FIRMWARE_MODE_PHRASES: [&str; 2] = ["bootloader", "firmware update"];
+
+/// The word a product name contains when its device is in Device Firmware
+/// Upgrade mode, in lower case.
+const DFU_WORD: &str = "dfu";
+
+/// Whether a device works normally or waits for new firmware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DeviceMode {
+    /// The device works normally.
+    Normal,
+    /// The device is in a firmware update mode, where output and feature
+    /// reports could reflash it (Section 11.6).
+    FirmwareUpdate,
+}
+
 /// A hidraw device sysfs lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HidrawDevice {
@@ -91,6 +113,8 @@ struct HidrawDevice {
     version: u16,
     /// The report descriptor.
     descriptor: Vec<u8>,
+    /// Whether it works normally or waits for new firmware.
+    mode: DeviceMode,
 }
 
 impl HidrawDevice {
@@ -131,31 +155,78 @@ fn read_device(root: &Path, entry: &str) -> Option<HidrawDevice> {
     let mut id = field("HID_ID")?.split(':');
     let mut hex = || u32::from_str_radix(id.next()?, 16).ok();
     let (bus, vendor_id, product_id) = (hex()?, hex()?, hex()?);
+    let name = field("HID_NAME").unwrap_or(entry).to_owned();
+    let usb_device = if bus == LINUX_BUS_USB {
+        usb_device(&device)
+    } else {
+        None
+    };
+    let has_dfu_interface = usb_device.as_deref().is_some_and(has_dfu_interface);
+    let mode = if has_dfu_interface || names_firmware_mode(&name) {
+        DeviceMode::FirmwareUpdate
+    } else {
+        DeviceMode::Normal
+    };
     Some(HidrawDevice {
         node: Path::new(DEV).join(entry),
-        name: field("HID_NAME").unwrap_or(entry).to_owned(),
+        name,
         bus,
         vendor_id: vendor_id as u16,
         product_id: product_id as u16,
-        version: if bus == LINUX_BUS_USB {
-            usb_version(&device).unwrap_or(0)
-        } else {
-            0
-        },
+        version: usb_device.as_deref().and_then(usb_version).unwrap_or(0),
         descriptor: fs::read(device.join("report_descriptor")).ok()?,
+        mode,
     })
 }
 
-/// Returns a USB HID device's `bcdDevice` (Section 8.2.1), from the USB
-/// device sysfs puts its interface, and so the HID device, under.
-fn usb_version(device: &Path) -> Option<u16> {
+/// Returns the USB device sysfs puts a USB HID device's interface, and so
+/// the HID device, under.
+fn usb_device(device: &Path) -> Option<PathBuf> {
     let device = fs::canonicalize(device).ok()?;
     device
         .ancestors()
         .skip(1)
         .take(USB_DEVICE_DEPTH)
-        .find_map(|ancestor| fs::read_to_string(ancestor.join("bcdDevice")).ok())
-        .and_then(|text| u16::from_str_radix(text.trim(), 16).ok())
+        .find(|ancestor| ancestor.join("bcdDevice").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// Returns a USB device's `bcdDevice` (Section 8.2.1).
+fn usb_version(usb_device: &Path) -> Option<u16> {
+    let text = fs::read_to_string(usb_device.join("bcdDevice")).ok()?;
+    u16::from_str_radix(text.trim(), 16).ok()
+}
+
+/// Returns whether a USB device has a Device Firmware Upgrade interface,
+/// as one in a firmware update mode does.
+fn has_dfu_interface(usb_device: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(usb_device) else {
+        return false;
+    };
+    let attribute = |interface: &Path, name: &str| {
+        fs::read_to_string(interface.join(name))
+            .map(|text| text.trim().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    entries.flatten().any(|entry| {
+        let interface = entry.path();
+        (
+            attribute(&interface, "bInterfaceClass").as_str(),
+            attribute(&interface, "bInterfaceSubClass").as_str(),
+        ) == DFU_INTERFACE
+    })
+}
+
+/// Returns whether a product name says its device is in a firmware update
+/// mode, as bootloaders' names do.
+fn names_firmware_mode(name: &str) -> bool {
+    let name = name.to_lowercase();
+    FIRMWARE_MODE_PHRASES
+        .iter()
+        .any(|phrase| name.contains(phrase))
+        || name
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|word| word == DFU_WORD)
 }
 
 /// Returns the hidraw devices under `root` that `selectors` name.
@@ -358,6 +429,15 @@ pub(crate) fn start(
     let mut threads = Vec::new();
     let mut routes = Vec::new();
     for (slot, device) in (1..).zip(find_devices(Path::new(SYSFS_HIDRAW), selectors)) {
+        // Host software could reflash it through output and feature
+        // reports (Section 11.6).
+        if device.mode == DeviceMode::FirmwareUpdate {
+            warn!(
+                name = device.name,
+                "device in a firmware update mode not passed through"
+            );
+            continue;
+        }
         let info = match device.info() {
             Ok(info) => info,
             Err(error) => {
@@ -479,7 +559,43 @@ mod tests {
         std::os::unix::fs::symlink(&hid, entry.join("device")).unwrap();
         let device = read_device(&root.join("class"), "hidraw2");
         fs::remove_dir_all(&root).unwrap();
-        assert_eq!(device.unwrap().info().unwrap().version, 0x0110);
+        let device = device.unwrap();
+        assert_eq!(device.info().unwrap().version, 0x0110);
+        assert_eq!(device.mode, DeviceMode::Normal);
+    }
+
+    /// A device whose USB device has a Device Firmware Upgrade interface,
+    /// or whose name says it is a bootloader, is in a firmware update mode.
+    #[test]
+    fn detects_firmware_update_modes() {
+        let root = std::env::temp_dir().join(format!("qdp-hidraw-dfu-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let usb_device = root.join("usb").join("1-3");
+        let hid = usb_device.join("1-3:1.0").join("0003:0483:DF11.0002");
+        let dfu = usb_device.join("1-3:1.1");
+        fs::create_dir_all(&hid).unwrap();
+        fs::create_dir_all(&dfu).unwrap();
+        fs::write(usb_device.join("bcdDevice"), "0200\n").unwrap();
+        fs::write(dfu.join("bInterfaceClass"), "fe\n").unwrap();
+        fs::write(dfu.join("bInterfaceSubClass"), "01\n").unwrap();
+        fs::write(
+            hid.join("uevent"),
+            "HID_ID=0003:00000483:0000DF11\nHID_NAME=Keypad\n",
+        )
+        .unwrap();
+        fs::write(hid.join("report_descriptor"), GAMEPAD).unwrap();
+        let entry = root.join("class").join("hidraw3");
+        fs::create_dir_all(&entry).unwrap();
+        std::os::unix::fs::symlink(&hid, entry.join("device")).unwrap();
+        let device = read_device(&root.join("class"), "hidraw3");
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(device.unwrap().mode, DeviceMode::FirmwareUpdate);
+
+        assert!(names_firmware_mode("STM32 BOOTLOADER"));
+        assert!(names_firmware_mode("Keyboard (DFU)"));
+        assert!(names_firmware_mode("Pad firmware update"));
+        assert!(!names_firmware_mode("Wireless Controller"));
+        assert!(!names_firmware_mode("Dfuse-free pad"));
     }
 
     /// Reports gain the report ID byte that hidraw leaves out, and the
