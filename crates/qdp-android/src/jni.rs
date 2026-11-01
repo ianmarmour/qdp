@@ -25,11 +25,14 @@ use qdp_quic::{IdentityFiles, TlsIdentity};
 use qdp_runtime::{Focus, Microphone, PointerButton, TouchPhase, UserInput};
 use tracing::{info, warn};
 
-use crate::gamepad::GamepadState;
+use qdp_app::gamepad::GamepadState;
+use qdp_app::session::{Authentication, Config, Session};
+use qdp_app::settings::{display_size, format_pin, parse_pin};
+
+use crate::cursor::CursorBitmap;
 use crate::keymap::{HidKey, hid_key};
 use crate::logcat;
-use crate::session::{Authentication, Config, Session};
-use crate::settings::{display_size, format_pin, parse_pin};
+use crate::sink::AndroidPresenter;
 
 /// The `decoder` value of `connect` asking for MediaCodec, failing without
 /// it; any other value but [`DECODER_SOFTWARE`] decodes in hardware when the
@@ -38,6 +41,9 @@ const DECODER_HARDWARE: jint = 1;
 
 /// The `decoder` value of `connect` asking for the software decoder.
 const DECODER_SOFTWARE: jint = 2;
+
+/// The product name the app sends hosts in `CLIENT_HELLO`.
+const CLIENT_NAME: &str = concat!("qdp-android/", env!("CARGO_PKG_VERSION"));
 
 /// The `authentication` value of `connect` presenting a token.
 const AUTH_TOKEN: jint = 0;
@@ -245,6 +251,7 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
         let config = authentication(authentication_kind, &pin, token, device_name).and_then(
             |authentication| {
                 Ok(Config {
+                    client_name: CLIENT_NAME.to_owned(),
                     host,
                     authentication,
                     identity_directory: files_directory()?,
@@ -259,6 +266,7 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
                     } else {
                         Microphone::Off
                     },
+                    client_audio: qdp_desktop::client_audio,
                 })
             },
         );
@@ -266,7 +274,7 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
             let window = window.ok_or("the surface has no window")?;
             stop_session();
             set_video_surface(Some(window));
-            let session = Session::start(config)
+            let session = Session::start(config, AndroidPresenter::new)
                 .map_err(|error| format!("cannot start the session: {error}"))?;
             *SESSION.lock().unwrap_or_else(PoisonError::into_inner) = Some(session);
             Ok(())
@@ -337,7 +345,7 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_cursorImage(
         let Some(cursor) = cursor else {
             return ptr::null_mut();
         };
-        let ints = cursor.to_ints();
+        let ints = CursorBitmap::new(&cursor).to_ints();
         let Ok(length) = jsize::try_from(ints.len()) else {
             return ptr::null_mut();
         };

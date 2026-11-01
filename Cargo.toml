@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/qdp",
     "crates/qdp-android",
+    "crates/qdp-app",
     "crates/qdp-cli",
     "crates/qdp-codec",
     "crates/qdp-desktop",
@@ -51,6 +52,7 @@ objc2-core-media = { version = "0.3.2", default-features = false, features = ["s
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVReturn", "objc2", "objc2-metal"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTUtilities", "objc2-core-media", "objc2-core-video"] }
 qdp = { path = "crates/qdp" }
+qdp-app = { path = "crates/qdp-app" }
 qdp-codec = { path = "crates/qdp-codec" }
 qdp-desktop = { path = "crates/qdp-desktop", default-features = false }
 qdp-quic = { path = "crates/qdp-quic" }

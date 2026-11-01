@@ -9,15 +9,13 @@
 //! touches and gamepads, and reads the session's events: its progress, the
 //! video's size, the host's cursor and pointer mode, and gamepad rumble.
 //!
-//! The JNI functions, logging and drawing exist only on Android; the rest
-//! builds everywhere, so that it is tested with the workspace.
+//! The session itself, its events and settings are `qdp-app`'s, shared with
+//! the Apple apps. The JNI functions, logging and drawing exist only on
+//! Android; the rest builds everywhere, so that it is tested with the
+//! workspace.
 
 pub mod cursor;
-pub mod events;
-pub mod gamepad;
 pub mod keymap;
-pub mod session;
-pub mod settings;
 pub mod sink;
 
 #[cfg(target_os = "android")]
