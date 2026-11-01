@@ -370,12 +370,12 @@ or off, and Q disconnects.
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
-every change merged into `main` on Linux, Windows and macOS: formatting,
-clippy and the tests. Pull requests are not checked, so that merging never
-waits for it, and a run can be started on any branch from the Actions tab. It
-builds the `qdp` command for each system and the Android app, and once every
-build passed it publishes them together as a GitHub release, numbered by the
-run (the ten newest are kept). The newest build's files are always at
+every change merged into `main` on Linux, Windows and macOS: formatting, clippy
+and the tests. Pull requests are not checked, so that merging never waits for
+it, and a run can be started on any branch from the Actions tab. It builds the
+`qdp` command for each system and the Android, Apple and Windows apps, and once
+every build passed it publishes them together as a GitHub release, numbered by
+the run (the ten newest are kept). The newest build's files are always at
 `https://github.com/ianmarmour/qdp/releases/latest/download/FILE`, such as
 `qdp-android-arm64.apk`. Pushing a version tag publishes a release of that
 version, which is kept:
