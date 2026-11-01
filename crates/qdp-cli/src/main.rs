@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 
 use qdp::discovery::{PairingOffer, ServiceRecord};
 use qdp_codec::{CodecPreference, DecoderCommand};
-use qdp_desktop::{Advertisement, Advertising, DisplayMatching, FrameMemory, ScreenOptions};
+use qdp_desktop::{
+    Advertisement, Advertising, DisplayMatching, FrameMemory, Notification, ScreenOptions, Urgency,
+};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
 use qdp_runtime::{
     Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
@@ -36,6 +38,7 @@ use qdp_runtime::{
     PairingEvent, PairingOutcome, PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard,
     TestPattern,
 };
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -257,7 +260,10 @@ async fn serve(args: ServeArgs) -> CliResult {
         authenticator.add_client_key(client.pin);
     }
     if args.pairing == PairingMode::On {
-        authenticator.enable_pairing(Pairing::new(pin, pairing_listener(paired)));
+        authenticator.enable_pairing(Pairing::new(
+            pin,
+            pairing_listener(paired, pairing_notifier()),
+        ));
         info!("new clients may pair: the code to type on them appears here");
     }
     authenticator.set_resumption_lifetime(args.resumption);
@@ -577,10 +583,70 @@ fn hostname() -> String {
         .unwrap_or_default()
 }
 
-/// Logs a host's pairing requests, with the code to type, and keeps the
-/// clients that pair in `paired`.
-fn pairing_listener(paired: PairedFile) -> impl Fn(PairingEvent) + Send + Sync + 'static {
-    move |event| match event {
+/// How long the notification that a device paired stays.
+const PAIRED_NOTICE_LIFETIME: Duration = Duration::from_secs(5);
+
+/// Shows each pairing request's code as a desktop notification while the
+/// code is good, so that the host's user sees it without the terminal, and
+/// says when a device paired. Returns where the pairing events go.
+fn pairing_notifier() -> mpsc::UnboundedSender<PairingEvent> {
+    let (sender, mut events) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        // One request at a time is shown; its code ends with it.
+        let mut shown: Option<Notification> = None;
+        while let Some(event) = events.recv().await {
+            if let Some(notification) = shown.take() {
+                notification.close().await;
+            }
+            let (summary, body, lifetime, urgency) = match event {
+                PairingEvent::Requested {
+                    device_name, code, ..
+                } => (
+                    format!("Pair {device_name}?"),
+                    format!(
+                        "Type {code} on {device_name} to pair it with this computer. \
+                         The code expires in {} seconds.",
+                        CODE_LIFETIME.as_secs()
+                    ),
+                    CODE_LIFETIME,
+                    Urgency::Critical,
+                ),
+                PairingEvent::Ended {
+                    device_name,
+                    outcome: PairingOutcome::Paired { .. },
+                } => (
+                    format!("Paired with {device_name}"),
+                    "It connects without a code from now on.".to_owned(),
+                    PAIRED_NOTICE_LIFETIME,
+                    Urgency::Normal,
+                ),
+                PairingEvent::Ended { .. } => continue,
+            };
+            match qdp_desktop::notify(&summary, &body, lifetime, urgency).await {
+                Ok(notification) if urgency == Urgency::Critical => shown = Some(notification),
+                Ok(_) => {}
+                Err(error) => debug!(%error, "not shown as a notification"),
+            }
+        }
+    });
+    sender
+}
+
+/// Logs a host's pairing requests, with the code to type, keeps the clients
+/// that pair in `paired`, and passes the events on to `notifier`.
+fn pairing_listener(
+    paired: PairedFile,
+    notifier: mpsc::UnboundedSender<PairingEvent>,
+) -> impl Fn(PairingEvent) + Send + Sync + 'static {
+    move |event| {
+        let _ = notifier.send(event.clone());
+        log_pairing(&paired, event);
+    }
+}
+
+/// Logs a pairing event, keeping a client that paired in `paired`.
+fn log_pairing(paired: &PairedFile, event: PairingEvent) {
+    match event {
         PairingEvent::Requested {
             device_name,
             address,

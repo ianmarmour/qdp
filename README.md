@@ -48,7 +48,8 @@ Android app list it (through Avahi on Linux; `--advertise off` stops it):
 ```
 
 On the client, pair with the host the first time: connect with `--pair`, and
-type the four-digit code the host prints (Section 4.4.9 of the spec). Add
+type the four-digit code the host shows (Section 4.4.9 of the spec): it prints
+the code, and on Linux shows it as a desktop notification too. Add
 `:PORT` to the address for another port, and `--name` to choose the name the
 host keeps for this device. The stream opens in a window, and closing the
 window disconnects:

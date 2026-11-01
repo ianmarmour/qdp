@@ -17,8 +17,9 @@
 //! and capture through, `GamepadCapture` watches a client's gamepads,
 //! [`PassthroughCapture`] passes the devices the user chose through,
 //! [`TouchpadCapture`] sends the touchpad's raw contacts, and
-//! [`lock_desktop`] locks the desktop when a session ends unexpectedly, and
-//! [`advertise`] advertises the host on the local network.
+//! [`lock_desktop`] locks the desktop when a session ends unexpectedly,
+//! [`advertise`] advertises the host on the local network, and [`notify`]
+//! shows the host's user a notification.
 
 mod advertise;
 #[cfg(not(target_os = "android"))]
@@ -44,6 +45,7 @@ mod lock_keys;
 mod macos;
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 mod monitor_modes;
+mod notification;
 mod passthrough;
 mod touchpad;
 #[cfg(windows)]
@@ -67,6 +69,7 @@ pub use desktop_lock::lock_desktop;
 pub use gamepad::GamepadCapture;
 pub use keyboard_layout::keyboard_info;
 pub use lock_keys::lock_keys;
+pub use notification::{Notification, Urgency, notify};
 pub use passthrough::{DeviceSelector, PassthroughCapture};
 pub use touchpad::TouchpadCapture;
 
