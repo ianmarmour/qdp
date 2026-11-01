@@ -84,6 +84,8 @@ pub(crate) struct SendStats {
     frames: u64,
     /// The key frames among them.
     key_frames: u64,
+    /// The frames sent that showed a new screen, not the one before again.
+    new_frames: u64,
     /// The frames skipped because the network was behind.
     skipped: u64,
     /// The frames not sent because the client had not decoded enough of
@@ -111,6 +113,7 @@ impl SendStats {
             started: now,
             frames: 0,
             key_frames: 0,
+            new_frames: 0,
             skipped: 0,
             decode_waits: 0,
             bytes: 0,
@@ -137,6 +140,12 @@ impl SendStats {
         self.encode_total += encode_time;
         self.encode_max = self.encode_max.max(encode_time);
         self.scale_total += scale_time;
+    }
+
+    /// Counts a frame sent that showed a new screen, not the one before
+    /// again.
+    pub(crate) fn new_screen(&mut self) {
+        self.new_frames += 1;
     }
 
     /// Counts a frame skipped because the network was behind.
@@ -193,6 +202,7 @@ impl SendStats {
         let scale_average = self.scale_total.checked_div(frames).unwrap_or_default();
         info!(
             fps = format!("{:.1}", self.frames as f64 / seconds),
+            new_fps = format!("{:.1}", self.new_frames as f64 / seconds),
             mbps = format!(
                 "{:.2}",
                 self.bytes as f64 * 8.0 / seconds / BITS_PER_MEGABIT
@@ -286,10 +296,12 @@ mod tests {
             Duration::from_millis(2),
             Duration::from_millis(1),
         );
+        stats.new_screen();
         stats.frame_skipped();
         stats.decoder_waited();
         stats.retransmitted();
         assert_eq!((stats.frames, stats.key_frames, stats.skipped), (2, 1, 1));
+        assert_eq!(stats.new_frames, 1);
         assert_eq!(stats.decode_waits, 1);
         assert_eq!(stats.bytes, 1500);
         assert_eq!(stats.encode_max, Duration::from_millis(4));

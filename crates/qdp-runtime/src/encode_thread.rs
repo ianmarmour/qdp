@@ -68,6 +68,9 @@ pub(crate) struct EncodedOutput {
     pub(crate) placement: Option<MonitorPlacement>,
     /// The captured monitor's interface scale, if the source knows.
     pub(crate) desktop_scale: Option<DesktopScale>,
+    /// Whether the frame shows the same screen as the one before it, as when
+    /// the screen did not change between captures.
+    pub(crate) repeated: bool,
 }
 
 /// A thread that owns the capture source and the encoder.
@@ -235,6 +238,11 @@ fn run(
             let changed = previous
                 .as_ref()
                 .map(|previous| changed_blocks(previous, &captured.frame, grid));
+            // A source holding an unchanged screen returns the same frame,
+            // shared.
+            let repeated = previous
+                .as_ref()
+                .is_some_and(|previous| Arc::ptr_eq(previous, &captured.frame));
             previous = Some(captured.frame);
             captured
                 .encoded
@@ -261,6 +269,7 @@ fn run(
                         cursor: captured.cursor.clone(),
                         placement: captured.placement,
                         desktop_scale: captured.desktop_scale,
+                        repeated,
                     }
                 })
                 .collect::<Vec<_>>()

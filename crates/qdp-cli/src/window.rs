@@ -22,7 +22,7 @@ use qdp_runtime::{
 };
 use softbuffer::{Context, Surface};
 use tokio::sync::{Notify, oneshot};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{
@@ -62,6 +62,9 @@ const DEFAULT_IMAGE_SCALE: f64 = 100.0;
 /// The key that, with Ctrl, Alt and Shift held, releases the pointer from
 /// capture (Section 8.9). It is never sent to the host.
 const RELEASE_KEY: KeyCode = KeyCode::KeyZ;
+
+/// How often the window logs how fast it draws.
+const DRAW_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The key that, with Ctrl, Alt and Shift held, turns the microphone on or
 /// off (Section 7.7). It is never sent to the host.
@@ -367,6 +370,55 @@ pub struct WindowApp {
     /// The video size the user chose, in pixels, asked for whatever the
     /// window's size.
     resolution: Option<(u32, u32)>,
+    /// How fast the window draws the frames.
+    draw_stats: DrawStats,
+}
+
+/// How fast the window draws new frames, over the last interval: frames
+/// decoded faster than they can be drawn are passed over for the newest.
+#[derive(Debug)]
+struct DrawStats {
+    /// When the interval started.
+    started: Instant,
+    /// The new frames drawn.
+    frames: u32,
+    /// The time drawing them took, from converting their colours to
+    /// presenting them.
+    busy: Duration,
+    /// The longest draw.
+    longest: Duration,
+}
+
+impl DrawStats {
+    /// Starts an interval at `now`.
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            frames: 0,
+            busy: Duration::ZERO,
+            longest: Duration::ZERO,
+        }
+    }
+
+    /// Counts a new frame drawn in `took`, and logs the interval once it
+    /// has ended at `now`.
+    fn drew(&mut self, took: Duration, now: Instant) {
+        self.frames += 1;
+        self.busy += took;
+        self.longest = self.longest.max(took);
+        let elapsed = now.saturating_duration_since(self.started);
+        if elapsed < DRAW_STATS_INTERVAL {
+            return;
+        }
+        let milliseconds = |time: Duration| format!("{:.1}", time.as_secs_f64() * 1000.0);
+        info!(
+            drawn_fps = format!("{:.1}", f64::from(self.frames) / elapsed.as_secs_f64()),
+            draw_ms = milliseconds(self.busy / self.frames),
+            draw_max_ms = milliseconds(self.longest),
+            "drawing"
+        );
+        *self = Self::new(now);
+    }
 }
 
 /// What the user chose for the window's session.
@@ -405,6 +457,7 @@ impl WindowApp {
         } = choices;
         Self {
             resolution,
+            draw_stats: DrawStats::new(Instant::now()),
             microphone,
             display_sender: Some(display_sender),
             title,
@@ -905,6 +958,7 @@ impl WindowApp {
     /// Draws the newest frame into the window, and the cursor where it
     /// follows a device the client does not know.
     fn draw(&mut self) {
+        let started = Instant::now();
         let newest = self.slot.take();
         if let Some((frame, _)) = &newest {
             let resized = self.current.as_ref().is_none_or(|current| {
@@ -918,6 +972,12 @@ impl WindowApp {
         let presented_at = self.show();
         if let Some((_, id)) = newest {
             self.slot.shown(id, presented_at);
+            if let Some(presented_at) = presented_at {
+                self.draw_stats.drew(
+                    presented_at.saturating_duration_since(started),
+                    presented_at,
+                );
+            }
         }
         self.slot.set_display_timing(qdp_desktop::display_timing());
     }
