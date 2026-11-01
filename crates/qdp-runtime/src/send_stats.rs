@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use qdp_quic::PathStats;
 use tracing::{info, warn};
 
+use crate::decoder_lag::ClientDecoder;
+
 /// How often statistics are logged.
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -35,25 +37,32 @@ const DECODE_WINDOW_SLACK: u64 = 1;
 const KEEPING_UP_WINDOW: u64 = 8;
 
 /// Returns how many frames may be sent beyond the latest one the client
-/// reported decoded (Section 6.11). While its decoder is behind, about one
-/// frame interval plus one smoothed RTT of them, so that it receives frames
-/// only as fast as it decodes them rather than queueing them and showing
-/// each later than the last; otherwise [`KEEPING_UP_WINDOW`], or more on a
-/// long round trip.
+/// reported decoded (Section 6.11). While its decoder is behind, those it
+/// decodes in one of its frame times plus one smoothed RTT, and one more, so
+/// that it receives frames only as fast as it decodes them rather than
+/// queueing them and showing each later than the last; otherwise
+/// [`KEEPING_UP_WINDOW`], or more on a long round trip.
+///
+/// A slow decoder's frame time is its own pace, once its frames show it,
+/// rather than the stream's: a decoder taking a frame every 120 ms over a
+/// 100 ms round trip has two frames in flight to cover it, not seven.
 pub(crate) fn decode_window(
     frame_interval: Duration,
     smoothed_rtt: Duration,
-    decoder_behind: bool,
+    decoder: ClientDecoder,
 ) -> u64 {
     if frame_interval.is_zero() {
         return u64::MAX;
     }
-    let intervals = (frame_interval + smoothed_rtt).as_secs_f64() / frame_interval.as_secs_f64();
-    let behind = intervals.ceil() as u64 + DECODE_WINDOW_SLACK;
-    if decoder_behind {
-        behind
-    } else {
-        behind.max(KEEPING_UP_WINDOW)
+    let frames_in = |pace: Duration| {
+        let intervals = (pace + smoothed_rtt).as_secs_f64() / pace.as_secs_f64();
+        intervals.ceil() as u64 + DECODE_WINDOW_SLACK
+    };
+    match decoder {
+        ClientDecoder::Behind { pace } => {
+            frames_in(pace.map_or(frame_interval, |pace| pace.max(frame_interval)))
+        }
+        ClientDecoder::KeepingUp => frames_in(frame_interval).max(KEEPING_UP_WINDOW),
     }
 }
 
@@ -282,22 +291,50 @@ mod tests {
         assert_eq!(queue_delay(1, &path(0)), Duration::MAX);
     }
 
-    /// A client whose decoder is behind may fall about one frame interval
-    /// and one smoothed RTT behind, and a frame more; one that keeps up,
-    /// further.
+    /// A client whose decoder is behind may fall about one of its frame
+    /// times and one smoothed RTT behind, and a frame more; one that keeps
+    /// up, further.
     #[test]
     fn decode_window_follows_the_round_trip() {
         let interval = Duration::from_micros(16_667);
         let rtt = Duration::from_millis;
-        assert_eq!(decode_window(interval, Duration::ZERO, true), 2);
-        assert_eq!(decode_window(interval, rtt(8), true), 3);
-        assert_eq!(decode_window(interval, rtt(40), true), 5);
-        assert_eq!(decode_window(interval * 4, rtt(8), true), 3);
-        assert_eq!(decode_window(interval, rtt(8), false), KEEPING_UP_WINDOW);
-        assert_eq!(decode_window(interval, rtt(200), false), 14);
+        let behind = ClientDecoder::Behind { pace: None };
+        assert_eq!(decode_window(interval, Duration::ZERO, behind), 2);
+        assert_eq!(decode_window(interval, rtt(8), behind), 3);
+        assert_eq!(decode_window(interval, rtt(40), behind), 5);
+        assert_eq!(decode_window(interval * 4, rtt(8), behind), 3);
+        let keeping_up = ClientDecoder::KeepingUp;
         assert_eq!(
-            decode_window(Duration::ZERO, Duration::ZERO, true),
+            decode_window(interval, rtt(8), keeping_up),
+            KEEPING_UP_WINDOW
+        );
+        assert_eq!(decode_window(interval, rtt(200), keeping_up), 14);
+        assert_eq!(
+            decode_window(Duration::ZERO, Duration::ZERO, behind),
             u64::MAX
+        );
+    }
+
+    /// A slow decoder's window counts its own frame time, not the stream's,
+    /// and never one shorter than the stream's.
+    #[test]
+    fn slow_decoders_window_follows_their_pace() {
+        let interval = Duration::from_micros(16_667);
+        let rtt = Duration::from_millis;
+        let pace = |ms| ClientDecoder::Behind {
+            pace: Some(Duration::from_millis(ms)),
+        };
+        // 120 ms a frame over a 100 ms round trip: two frames cover it.
+        assert_eq!(decode_window(interval, rtt(100), pace(120)), 3);
+        // Without its pace, the stream's frame time gives seven.
+        assert_eq!(
+            decode_window(interval, rtt(100), ClientDecoder::Behind { pace: None }),
+            8
+        );
+        // A pace faster than the stream's counts as the stream's.
+        assert_eq!(
+            decode_window(interval, rtt(8), pace(5)),
+            decode_window(interval, rtt(8), ClientDecoder::Behind { pace: None })
         );
     }
 

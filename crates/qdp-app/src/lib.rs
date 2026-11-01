@@ -11,6 +11,9 @@
 //! - [`gamepad`] converts a gamepad's state to QDP's report.
 //! - [`cursor`] scales the host's cursor images to the picture, for the
 //!   clients that draw them, the desktop client among them.
+//! - `keymap`, with the `winit` feature, reports the keys of winit's windows
+//!   as HID usages, for the desktop clients.
+//! - [`placement`] fits the picture in the app's view, keeping its shape.
 
 pub mod cursor;
 pub mod events;
