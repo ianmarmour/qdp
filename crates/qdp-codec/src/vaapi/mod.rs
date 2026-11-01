@@ -1135,10 +1135,11 @@ impl VaapiEncoder {
             tile_size_bytes: self.support.tile_size_bytes,
         };
         let uploaded = Instant::now();
-        // A failed frame leaves no usable reference, so the next is a key frame.
-        let slots = self.slots.clone();
-        self.slots.clear();
+        // The picture parameters name the slots' frames, so the slots are
+        // forgotten only once a frame fails: it leaves no usable reference,
+        // and the next is a key frame.
         if let Err(error) = self.submit(&header, plan) {
+            self.slots.clear();
             // A driver that refuses frames referring to any slot, whatever
             // its version says, gets frames that refer only to the previous
             // one, starting again from a key frame.
@@ -1154,14 +1155,14 @@ impl VaapiEncoder {
             return Err(error);
         }
         let encoded = Instant::now();
-        let bytes = self.read_coded()?;
+        let bytes = self.read_coded().inspect_err(|_| self.slots.clear())?;
         let read = Instant::now();
         self.timing
             .record(uploaded - started, encoded - uploaded, read - encoded, read);
         let is_key_frame = kind == FrameKind::Key;
-        let temporal_unit = to_qdp_temporal_unit(&bytes, is_key_frame, &self.sequence_header)?;
+        let temporal_unit = to_qdp_temporal_unit(&bytes, is_key_frame, &self.sequence_header)
+            .inspect_err(|_| self.slots.clear())?;
         let input_index = self.frames;
-        self.slots = slots;
         self.slots.encoded(plan, input_index);
         self.frames += 1;
         Ok(vec![EncodedFrame {
