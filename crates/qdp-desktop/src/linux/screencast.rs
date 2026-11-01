@@ -25,11 +25,13 @@ use pw::spa;
 use pw::spa::buffer::meta::MetaCursor;
 use qdp_codec::{Rgb32Order, Yuv420Frame};
 use qdp_runtime::{
-    CursorShape, CursorState, DesktopScale, FrameSource, PointerPosition, RuntimeError,
+    CursorShape, CursorState, DesktopScale, FrameSource, LayoutRect, MonitorPlacement,
+    PointerPosition, RuntimeError,
 };
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
+use super::desktop_layout;
 use crate::latest_frame::LatestFrame;
 
 /// The name of the thread that holds the portal session.
@@ -106,6 +108,9 @@ struct PortalStream {
     /// The monitor's size in the desktop's own coordinates, if the portal
     /// told it.
     desktop_size: Option<(i32, i32)>,
+    /// The monitor's top-left corner in the desktop's coordinates, if the
+    /// portal told it.
+    desktop_position: Option<(i32, i32)>,
 }
 
 /// Captures one monitor of the desktop.
@@ -129,6 +134,8 @@ pub struct ScreenCapture {
     /// The monitor's size in the desktop's own coordinates, if the portal
     /// told it, from which its interface scale follows.
     desktop_size: Option<(i32, i32)>,
+    /// Where the monitor is in the desktop, if known.
+    placement: Option<MonitorPlacement>,
 }
 
 impl std::fmt::Debug for ScreenCapture {
@@ -151,6 +158,10 @@ impl ScreenCapture {
         capture.portal = Some(portal);
         capture.restore_token = stream.restore_token;
         capture.desktop_size = stream.desktop_size;
+        capture.placement = stream
+            .desktop_position
+            .zip(stream.desktop_size)
+            .and_then(|(position, size)| portal_placement(position, size));
         if stream.cursor_mode == CursorMode::Hidden {
             if let Ok(mut cursor) = capture.cursor.lock() {
                 cursor.state = Some(CursorState {
@@ -210,6 +221,7 @@ impl ScreenCapture {
             portal: None,
             restore_token: None,
             desktop_size: None,
+            placement: None,
         })
     }
 
@@ -270,6 +282,27 @@ impl FrameSource for ScreenCapture {
         let (width, _) = self.desktop_size?;
         DesktopScale::from_widths(self.size.0, usize::try_from(width).ok()?)
     }
+
+    fn monitor_placement(&self) -> Option<MonitorPlacement> {
+        self.placement
+    }
+}
+
+/// Returns where the monitor the portal described, at `position` and of
+/// `size` in the desktop's coordinates, is among the desktop's monitors.
+fn portal_placement(position: (i32, i32), size: (i32, i32)) -> Option<MonitorPlacement> {
+    let monitor = LayoutRect {
+        x: position.0,
+        y: position.1,
+        width: u32::try_from(size.0).ok()?,
+        height: u32::try_from(size.1).ok()?,
+    };
+    let outputs = desktop_layout::outputs()
+        .inspect_err(|error| debug!(%error, "the desktop's monitors cannot be listed"))
+        .ok()?;
+    let placement = desktop_layout::placement(monitor, &outputs)?;
+    info!(?placement, "the captured monitor's place in the desktop");
+    Some(placement)
 }
 
 impl Drop for ScreenCapture {
@@ -389,6 +422,7 @@ async fn negotiate(
         restore_token: streams.restore_token().map(str::to_owned),
         cursor_mode,
         desktop_size: stream.size(),
+        desktop_position: stream.position(),
     })
 }
 

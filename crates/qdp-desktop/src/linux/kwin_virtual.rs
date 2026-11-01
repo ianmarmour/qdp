@@ -10,7 +10,9 @@
 use std::time::{Duration, Instant};
 
 use qdp_codec::Yuv420Frame;
-use qdp_runtime::{CursorState, DesktopScale, FrameSource, RuntimeError, WantedDisplay};
+use qdp_runtime::{
+    CursorState, DesktopScale, FrameSource, MonitorPlacement, RuntimeError, WantedDisplay,
+};
 use tracing::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_registry::WlRegistry;
@@ -20,6 +22,7 @@ use wayland_protocols_plasma::screencast::v1::client::zkde_screencast_stream_uns
 };
 use wayland_protocols_plasma::screencast::v1::client::zkde_screencast_unstable_v1::ZkdeScreencastUnstableV1;
 
+use super::desktop_layout::{self, OutputLayout};
 use super::screencast::ScreenCapture;
 
 /// The name KWin gives the monitor.
@@ -120,6 +123,8 @@ struct VirtualOutput {
     display: WantedDisplay,
     /// Its interface scale.
     scale: DesktopScale,
+    /// Where it is in the desktop, if the compositor says.
+    placement: Option<MonitorPlacement>,
 }
 
 /// A virtual monitor KWin makes at the client's display.
@@ -183,6 +188,8 @@ impl VirtualMonitor {
         // larger than pixels.
         let logical = |pixels: u32| ((f64::from(pixels) / scale).round() as i32).max(1);
         let (width, height) = (logical(wanted.width), logical(wanted.height));
+        // The monitor's place in the desktop is that of the one KWin adds.
+        let before = desktop_layout::outputs().unwrap_or_default();
         let handle = self.queue.handle();
         let stream = if self.manager.version() >= DESCRIPTION_VERSION {
             self.manager.stream_virtual_output_with_description(
@@ -238,12 +245,23 @@ impl VirtualMonitor {
         let desktop_size = (width, height);
         capture.set_desktop_size(desktop_size);
         let scale = capture.desktop_scale().unwrap_or_default();
+        let placement = desktop_layout::outputs()
+            .inspect_err(|error| warn!(%error, "the desktop's monitors cannot be listed"))
+            .ok()
+            .and_then(|after| {
+                let added = added_output(&before, &after, desktop_size)?;
+                desktop_layout::placement(added.rect, &after)
+            });
+        if placement.is_none() {
+            warn!("the virtual monitor's place in the desktop is not known");
+        }
         info!(
             width = wanted.width,
             height = wanted.height,
             desktop_width = width,
             desktop_height = height,
             scale_percent = scale.percent(),
+            ?placement,
             "virtual monitor made"
         );
         Ok(VirtualOutput {
@@ -251,6 +269,7 @@ impl VirtualMonitor {
             capture,
             display: *wanted,
             scale,
+            placement,
         })
     }
 
@@ -275,6 +294,33 @@ impl VirtualMonitor {
             .as_mut()
             .ok_or_else(|| RuntimeError::Capture("no virtual monitor".to_owned()))
     }
+}
+
+/// Returns the monitor KWin added, of `size` in the desktop's units: the one
+/// `after` lists that `before` did not, preferring one named or described as
+/// this host's, then one of that size.
+fn added_output<'a>(
+    before: &[OutputLayout],
+    after: &'a [OutputLayout],
+    size: (i32, i32),
+) -> Option<&'a OutputLayout> {
+    let added: Vec<&OutputLayout> = after
+        .iter()
+        .filter(|output| before.iter().all(|old| old.name != output.name))
+        .collect();
+    let ours = |output: &&&OutputLayout| {
+        output.name.contains(OUTPUT_NAME) || output.description.contains(OUTPUT_DESCRIPTION)
+    };
+    let sized = |output: &&&OutputLayout| {
+        (i64::from(output.rect.width), i64::from(output.rect.height))
+            == (i64::from(size.0), i64::from(size.1))
+    };
+    added
+        .iter()
+        .find(ours)
+        .or_else(|| added.iter().find(sized))
+        .or_else(|| (added.len() == 1).then(|| &added[0]))
+        .copied()
 }
 
 /// Closes `output`'s stream, which removes the monitor from the desktop.
@@ -312,6 +358,10 @@ impl FrameSource for VirtualMonitor {
         self.output.as_ref().map(|output| output.scale)
     }
 
+    fn monitor_placement(&self) -> Option<MonitorPlacement> {
+        self.output.as_ref()?.placement
+    }
+
     fn match_display(&mut self, display: &WantedDisplay) -> bool {
         if self
             .output
@@ -327,5 +377,45 @@ impl FrameSource for VirtualMonitor {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qdp_runtime::LayoutRect;
+
+    /// Returns a monitor named `name` at `x`, `width` wide.
+    fn output(name: &str, x: i32, width: u32) -> OutputLayout {
+        OutputLayout {
+            name: name.to_owned(),
+            description: String::new(),
+            rect: LayoutRect {
+                x,
+                y: 0,
+                width,
+                height: 1080,
+            },
+        }
+    }
+
+    /// The monitor KWin added is the new one, ours by name if several are
+    /// new.
+    #[test]
+    fn finds_the_added_monitor() {
+        let before = [output("DP-1", 0, 3413)];
+        let after = [output("DP-1", 0, 3413), output("Virtual-QDP", 3413, 1920)];
+        let added = added_output(&before, &after, (1920, 1080)).unwrap();
+        assert_eq!(added.name, "Virtual-QDP");
+        // Named otherwise, the one of our size.
+        let after = [
+            output("DP-1", 0, 3413),
+            output("HDMI-A-1", 3413, 1280),
+            output("Virtual-1", 4693, 1920),
+        ];
+        let added = added_output(&before, &after, (1920, 1080)).unwrap();
+        assert_eq!(added.name, "Virtual-1");
+        // Nothing new, nothing found.
+        assert!(added_output(&before, &before, (1920, 1080)).is_none());
     }
 }

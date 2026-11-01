@@ -30,8 +30,8 @@ use qdp::message::{
     DeviceId, FeatureStatus, GamepadOutput, GamepadReport, KeyboardLeds, PenReport,
 };
 use qdp_runtime::{
-    DesktopScale, FeatureRequest, InputAction, InputInjector, PassthroughDevice, PointerButton,
-    TouchPoint,
+    DesktopScale, FeatureRequest, InputAction, InputInjector, MonitorPlacement, PassthroughDevice,
+    PointerButton, TouchPoint,
 };
 
 use super::gamepad::VirtualGamepad;
@@ -248,6 +248,11 @@ pub(super) struct Translator {
     /// The captured monitor's interface scale: the desktop measures motion
     /// in its own units, which are this many pixels.
     desktop_scale: DesktopScale,
+    /// Where the captured monitor is in the desktop, and its size in pixels,
+    /// once known: the absolute pointer covers the whole desktop.
+    placement: Option<(MonitorPlacement, (usize, usize))>,
+    /// The absolute pointer's largest values on each axis.
+    axis_max: (i32, i32),
     /// The pointer buttons held, by their codes.
     held_buttons: Vec<u16>,
     /// Scrolling not yet sent as whole detents, in 1/120 detent.
@@ -292,6 +297,7 @@ impl Translator {
                     }
                     _ => self.position_remainder = (0, 0),
                 }
+                let (x, y) = self.desktop_position(x, y);
                 events.push(Event::new(EV_ABS, ABS_X, x));
                 events.push(Event::new(EV_ABS, ABS_Y, y));
                 (Device::Pointer, events)
@@ -352,6 +358,25 @@ impl Translator {
             }
         };
         Some(events)
+    }
+
+    /// Returns the absolute pointer's values for a position on the captured
+    /// monitor, in 1/256 pixel: where it falls in the whole desktop, which
+    /// the pointer covers, or the position itself while the monitor's place
+    /// is not known, as for a desktop of one monitor.
+    fn desktop_position(&self, x: i32, y: i32) -> (i32, i32) {
+        let Some((placement, capture)) = self.placement else {
+            return (x, y);
+        };
+        let subunits = f64::from(SUBUNITS);
+        let (share_x, share_y) =
+            placement.desktop_share((f64::from(x) / subunits, f64::from(y) / subunits), capture);
+        let value =
+            |share: f64, max: i32| ((share * (f64::from(max) + 1.0)).round() as i32).clamp(0, max);
+        (
+            value(share_x, self.axis_max.0),
+            value(share_y, self.axis_max.1),
+        )
     }
 
     /// Returns the whole counts of the desktop's units a move of `dx` and
@@ -675,7 +700,13 @@ impl UinputInjector {
             keyboard,
             mouse,
             pointer,
-            translator: Translator::default(),
+            translator: Translator {
+                axis_max: (
+                    AxisRange::desktop(width).maximum,
+                    AxisRange::desktop(height).maximum,
+                ),
+                ..Translator::default()
+            },
             leds: KeyboardLeds::default(),
             gamepads: HashMap::new(),
             touchscreen: None,
@@ -804,6 +835,10 @@ impl InputInjector for UinputInjector {
 
     fn set_desktop_scale(&mut self, scale: DesktopScale) {
         self.translator.desktop_scale = scale;
+    }
+
+    fn set_monitor_placement(&mut self, placement: MonitorPlacement, capture: (usize, usize)) {
+        self.translator.placement = Some((placement, capture));
     }
 
     fn description(&self) -> &str {
@@ -1024,6 +1059,46 @@ mod tests {
                 .unwrap()
                 .1,
             position(20 * pixel, 10 * pixel)
+        );
+    }
+
+    /// With the captured monitor's place known, positions on it are placed
+    /// within the whole desktop the absolute pointer covers.
+    #[test]
+    fn places_positions_in_the_desktop() {
+        use qdp_runtime::LayoutRect;
+        // A pointer device made for a 1000 × 500 pixel monitor, now on the
+        // right of a desktop twice as wide.
+        let mut translator = Translator {
+            axis_max: (1000 * SUBUNITS - 1, 500 * SUBUNITS - 1),
+            ..Translator::default()
+        };
+        let monitor = LayoutRect {
+            x: 1000,
+            y: 0,
+            width: 1000,
+            height: 500,
+        };
+        let desktop = LayoutRect {
+            x: 0,
+            y: 0,
+            width: 2000,
+            height: 500,
+        };
+        translator.placement = Some((MonitorPlacement { monitor, desktop }, (1000, 500)));
+        let (_, events) = translator
+            .events(&InputAction::PointerMoveTo {
+                x: 500 * SUBUNITS,
+                y: 250 * SUBUNITS,
+            })
+            .unwrap();
+        // The middle of the right monitor is three quarters across.
+        assert_eq!(
+            events,
+            [
+                Event::new(EV_ABS, ABS_X, 750 * SUBUNITS),
+                Event::new(EV_ABS, ABS_Y, 250 * SUBUNITS),
+            ]
         );
     }
 
