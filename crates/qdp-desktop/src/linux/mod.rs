@@ -9,6 +9,8 @@
 
 #[cfg(feature = "audio")]
 mod audio;
+#[cfg(feature = "discovery")]
+pub(crate) mod avahi;
 #[cfg(feature = "screen-capture")]
 mod desktop_layout;
 mod gamepad;

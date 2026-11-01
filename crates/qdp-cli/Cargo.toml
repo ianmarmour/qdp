@@ -17,9 +17,11 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["audio", "gamepad", "screen-capture", "window"]
+default = ["audio", "discovery", "gamepad", "screen-capture", "window"]
 # Plays and captures sound; on Linux it needs PipeWire's development files.
 audio = ["qdp-desktop/audio"]
+# Advertises hosts on the local network; on Linux through Avahi.
+discovery = ["qdp-desktop/discovery"]
 # Captures the client's gamepads; on Linux it needs libudev's development
 # files.
 gamepad = ["qdp-desktop/gamepad"]
