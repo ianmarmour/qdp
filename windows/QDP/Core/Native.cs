@@ -38,6 +38,8 @@ internal static partial class Native
         public int Microphone;
         public int Screen;
         public int Sync;
+        public int Shortcuts;
+        public int Clipboard;
     }
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]

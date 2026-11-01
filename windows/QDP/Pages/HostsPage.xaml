@@ -72,7 +72,7 @@
                         </Grid.RowDefinitions>
                         <Grid.ContextFlyout>
                             <MenuFlyout>
-                                <MenuFlyoutItem Text="Forget" Tag="{x:Bind}" IsEnabled="{x:Bind CanForget}" Click="OnForgetClicked">
+                                <MenuFlyoutItem Text="Forget" Tag="{x:Bind Self}" IsEnabled="{x:Bind CanForget}" Click="OnForgetClicked">
                                     <MenuFlyoutItem.Icon>
                                         <FontIcon Glyph="&#xE74D;" />
                                     </MenuFlyoutItem.Icon>

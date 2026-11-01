@@ -99,6 +99,17 @@ enum QdpSync {
     QDP_SYNC_TEARING = 1,
 };
 
+/* When Windows' own shortcuts, such as the Windows key, Alt+Tab and
+ * Alt+F4, go to the host instead of acting on this PC. */
+enum QdpShortcuts {
+    /* While the stream window is full screen. */
+    QDP_SHORTCUTS_FULL_SCREEN = 0,
+    /* Whenever the stream window is in front. */
+    QDP_SHORTCUTS_ALWAYS = 1,
+    /* Never. */
+    QDP_SHORTCUTS_NEVER = 2,
+};
+
 /* What a session connects with. */
 typedef struct QdpConfig {
     /* The host's address or name, with or without a port. */
@@ -133,6 +144,10 @@ typedef struct QdpConfig {
     int32_t screen;
     /* A QdpSync value. */
     int32_t sync;
+    /* A QdpShortcuts value. */
+    int32_t shortcuts;
+    /* 1 if the clipboard is shared with the host, both ways; 0 if not. */
+    int32_t clipboard;
 } QdpConfig;
 
 /* A running session. */

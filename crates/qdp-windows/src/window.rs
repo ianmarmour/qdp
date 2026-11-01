@@ -20,7 +20,7 @@ use qdp_app::events::{Ending, Event};
 use qdp_app::placement::confined;
 use qdp_app::session::{Config, EventReader, Session};
 use qdp_app::window_input::{Scroller, button_input, display_size, key_input, touch_phase};
-use qdp_desktop::{D3d11Video, GamepadCapture, SyncMode, WindowPen};
+use qdp_desktop::{D3d11Video, GamepadCapture, SyncMode, SystemKeys, WindowPen};
 use qdp_runtime::{Focus, Microphone, PenInput, UserInput, WarpKind};
 use tracing::{debug, info, warn};
 use winit::application::ApplicationHandler;
@@ -133,6 +133,30 @@ impl Resolution {
     }
 }
 
+/// When Windows' own shortcuts, such as the Windows key and Alt+Tab, go to
+/// the host instead of acting on this PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Shortcuts {
+    /// While the stream window is full screen.
+    FullScreen,
+    /// Whenever the stream window is in front.
+    Always,
+    /// Never.
+    Never,
+}
+
+impl Shortcuts {
+    /// Returns whether the shortcuts go to the host, with the window full
+    /// screen or not.
+    fn to_host(self, screen: Screen) -> bool {
+        match self {
+            Self::FullScreen => screen == Screen::FullScreen,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
 /// How the stream window shows the video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Screen {
@@ -150,6 +174,8 @@ pub(crate) struct WindowChoices {
     pub(crate) title: String,
     /// How the window shows the video as it opens.
     pub(crate) screen: Screen,
+    /// When Windows' shortcuts go to the host.
+    pub(crate) shortcuts: Shortcuts,
     /// How the video meets the display's refresh.
     pub(crate) sync: SyncMode,
     /// The video size to ask for: the picture is scaled to fit the window.
@@ -363,6 +389,8 @@ struct StreamWindow {
     queue: Arc<EventQueue>,
     /// The pen over the window, read until dropped.
     _pen: Option<WindowPen>,
+    /// Windows' shortcuts, taken for the host while allowed.
+    system_keys: Option<SystemKeys>,
     /// The user's gamepads, if they can be watched.
     gamepads: Option<GamepadCapture>,
     /// The session, until the window closes.
@@ -470,10 +498,15 @@ impl StreamWindow {
             .inspect_err(|error| warn!(error, "gamepads are not sent"))
             .ok();
         let pen = attach_pen(hwnd, serial, proxy.clone());
+        let system_keys = capture_system_keys(hwnd, &session);
+        if let Some(keys) = &system_keys {
+            keys.set_active(choices.shortcuts.to_host(choices.screen));
+        }
         Ok(Self {
             serial,
             queue,
             _pen: pen,
+            system_keys,
             gamepads,
             session: Some(session),
             _video: video,
@@ -682,9 +715,16 @@ impl StreamWindow {
                     .push(WindowLine::Microphone(self.microphone).line());
             }
             LocalAction::ToggleFullScreen => {
-                let full_screen = self.window.fullscreen().is_some();
-                self.window
-                    .set_fullscreen((!full_screen).then_some(Fullscreen::Borderless(None)));
+                let screen = match self.window.fullscreen() {
+                    Some(_) => Screen::Windowed,
+                    None => Screen::FullScreen,
+                };
+                self.window.set_fullscreen(
+                    (screen == Screen::FullScreen).then_some(Fullscreen::Borderless(None)),
+                );
+                if let Some(keys) = &self.system_keys {
+                    keys.set_active(self.choices.shortcuts.to_host(screen));
+                }
             }
             LocalAction::Disconnect => return Continue::Close,
         }
@@ -1122,6 +1162,17 @@ fn attach_pen(hwnd: isize, serial: u64, proxy: EventLoopProxy<Command>) -> Optio
         let _ = proxy.send_event(Command::Session(serial, SessionMessage::Pen(pen)));
     })
     .inspect_err(|error| warn!(error, "the pen is not sent"))
+    .ok()
+}
+
+/// Starts taking Windows' shortcuts over the window `hwnd` for `session`'s
+/// host, or returns `None`, saying why, if they cannot be.
+fn capture_system_keys(hwnd: isize, session: &Session) -> Option<SystemKeys> {
+    let input = session.input();
+    SystemKeys::capture(hwnd, move |usage, pressed| {
+        input.send(UserInput::Key { usage, pressed });
+    })
+    .inspect_err(|error| warn!(error, "Windows' shortcuts stay with this PC"))
     .ok()
 }
 

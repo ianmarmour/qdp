@@ -45,6 +45,9 @@ public sealed class HostRow
     /// <summary>The paired host it is, if paired.</summary>
     internal PairedHost? Paired { get; init; }
 
+    /// <summary>The row itself, for a binding that carries it.</summary>
+    public HostRow Self => this;
+
     /// <summary>Whether choosing it does anything.</summary>
     public bool CanChoose => Target is not null;
 

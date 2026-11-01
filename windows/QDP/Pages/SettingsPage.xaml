@@ -22,7 +22,7 @@
                         <TextBlock Text="Resolution" />
                         <TextBlock Text="The size of the picture the computer sends. Smaller ones need less bandwidth." Style="{StaticResource DescriptionStyle}" />
                     </StackPanel>
-                    <ComboBox x:Name="ResolutionBox" Grid.Column="2" MinWidth="200" VerticalAlignment="Center" SelectionChanged="OnChanged" AutomationProperties.Name="Resolution">
+                    <ComboBox x:Name="ResolutionBox" Grid.Column="2" MinWidth="200" VerticalAlignment="Center" SelectionChanged="OnSelectionChanged" AutomationProperties.Name="Resolution">
                         <x:String>Match the stream window</x:String>
                         <x:String>720p</x:String>
                         <x:String>1080p</x:String>
@@ -43,7 +43,7 @@
                         <TextBlock Text="Open streams full screen" />
                         <TextBlock Text="Ctrl+Alt+Shift+X switches between full screen and a window during a stream." Style="{StaticResource DescriptionStyle}" />
                     </StackPanel>
-                    <ToggleSwitch x:Name="FullScreenSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnChanged" AutomationProperties.Name="Open streams full screen" />
+                    <ToggleSwitch x:Name="FullScreenSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnToggled" AutomationProperties.Name="Open streams full screen" />
                 </Grid>
             </Border>
             <Border Style="{StaticResource CardStyle}">
@@ -58,7 +58,7 @@
                         <TextBlock Text="Lowest latency" />
                         <TextBlock Text="Shows each picture as soon as it arrives, without waiting for the display. Displays without variable refresh may tear." Style="{StaticResource DescriptionStyle}" />
                     </StackPanel>
-                    <ToggleSwitch x:Name="TearingSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnChanged" AutomationProperties.Name="Lowest latency" />
+                    <ToggleSwitch x:Name="TearingSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnToggled" AutomationProperties.Name="Lowest latency" />
                 </Grid>
             </Border>
             <Border Style="{StaticResource CardStyle}">
@@ -73,7 +73,7 @@
                         <TextBlock Text="Decoder" />
                         <TextBlock Text="Graphics cards that decode AV1 use the least power and add the least delay." Style="{StaticResource DescriptionStyle}" />
                     </StackPanel>
-                    <ComboBox x:Name="DecoderBox" Grid.Column="2" MinWidth="200" VerticalAlignment="Center" SelectionChanged="OnChanged" AutomationProperties.Name="Decoder">
+                    <ComboBox x:Name="DecoderBox" Grid.Column="2" MinWidth="200" VerticalAlignment="Center" SelectionChanged="OnSelectionChanged" AutomationProperties.Name="Decoder">
                         <x:String>Automatic</x:String>
                         <x:String>Graphics card only</x:String>
                         <x:String>Processor</x:String>
@@ -94,7 +94,44 @@
                         <TextBlock Text="Microphone on when a stream starts" />
                         <TextBlock Text="The computer hears this PC's microphone. Ctrl+Alt+Shift+M turns it on or off during a stream." Style="{StaticResource DescriptionStyle}" />
                     </StackPanel>
-                    <ToggleSwitch x:Name="MicrophoneSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnChanged" AutomationProperties.Name="Microphone on when a stream starts" />
+                    <ToggleSwitch x:Name="MicrophoneSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnToggled" AutomationProperties.Name="Microphone on when a stream starts" />
+                </Grid>
+            </Border>
+
+            <TextBlock Text="Keyboard" Style="{StaticResource SectionHeaderStyle}" />
+            <Border Style="{StaticResource CardStyle}">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Glyph="&#xE765;" />
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="Send Windows shortcuts to the computer" />
+                        <TextBlock Text="The Windows key, Alt+Tab, Alt+F4 and others act on the computer you stream instead of this PC." Style="{StaticResource DescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox x:Name="ShortcutsBox" Grid.Column="2" MinWidth="200" VerticalAlignment="Center" SelectionChanged="OnSelectionChanged" AutomationProperties.Name="Send Windows shortcuts to the computer">
+                        <x:String>In full screen</x:String>
+                        <x:String>Always</x:String>
+                        <x:String>Never</x:String>
+                    </ComboBox>
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource CardStyle}">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Glyph="&#xE77F;" />
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="Share the clipboard" />
+                        <TextBlock Text="Text and images you copy on either side can be pasted on the other." Style="{StaticResource DescriptionStyle}" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="ClipboardSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnToggled" AutomationProperties.Name="Share the clipboard" />
                 </Grid>
             </Border>
 

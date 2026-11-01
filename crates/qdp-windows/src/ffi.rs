@@ -24,11 +24,13 @@ use qdp_app::settings::{format_pin, parse_pin};
 use qdp_codec::CodecPreference;
 use qdp_desktop::SyncMode;
 use qdp_quic::{IdentityFiles, TlsIdentity};
-use qdp_runtime::{DisplaySize, Microphone};
+use qdp_runtime::{ClipboardDirections, DisplaySize, Microphone, SharedClipboard};
 use tracing::{info, warn};
 
 use crate::events::EventQueue;
-use crate::window::{Command, Resolution, Screen, SessionMessage, Start, WindowChoices, send};
+use crate::window::{
+    Command, Resolution, Screen, SessionMessage, Shortcuts, Start, WindowChoices, send,
+};
 
 /// The product name the app sends hosts in `CLIENT_HELLO`.
 const CLIENT_NAME: &str = concat!("qdp-windows/", env!("CARGO_PKG_VERSION"));
@@ -60,6 +62,14 @@ const SCREEN_FULL: i32 = 1;
 /// `QDP_SYNC_TEARING`: pictures are shown as soon as they are drawn; any
 /// other value waits for the display's refresh.
 const SYNC_TEARING: i32 = 1;
+
+/// `QDP_SHORTCUTS_ALWAYS`: Windows' shortcuts go to the host whenever the
+/// stream window is in front.
+const SHORTCUTS_ALWAYS: i32 = 1;
+
+/// `QDP_SHORTCUTS_NEVER`: Windows' shortcuts stay with this PC. Any value
+/// but this and [`SHORTCUTS_ALWAYS`] sends them while full screen.
+const SHORTCUTS_NEVER: i32 = 2;
 
 /// The smallest display side the host accepts, in pixels.
 const MIN_DISPLAY_SIDE: u32 = 16;
@@ -114,6 +124,11 @@ pub struct QdpConfig {
     screen: i32,
     /// A `QdpSync` value.
     sync: i32,
+    /// A `QdpShortcuts` value.
+    shortcuts: i32,
+    /// Whether the clipboard is shared with the host, both ways: 1 if so, 0
+    /// if not.
+    clipboard: i32,
 }
 
 /// A session, which the app holds as `QdpSession *`.
@@ -180,6 +195,15 @@ fn client_pin() -> Result<qdp_quic::KeyPin, String> {
     let (identity, _) = TlsIdentity::load_or_generate(directory, IdentityFiles::CLIENT)
         .map_err(|error| error.to_string())?;
     identity.key_pin().map_err(|error| error.to_string())
+}
+
+/// Opens the system clipboard to share with the host both ways, or returns
+/// `None`, with a warning, if it cannot be.
+fn open_clipboard() -> Option<SharedClipboard> {
+    Some(SharedClipboard {
+        clipboard: qdp_desktop::system_clipboard()?,
+        directions: ClipboardDirections::Both,
+    })
 }
 
 /// Logs to the log file in `directory`, keeping the previous run's, or to
@@ -339,6 +363,8 @@ unsafe fn start(config: *const QdpConfig) -> Result<QdpSession, String> {
                 Microphone::Off
             },
             client_audio: qdp_desktop::client_audio,
+            clipboard: (config.clipboard != 0).then_some(open_clipboard as fn() -> _),
+            keyboard_info: Some(qdp_desktop::keyboard_info),
         },
         choices: WindowChoices {
             title: if title.is_empty() { host } else { title },
@@ -351,6 +377,11 @@ unsafe fn start(config: *const QdpConfig) -> Result<QdpSession, String> {
                 SyncMode::Tearing
             } else {
                 SyncMode::VSync
+            },
+            shortcuts: match config.shortcuts {
+                SHORTCUTS_ALWAYS => Shortcuts::Always,
+                SHORTCUTS_NEVER => Shortcuts::Never,
+                _ => Shortcuts::FullScreen,
             },
             resolution,
             owner: (config.owner_window != 0).then_some(config.owner_window),
@@ -471,11 +502,13 @@ mod tests {
     /// a C compiler lays that out for 64-bit Windows.
     #[test]
     fn config_matches_the_header() {
-        assert_eq!(size_of::<QdpConfig>(), 88);
+        assert_eq!(size_of::<QdpConfig>(), 96);
         assert_eq!(offset_of!(QdpConfig, owner_window), 48);
         assert_eq!(offset_of!(QdpConfig, authentication), 56);
         assert_eq!(offset_of!(QdpConfig, width), 60);
         assert_eq!(offset_of!(QdpConfig, sync), 80);
+        assert_eq!(offset_of!(QdpConfig, shortcuts), 84);
+        assert_eq!(offset_of!(QdpConfig, clipboard), 88);
     }
 
     /// The version the app shows is the crate's, NUL-terminated.
@@ -505,6 +538,8 @@ mod tests {
             microphone: 0,
             screen: 0,
             sync: 0,
+            shortcuts: 0,
+            clipboard: 0,
         };
         let mut error = ptr::null_mut();
         // SAFETY: the configuration's strings are static or null, and the

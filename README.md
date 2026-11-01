@@ -341,6 +341,31 @@ to an iPad work as on a computer, and controllers are sent as gamepads with
 rumble; the button at the top corner, or Select, Start and both shoulder
 buttons together, opens the stream's menu.
 
+## Windows app
+
+The app in [`windows`](windows) streams from a host to PCs running Windows 10
+or later on x86-64. It is a WinUI 3 app around a Rust core,
+[`qdp-windows`](crates/qdp-windows), which decodes AV1 with the GPU through
+D3D11 video where the GPU has an AV1 decoder (NVIDIA RTX 30 and later, AMD
+RX 6000 and later, Intel Arc and Xe, Snapdragon X) and in software otherwise.
+Each stream shows in a window of the core's own, drawn with a flip-model swap
+chain by a render thread that takes pictures straight from the decoder, so
+that full screen, the system hands it to the display without composing it.
+The app needs no installing: it runs from its folder, the release's
+`qdp-windows-app-x64.zip`. Building it needs Rust, NASM and the .NET 8 SDK:
+
+```powershell
+.\windows\build.ps1
+```
+
+The app lists the hosts on the local network and those it paired with;
+choosing a new host pairs with it by the code the host shows, and choosing a
+paired one streams at once, full screen or in a window as its settings say.
+The stream sends the keyboard, mouse, touch, pen and gamepads, with rumble;
+in full screen the Windows key, Alt+Tab and Alt+F4 act on the host. Holding
+Ctrl, Alt and Shift, Z releases the mouse, X switches between full screen and
+a window, M turns the microphone on or off, and Q disconnects.
+
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks

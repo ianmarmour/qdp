@@ -74,6 +74,22 @@ public enum DecoderChoice
     Software,
 }
 
+/// <summary>
+/// When Windows' own shortcuts, such as the Windows key, Alt+Tab and
+/// Alt+F4, go to the computer streamed instead of acting on this PC.
+/// </summary>
+public enum ShortcutsChoice
+{
+    /// <summary>While the stream is full screen.</summary>
+    FullScreen,
+
+    /// <summary>Whenever the stream's window is in front.</summary>
+    Always,
+
+    /// <summary>Never.</summary>
+    Never,
+}
+
 /// <summary>What the user chose for streams, kept between launches.</summary>
 public sealed class AppSettings
 {
@@ -94,6 +110,12 @@ public sealed class AppSettings
 
     /// <summary>Whether the microphone is on as streams start.</summary>
     public bool Microphone { get; set; }
+
+    /// <summary>Whether the clipboard is shared with the computer streamed, both ways.</summary>
+    public bool ShareClipboard { get; set; } = true;
+
+    /// <summary>When Windows' shortcuts go to the computer streamed.</summary>
+    public ShortcutsChoice Shortcuts { get; set; } = ShortcutsChoice.FullScreen;
 
     /// <summary>The rows a resolution asks for, or 0 for the window's own.</summary>
     internal static uint Rows(Resolution resolution) => resolution switch

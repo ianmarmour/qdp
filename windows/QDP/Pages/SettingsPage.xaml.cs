@@ -37,6 +37,8 @@ public sealed partial class SettingsPage : Page
         FullScreenSwitch.IsOn = settings.FullScreen;
         TearingSwitch.IsOn = settings.AllowTearing;
         MicrophoneSwitch.IsOn = settings.Microphone;
+        ShortcutsBox.SelectedIndex = (int)settings.Shortcuts;
+        ClipboardSwitch.IsOn = settings.ShareClipboard;
         loading = false;
         if (window.Problem is null)
         {
@@ -52,8 +54,14 @@ public sealed partial class SettingsPage : Page
         }
     }
 
-    /// <summary>Keeps what the user changed.</summary>
-    private void OnChanged(object sender, RoutedEventArgs args)
+    /// <summary>Keeps a choice the user changed.</summary>
+    private void OnSelectionChanged(object sender, SelectionChangedEventArgs args) => Save();
+
+    /// <summary>Keeps a switch the user flipped.</summary>
+    private void OnToggled(object sender, RoutedEventArgs args) => Save();
+
+    /// <summary>Keeps what the controls say.</summary>
+    private void Save()
     {
         if (loading || settings is null)
         {
@@ -64,6 +72,8 @@ public sealed partial class SettingsPage : Page
         settings.FullScreen = FullScreenSwitch.IsOn;
         settings.AllowTearing = TearingSwitch.IsOn;
         settings.Microphone = MicrophoneSwitch.IsOn;
+        settings.Shortcuts = (ShortcutsChoice)Math.Max(ShortcutsBox.SelectedIndex, 0);
+        settings.ShareClipboard = ClipboardSwitch.IsOn;
         Storage.SaveSettings(settings);
     }
 

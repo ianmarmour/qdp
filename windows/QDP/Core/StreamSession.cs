@@ -150,6 +150,8 @@ internal sealed class StreamSession
                 Microphone = settings.Microphone ? 1 : 0,
                 Screen = settings.FullScreen ? 1 : 0,
                 Sync = settings.AllowTearing ? 1 : 0,
+                Shortcuts = (int)settings.Shortcuts,
+                Clipboard = settings.ShareClipboard ? 1 : 0,
             };
             var handle = Native.qdp_session_start(in config, out var error);
             if (handle == IntPtr.Zero)
