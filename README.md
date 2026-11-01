@@ -71,7 +71,9 @@ After that the two remember each other: the client keeps the host's key in
 A code is good for 120 seconds and one try at a time; after three wrong codes
 in a row the host refuses pairing for 1, then 3, then 5 minutes, and twice as
 long after each further wrong code. `qdp clients` lists the paired clients, and
-`qdp clients remove NAME` forgets one, by its name or the start of its pin.
+`qdp clients remove NAME` forgets one, by its name or the start of its pin; on
+the client, `qdp hosts` lists the paired hosts, and `qdp hosts remove ADDRESS`
+forgets one, by its address or the start of its pin.
 
 A host can also be served with a token, as before pairing, and a client given
 its pin: `qdp pin` prints the host's pin, `qdp serve --token my-secret` accepts
@@ -82,9 +84,11 @@ the token beside paired clients, and `--pairing off` turns pairing off:
 ```
 
 `qdp discover` lists the hosts advertising on the local network, through Avahi
-on Linux, with their addresses and whether they offer pairing. An app can drive
-`qdp connect` for its stream window with `--events`, which reports the session's
-progress on standard output as the lines the apps' cores report (see
+on Linux, with their addresses and whether they offer pairing; with `--watch`
+it writes a line as each comes and goes, until its standard input closes, for
+an app to follow (see [its lines](crates/qdp-cli/src/discover.rs)). An app can
+drive `qdp connect` for its stream window with `--events`, which reports the
+session's progress on standard output as the lines the apps' cores report (see
 [`qdp-app`'s events](crates/qdp-app/src/events.rs)), such as `connected`,
 `pair first`, `paired PIN` and `failed ERROR`, and reads the code the host
 shows from standard input after each `pair` line.
