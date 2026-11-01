@@ -320,13 +320,21 @@ fn descriptor(frame: &DmaBufFrame) -> DrmPrimeSurfaceDescriptor {
         size: u32::try_from(frame.size()).unwrap_or(u32::MAX),
         drm_format_modifier: layout.modifier,
     };
+    // The planes a modifier adds, such as a compressed layout's metadata,
+    // follow the pixels' in the same buffer.
+    let mut offset = [layout.offset, 0, 0, 0];
+    let mut pitch = [layout.pitch, 0, 0, 0];
+    for (index, plane) in frame.extra_planes().iter().enumerate() {
+        offset[index + 1] = plane.offset;
+        pitch[index + 1] = plane.pitch;
+    }
     descriptor.num_layers = 1;
     descriptor.layers[0] = DrmPrimeLayer {
         drm_format,
-        num_planes: 1,
+        num_planes: 1 + frame.extra_planes().len() as u32,
         object_index: [0; 4],
-        offset: [layout.offset, 0, 0, 0],
-        pitch: [layout.pitch, 0, 0, 0],
+        offset,
+        pitch,
     };
     descriptor
 }
@@ -414,5 +422,39 @@ mod tests {
         assert_eq!(described.layers[0].pitch[0], 15_360);
         let rgb = formats(Rgb32Order::Rgb);
         assert_eq!(rgb, (ffi::FOURCC_RGBX, DRM_FORMAT_XBGR8888));
+    }
+
+    /// The planes a modifier adds, such as a display's compression
+    /// metadata, follow the pixels' in the one object.
+    #[test]
+    fn describes_the_planes_a_modifier_adds() {
+        let file = File::open("/dev/null").unwrap();
+        let layout = DmaBufLayout {
+            width: 2560,
+            height: 1440,
+            order: Rgb32Order::Bgr,
+            modifier: 0x0200_0000_0000_1234,
+            offset: 0,
+            pitch: 10_240,
+        };
+        let metadata = [
+            crate::DmaBufPlane {
+                offset: 14_745_600,
+                pitch: 2560,
+            },
+            crate::DmaBufPlane {
+                offset: 14_811_136,
+                pitch: 1024,
+            },
+        ];
+        let frame = DmaBufFrame::new(OwnedFd::from(file), layout)
+            .unwrap()
+            .with_extra_planes(&metadata);
+        let described = descriptor(&frame);
+        assert_eq!(described.num_objects, 1);
+        assert_eq!(described.layers[0].num_planes, 3);
+        assert_eq!(described.layers[0].object_index, [0; 4]);
+        assert_eq!(described.layers[0].offset, [0, 14_745_600, 14_811_136, 0]);
+        assert_eq!(described.layers[0].pitch, [10_240, 2560, 1024, 0]);
     }
 }

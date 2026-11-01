@@ -2,7 +2,9 @@
 //!
 //! - Input: uinput, a kernel interface reached through `ioctl`, so this module
 //!   uses `unsafe`: each block states the contract it relies on.
-//! - Screen capture: the ScreenCast portal and PipeWire.
+//! - Screen capture: the ScreenCast portal and PipeWire, or, for a host
+//!   running as root, the console's framebuffers through DRM, an `ioctl`
+//!   interface too.
 //! - Audio: PipeWire.
 
 #![allow(unsafe_code)]
@@ -13,6 +15,8 @@ mod audio;
 pub(crate) mod avahi;
 #[cfg(feature = "screen-capture")]
 mod desktop_layout;
+#[cfg(feature = "screen-capture")]
+mod dma_buf_map;
 mod gamepad;
 mod hidraw;
 #[cfg(feature = "screen-capture")]
@@ -20,6 +24,8 @@ mod kde_displays;
 #[cfg(feature = "screen-capture")]
 mod kde_protocols;
 mod keycodes;
+#[cfg(feature = "screen-capture")]
+mod kms;
 #[cfg(feature = "screen-capture")]
 mod monitor_matching;
 #[cfg(feature = "notifications")]
@@ -38,6 +44,8 @@ mod wlr_displays;
 
 #[cfg(feature = "audio")]
 pub use audio::{PipeWireInput, PipeWireOutput};
+#[cfg(feature = "screen-capture")]
+pub use kms::ConsoleCapture;
 #[cfg(feature = "screen-capture")]
 pub use screencast::ScreenCapture;
 pub use uinput::UinputInjector;

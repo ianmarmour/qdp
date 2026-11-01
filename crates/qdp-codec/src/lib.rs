@@ -70,7 +70,9 @@ pub use backend::{CodecPreference, VideoDecoder, VideoEncoder, open_decoder, ope
 pub use d3d11va::{D3d11Decoder, D3d11Picture, video_device};
 pub use decoder::Av1Decoder;
 #[cfg(target_os = "linux")]
-pub use dma_buf::{BufferIdentity, DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout};
+pub use dma_buf::{
+    BufferIdentity, DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout, DmaBufPlane, MAX_EXTRA_PLANES,
+};
 pub use encoder::{
     Av1Encoder, EncodedFrame, EncoderSettings, FASTEST_SPEED, KeyFrameRequest, tile_count,
 };

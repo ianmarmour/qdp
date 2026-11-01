@@ -1,7 +1,9 @@
 //! Desktop integration for Quick Desktop Protocol (QDP) hosts: capturing the
 //! screen and performing the client's input on each operating system.
 //!
-//! - Linux: `ScreenCapture` captures a monitor through the ScreenCast portal
+//! - Linux: `ConsoleCapture` captures what the graphics card shows, login
+//!   screen included, for a host running as root, and `ScreenCapture`
+//!   captures a monitor through the ScreenCast portal
 //!   and PipeWire, and can change its mode and interface scale to the
 //!   client's display, and `UinputInjector` creates virtual keyboard, mouse
 //!   and pointer devices through uinput, which works under every Wayland
@@ -81,10 +83,10 @@ pub use notification::{Notification, Urgency, notify};
 pub use passthrough::{DeviceSelector, PassthroughCapture};
 pub use touchpad::TouchpadCapture;
 
-#[cfg(all(target_os = "linux", feature = "screen-capture"))]
-pub use linux::ScreenCapture;
 #[cfg(target_os = "linux")]
 pub use linux::UinputInjector;
+#[cfg(all(target_os = "linux", feature = "screen-capture"))]
+pub use linux::{ConsoleCapture, ScreenCapture};
 #[cfg(target_os = "macos")]
 pub use macos::{MacScreenCapture, QuartzInjector, mac_key_usage};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -219,6 +221,20 @@ fn warn_unmatched(matching: DisplayMatching) {
     if matching == DisplayMatching::On {
         warn!("this platform cannot change the monitor to the client's display yet");
     }
+}
+
+/// Starts capturing the console: what the graphics card shows on a display,
+/// whatever shows it, from the login screen to a desktop, delivering frames
+/// as `frames` says. Needs root. Blocks until the first frame is read.
+#[cfg(all(target_os = "linux", feature = "screen-capture"))]
+pub fn open_console(frames: FrameMemory) -> Result<Box<dyn FrameSource>, String> {
+    Ok(Box::new(ConsoleCapture::open(frames)?))
+}
+
+/// Starts capturing the console; only Linux hosts can.
+#[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
+pub fn open_console(_frames: FrameMemory) -> Result<Box<dyn FrameSource>, String> {
+    Err("console capture is only available on Linux".to_owned())
 }
 
 /// Starts capturing the screen; this platform cannot yet.

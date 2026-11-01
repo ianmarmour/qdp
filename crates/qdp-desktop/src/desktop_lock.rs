@@ -20,12 +20,16 @@ mod platform {
     /// The variable naming the logind session this process belongs to.
     const SESSION_VARIABLE: &str = "XDG_SESSION_ID";
 
-    /// Locks this process's logind session.
+    /// The seat whose screen and input the host has: the one with the
+    /// machine's own display, keyboard and mouse.
+    const SEAT: &str = "seat0";
+
+    /// Locks this process's logind session or, for a host running as a
+    /// service, outside any session, the session shown on the seat.
     pub(super) fn lock_desktop() -> Result<(), String> {
         let mut command = Command::new(LOGINCTL);
         command.arg("lock-session");
-        // Without a session ID, loginctl locks the caller's own session.
-        if let Ok(session) = std::env::var(SESSION_VARIABLE) {
+        if let Some(session) = std::env::var(SESSION_VARIABLE).ok().or_else(seat_session) {
             command.arg(session);
         }
         let output = command
@@ -39,6 +43,16 @@ mod platform {
                 String::from_utf8_lossy(&output.stderr).trim()
             ))
         }
+    }
+
+    /// Returns the session shown on the seat, if one is.
+    fn seat_session() -> Option<String> {
+        let output = Command::new(LOGINCTL)
+            .args(["show-seat", SEAT, "--property=ActiveSession", "--value"])
+            .output()
+            .ok()?;
+        let session = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+        (output.status.success() && !session.is_empty()).then_some(session)
     }
 }
 
