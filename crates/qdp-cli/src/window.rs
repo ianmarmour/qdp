@@ -1168,15 +1168,44 @@ fn display_size(window: &Window, resolution: Option<(u32, u32)>) -> DisplaySize 
         .current_monitor()
         .or_else(|| window.primary_monitor());
     let size = window.inner_size();
-    let (width, height) = resolution.unwrap_or((size.width, size.height));
+    let window_scale = (window.scale_factor() * f64::from(DisplaySize::UNSCALED)).round() as u32;
+    let (width, height, scale_percent) = match resolution {
+        Some((width, height)) => (
+            width,
+            height,
+            stretched_scale(window_scale, (size.width, size.height), (width, height)),
+        ),
+        None => (size.width, size.height, window_scale),
+    };
     DisplaySize {
         width,
         height,
         refresh_millihertz: monitor
             .and_then(|monitor| monitor.refresh_rate_millihertz())
             .unwrap_or(0),
-        scale_percent: (window.scale_factor() * f64::from(DisplaySize::UNSCALED)).round() as u32,
+        scale_percent,
     }
+}
+
+/// The step chosen scales are rounded to, in percent, as desktops offer.
+const SCALE_STEP: f64 = 25.0;
+
+/// The scales a chosen resolution may ask for, in percent.
+const SCALE_RANGE: (f64, f64) = (100.0, 400.0);
+
+/// Returns the interface scale to ask the host for when the picture of
+/// `resolution` is stretched to fill a `window`-sized window at
+/// `window_scale` percent: smaller by as much as the picture is stretched,
+/// so that the host's text shows at the size the window's would, rounded to
+/// the scales desktops offer (Section 6.2).
+fn stretched_scale(window_scale: u32, window: (u32, u32), resolution: (u32, u32)) -> u32 {
+    let stretch = (f64::from(window.0) / f64::from(resolution.0.max(1)))
+        .min(f64::from(window.1) / f64::from(resolution.1.max(1)));
+    if stretch <= 0.0 {
+        return window_scale;
+    }
+    let scale = f64::from(window_scale) / stretch;
+    ((scale / SCALE_STEP).round() * SCALE_STEP).clamp(SCALE_RANGE.0, SCALE_RANGE.1) as u32
 }
 
 /// Creates the event loop the window runs on. It must be created on the main
@@ -1185,4 +1214,25 @@ pub fn event_loop() -> Result<EventLoop<WindowMessage>, String> {
     EventLoop::with_user_event()
         .build()
         .map_err(|error| format!("cannot start the window system: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chosen resolution stretched over the window asks for a scale as
+    /// much smaller, in steps of 25 %, and never below 100 %.
+    #[test]
+    fn scales_chosen_resolutions() {
+        // 2560 wide in a 3024-pixel window at 200 %: about 169 %.
+        assert_eq!(stretched_scale(200, (3024, 1964), (2560, 1080)), 175);
+        // The window's own size keeps its scale.
+        assert_eq!(stretched_scale(200, (2560, 1080), (2560, 1080)), 200);
+        // Stretched a lot, the scale stays at 100 %.
+        assert_eq!(stretched_scale(100, (3840, 2160), (1280, 720)), 100);
+        // Shrunk, larger.
+        assert_eq!(stretched_scale(100, (1920, 1080), (3840, 2160)), 200);
+        // An empty window keeps the window's scale.
+        assert_eq!(stretched_scale(200, (0, 0), (2560, 1080)), 200);
+    }
 }
