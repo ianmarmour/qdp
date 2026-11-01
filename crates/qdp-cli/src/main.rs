@@ -254,7 +254,6 @@ async fn serve(args: ServeArgs) -> CliResult {
     let clipboard_directions = args.clipboard;
     let audio_setting = args.audio;
     let lock_policy = args.lock;
-    let real_monitors = args.real_monitors;
     let state_directory = Arc::new(args.identity.clone());
     // What the host can inject is found once, before any client connects,
     // so that no input device exists for a client that has not
@@ -307,7 +306,6 @@ async fn serve(args: ServeArgs) -> CliResult {
                         open: Box::new(move || {
                             Box::pin(open_desktop(
                                 source_kind,
-                                real_monitors,
                                 (width, height),
                                 state_directory,
                                 lock_policy,
@@ -371,17 +369,15 @@ fn shared_clipboard(directions: Option<ClipboardDirections>) -> Option<SharedCli
 }
 
 /// Opens a session's desktop once its client has authenticated: what it
-/// streams, as [`open_source`] opens it, keeping the real monitors as
-/// `real_monitors` asks when it is a virtual monitor, an input injector for
-/// it, and, when it streams the screen, the lock that `lock` asks for.
+/// streams, as [`open_source`] opens it, an input injector for it, and,
+/// when it streams the screen, the lock that `lock` asks for.
 async fn open_desktop(
     kind: SourceKind,
-    real_monitors: qdp_desktop::RealMonitors,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
     lock: LockPolicy,
 ) -> Result<OpenedDesktop, RuntimeError> {
-    let (source, streamed) = open_source(kind, real_monitors, size, state_directory)
+    let (source, streamed) = open_source(kind, size, state_directory)
         .await
         .map_err(RuntimeError::Capture)?;
     let (width, height) = source.size();
@@ -413,13 +409,11 @@ enum Streamed {
     TestPattern,
 }
 
-/// Opens what a session streams: the screen, a virtual monitor that keeps
-/// the real ones as `real_monitors` asks, or a `size` test pattern.
+/// Opens what a session streams: the screen, or a `size` test pattern.
 /// Capturing the screen can wait for the user to choose a monitor, so it runs
 /// on a blocking thread.
 async fn open_source(
     kind: SourceKind,
-    real_monitors: qdp_desktop::RealMonitors,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
 ) -> Result<(Box<dyn FrameSource>, Streamed), String> {
@@ -429,13 +423,6 @@ async fn open_source(
     };
     if kind == SourceKind::TestPattern {
         return Ok(test_pattern());
-    }
-    if kind == SourceKind::Virtual {
-        let monitor =
-            tokio::task::spawn_blocking(move || qdp_desktop::open_virtual_monitor(real_monitors))
-                .await
-                .map_err(|error| error.to_string())??;
-        return Ok((monitor, Streamed::Screen));
     }
     let screen = tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory))
         .await

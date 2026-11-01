@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use qdp_codec::CodecPreference;
+use qdp_desktop::DeviceSelector;
 use qdp_desktop::Microphone;
-use qdp_desktop::{DeviceSelector, RealMonitors};
 use qdp_quic::KeyPin;
 use qdp_runtime::{ClipboardDirections, PassthroughPolicy};
 
@@ -30,10 +30,8 @@ Serve options:
   --client-key HEX     Accept clients presenting the key HEX, from their
                        `qdp pin --client` (repeatable)
   --user NAME          Accept NAME with the password in QDP_PASSWORD
-  --source KIND        auto, screen, virtual or test-pattern (default auto: the
-                       screen, or the test pattern if it cannot be captured;
-                       virtual adds a monitor at the client's display and
-                       streams it, on KDE Plasma)
+  --source KIND        auto, screen or test-pattern (default auto: the screen,
+                       or the test pattern if it cannot be captured)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
   --fps N              Frames per second (default 60)
   --encoder KIND       auto, hardware or software (default auto: the GPU's
@@ -56,10 +54,6 @@ Serve options:
   --lock on|off        Lock this machine's desktop when a session ends other
                        than by its client disconnecting, as when the network
                        drops (default on)
-  --real-monitors on|off
-                       With --source virtual, keep this machine's monitors on
-                       beside the virtual one, or turn them off for the
-                       session so that its windows move to it (default off)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -162,8 +156,6 @@ pub enum SourceKind {
     Screen,
     /// A moving test pattern.
     TestPattern,
-    /// A virtual monitor at the client's display.
-    Virtual,
 }
 
 /// The options of `qdp serve`.
@@ -203,8 +195,6 @@ pub struct ServeArgs {
     /// What happens to the desktop when a session ends other than by its
     /// client disconnecting.
     pub lock: LockPolicy,
-    /// What becomes of the real monitors while a virtual one is streamed.
-    pub real_monitors: RealMonitors,
 }
 
 /// What a host does with its desktop when a session ends other than by its
@@ -459,7 +449,6 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         passthrough: PassthroughPolicy::GameControllers,
         resumption: Some(qdp_runtime::DEFAULT_RESUMPTION_LIFETIME),
         lock: LockPolicy::Lock,
-        real_monitors: RealMonitors::Off,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -477,10 +466,9 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     "auto" => SourceKind::Auto,
                     "screen" => SourceKind::Screen,
                     "test-pattern" => SourceKind::TestPattern,
-                    "virtual" => SourceKind::Virtual,
                     other => {
                         return Err(error(format!(
-                            "--source must be auto, screen, virtual or test-pattern, not {other}"
+                            "--source must be auto, screen or test-pattern, not {other}"
                         )));
                     }
                 }
@@ -511,17 +499,6 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     "on" => LockPolicy::Lock,
                     "off" => LockPolicy::Leave,
                     other => return Err(error(format!("--lock must be on or off, not {other}"))),
-                }
-            }
-            "--real-monitors" => {
-                serve.real_monitors = match value("--real-monitors", &mut arguments)?.as_str() {
-                    "on" => RealMonitors::On,
-                    "off" => RealMonitors::Off,
-                    other => {
-                        return Err(error(format!(
-                            "--real-monitors must be on or off, not {other}"
-                        )));
-                    }
                 }
             }
             other => return Err(error(format!("unknown option: {other}"))),
@@ -688,11 +665,6 @@ mod tests {
             panic!("expected serve");
         };
         assert_eq!(serve.source, SourceKind::TestPattern);
-        let Command::Serve(serve) = parse_line("serve --token abc --source virtual").unwrap()
-        else {
-            panic!("expected serve");
-        };
-        assert_eq!(serve.source, SourceKind::Virtual);
         assert!(parse_line("serve --token abc --source camera").is_err());
         let Command::Serve(serve) = parse_line("serve --token abc --encoder software").unwrap()
         else {
@@ -739,13 +711,6 @@ mod tests {
         };
         assert_eq!(serve.lock, LockPolicy::Leave);
         assert!(parse_line("serve --token abc --lock maybe").is_err());
-        assert_eq!(serve.real_monitors, RealMonitors::Off);
-        let Command::Serve(serve) = parse_line("serve --token abc --real-monitors on").unwrap()
-        else {
-            panic!("expected serve");
-        };
-        assert_eq!(serve.real_monitors, RealMonitors::On);
-        assert!(parse_line("serve --token abc --real-monitors maybe").is_err());
         assert!(parse_line("serve").is_err());
         let pin = "ab".repeat(PIN_HEX_LENGTH / 2);
         let Command::Serve(serve) = parse_line(&format!("serve --client-key {pin}")).unwrap()

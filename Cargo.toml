@@ -50,7 +50,6 @@ qdp-runtime = { path = "crates/qdp-runtime" }
 wl-clipboard-rs = { version = "0.9.3", default-features = false }
 wayland-client = { version = "0.31.15", default-features = false }
 wayland-protocols = { version = "0.32.13", default-features = false, features = ["client", "unstable"] }
-wayland-protocols-plasma = { version = "0.3.12", default-features = false, features = ["client"] }
 x11rb = { version = "0.13", default-features = false }
 # PipeWire, which delivers captured screens on Linux.
 pipewire = { version = "0.10.1", default-features = false, features = ["v0_3_49"] }
