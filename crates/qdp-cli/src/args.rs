@@ -106,7 +106,9 @@ Connect options:
                        after which the host and its key are remembered
   --name NAME          This device's name, which a host shows when pairing
                        (default: this machine's name)
-  --token TOKEN        Authenticate with TOKEN
+  --token TOKEN        Authenticate with TOKEN; without --token, a token in the
+                       QDP_TOKEN environment variable, which other users
+                       cannot read as they can a command line
   --user NAME          Authenticate as NAME with the password in QDP_PASSWORD
   --identity DIR       Directory holding this client's key, with which it
                        authenticates when given neither --token nor --user,

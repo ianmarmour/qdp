@@ -13,6 +13,10 @@ use crate::command;
 use crate::rows::{Authentication, Target};
 use crate::session_events::SessionEvent;
 
+/// The environment variable `qdp connect` reads a token from, which keeps
+/// it out of the command line.
+const TOKEN_VARIABLE: &str = "QDP_TOKEN";
+
 /// What a session reports when `qdp` exits without saying how it ended.
 const UNEXPLAINED_EXIT: &str = "The qdp command stopped without saying why; its log says more";
 
@@ -32,6 +36,7 @@ impl Session {
     pub fn start(
         target: &Target,
         identity: &Path,
+        options: &[String],
         report: impl Fn(SessionEvent) + 'static,
     ) -> Result<Self, glib::Error> {
         let mut arguments = vec![
@@ -41,13 +46,19 @@ impl Session {
             identity.as_os_str(),
             OsStr::new("--events"),
         ];
+        let mut environment = Vec::new();
         match &target.authentication {
             Authentication::Paired(pin) => {
                 arguments.extend([OsStr::new("--pin"), OsStr::new(pin.as_str())]);
             }
+            Authentication::Token { pin, token } => {
+                arguments.extend([OsStr::new("--pin"), OsStr::new(pin.as_str())]);
+                environment.push((TOKEN_VARIABLE, token.as_str()));
+            }
             Authentication::Pair => arguments.push(OsStr::new("--pair")),
         }
-        let process = command::start(&arguments)?;
+        arguments.extend(options.iter().map(OsStr::new));
+        let process = command::start_with_environment(&arguments, &environment)?;
         let cancelled = Rc::new(Cell::new(false));
         let finished = Rc::new(Cell::new(false));
         let report = Rc::new(report);

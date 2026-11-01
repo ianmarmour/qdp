@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -13,10 +14,12 @@ use gtk::{gio, glib};
 
 use crate::command;
 use crate::discovery::{self, Change, FoundHost};
-use crate::hosts::{AppFiles, PairedHost};
+use crate::hosts::{AppFiles, PairedHost, Token};
+use crate::key_pin::KeyPin;
 use crate::rows::{self, Authentication, Row, Status, Target};
 use crate::session::Session;
 use crate::session_events::{CodeRequest, SessionEvent};
+use crate::settings::{Clipboard, Decoder, Microphone, Resolution, Settings, Sound, Touchpad};
 
 /// The app's ID, which names its icon and desktop entry too.
 pub const APP_ID: &str = "io.github.ianmarmour.qdp";
@@ -49,6 +52,12 @@ const CANCEL: &str = "cancel";
 /// The response that pairs.
 const PAIR: &str = "pair";
 
+/// The response that adds a host.
+const ADD: &str = "add";
+
+/// The file of the user's settings, in the app's configuration directory.
+const SETTINGS_FILE: &str = "settings";
+
 /// The response that forgets a host.
 const FORGET: &str = "forget";
 
@@ -79,6 +88,7 @@ pub fn startup(application: &adw::Application) {
     application.add_action_entries([about, quit]);
     application.set_accels_for_action("app.quit", &["<Control>q"]);
     application.set_accels_for_action("win.add", &["<Control>n"]);
+    application.set_accels_for_action("win.preferences", &["<Control>comma"]);
 }
 
 /// Shows the window, opening it the first time.
@@ -159,6 +169,8 @@ struct State {
     next_session: u64,
     /// The groups of rows the list shows.
     groups: Vec<adw::PreferencesGroup>,
+    /// What the user chose for every stream.
+    settings: Settings,
 }
 
 /// The app's window.
@@ -177,6 +189,8 @@ struct Window {
     banner: adw::Banner,
     /// The app's files.
     files: AppFiles,
+    /// The file of the user's settings.
+    settings_path: PathBuf,
     /// What it shows and runs.
     state: RefCell<State>,
 }
@@ -192,6 +206,7 @@ impl Window {
             .build();
         header.pack_start(&add);
         let menu = gio::Menu::new();
+        menu.append(Some("Preferences"), Some("win.preferences"));
         menu.append(Some("About QDP"), Some("app.about"));
         let menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
@@ -238,6 +253,9 @@ impl Window {
             .build();
 
         let files = AppFiles::new(glib::user_data_dir().join(APP_DIRECTORY));
+        let settings_path = glib::user_config_dir()
+            .join(APP_DIRECTORY)
+            .join(SETTINGS_FILE);
         let this = Rc::new(Self {
             window,
             toasts,
@@ -252,14 +270,21 @@ impl Window {
                 sessions: BTreeMap::new(),
                 next_session: 0,
                 groups: Vec::new(),
+                settings: Settings::load(&settings_path),
             }),
             files,
+            settings_path,
         });
         let adding = Rc::clone(&this);
         let add_action = gio::ActionEntry::builder("add")
             .activate(move |_: &adw::ApplicationWindow, _, _| adding.add_by_address())
             .build();
-        this.window.add_action_entries([add_action]);
+        let preferring = Rc::clone(&this);
+        let preferences_action = gio::ActionEntry::builder("preferences")
+            .activate(move |_: &adw::ApplicationWindow, _, _| preferring.show_preferences())
+            .build();
+        this.window
+            .add_action_entries([add_action, preferences_action]);
         this.search();
         this.window.present();
     }
@@ -452,7 +477,8 @@ impl Window {
             SessionId(state.next_session)
         };
         let this = Rc::clone(self);
-        let started = Session::start(&target, &self.files.identity(), move |event| {
+        let options = self.state.borrow().settings.arguments();
+        let started = Session::start(&target, &self.files.identity(), &options, move |event| {
             this.session_event(id, event);
         });
         match started {
@@ -594,39 +620,252 @@ impl Window {
         });
     }
 
-    /// Asks for a host's address, and pairs with it.
+    /// Asks for a host's address, and pairs with it, or adds it with the key
+    /// pin and token its administrator gave.
     fn add_by_address(self: &Rc<Self>) {
-        let entry = gtk::Entry::builder()
-            .placeholder_text("192.168.1.5 or exile.local")
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        list.add_css_class("boxed-list");
+        let address = adw::EntryRow::builder()
+            .title("Name or IP address")
             .input_purpose(gtk::InputPurpose::Url)
             .activates_default(true)
             .build();
+        let with_token = adw::SwitchRow::builder()
+            .title("Use a key pin and token")
+            .subtitle("Instead of pairing with a code")
+            .build();
+        let pin = adw::EntryRow::builder()
+            .title("Key pin")
+            .visible(false)
+            .activates_default(true)
+            .build();
+        let token = adw::PasswordEntryRow::builder()
+            .title("Token")
+            .visible(false)
+            .activates_default(true)
+            .build();
+        let name = adw::EntryRow::builder()
+            .title("Name (optional)")
+            .visible(false)
+            .activates_default(true)
+            .build();
+        list.append(&address);
+        list.append(&with_token);
+        list.append(&pin);
+        list.append(&token);
+        list.append(&name);
         let dialog = adw::AlertDialog::builder()
             .heading("Add a Computer")
-            .body("Type its name or IP address, with :PORT if it isn’t 4433, and pair with the code it shows.")
-            .extra_child(&entry)
-            .focus_widget(&entry)
+            .body("Type its name or IP address, with :PORT if it isn’t 4433. Pair with the code it shows, or use the key pin and token its administrator gave you.")
+            .extra_child(&list)
+            .focus_widget(&address)
             .close_response(CANCEL)
-            .default_response(PAIR)
+            .default_response(ADD)
             .build();
-        dialog.add_responses(&[(CANCEL, "Cancel"), (PAIR, "Pair")]);
-        dialog.set_response_appearance(PAIR, adw::ResponseAppearance::Suggested);
-        dialog.set_response_enabled(PAIR, false);
-        let enabling = dialog.clone();
-        entry.connect_changed(move |entry| {
-            enabling.set_response_enabled(PAIR, !entry.text().trim().is_empty());
+        dialog.add_responses(&[(CANCEL, "Cancel"), (ADD, "Pair")]);
+        dialog.set_response_appearance(ADD, adw::ResponseAppearance::Suggested);
+        dialog.set_response_enabled(ADD, false);
+        let update = Rc::new({
+            let (dialog, address, with_token, pin, token, name) = (
+                dialog.clone(),
+                address.clone(),
+                with_token.clone(),
+                pin.clone(),
+                token.clone(),
+                name.clone(),
+            );
+            move || {
+                let tokened = with_token.is_active();
+                for row in [
+                    pin.upcast_ref::<gtk::Widget>(),
+                    token.upcast_ref(),
+                    name.upcast_ref(),
+                ] {
+                    row.set_visible(tokened);
+                }
+                dialog.set_response_label(ADD, if tokened { "Add" } else { "Pair" });
+                let valid = !address.text().trim().is_empty()
+                    && (!tokened
+                        || (typed_pin(&pin.text()).is_some()
+                            && Token::new(&token.text()).is_some()));
+                dialog.set_response_enabled(ADD, valid);
+            }
         });
+        for entry in [
+            address.upcast_ref::<gtk::Editable>(),
+            pin.upcast_ref(),
+            token.upcast_ref(),
+        ] {
+            let update = Rc::clone(&update);
+            entry.connect_changed(move |_| update());
+        }
+        let toggled = Rc::clone(&update);
+        with_token.connect_active_notify(move |_| toggled());
         let this = Rc::clone(self);
         glib::spawn_future_local(async move {
-            if dialog.choose_future(Some(&this.window)).await == PAIR {
-                let address = entry.text().trim().to_owned();
+            if dialog.choose_future(Some(&this.window)).await != ADD {
+                return;
+            }
+            let address = address.text().trim().to_owned();
+            if !with_token.is_active() {
                 this.stream(Target {
                     name: address.clone(),
                     address,
                     authentication: Authentication::Pair,
                 });
+                return;
+            }
+            let (Some(pin), Some(token)) = (typed_pin(&pin.text()), Token::new(&token.text()))
+            else {
+                return;
+            };
+            let name = match name.text().trim() {
+                "" => address.clone(),
+                typed => typed.to_owned(),
+            };
+            if let Err(error) = this.files.add_token_host(&pin, &address, &token, &name) {
+                this.alert(
+                    &format!("Couldn’t Add {name}"),
+                    &sentence(&error.to_string()),
+                );
+                return;
+            }
+            this.reload_paired();
+            this.stream(Target {
+                name,
+                address,
+                authentication: Authentication::Token { pin, token },
+            });
+        });
+    }
+
+    /// Shows the settings of every stream, keeping each as it changes.
+    fn show_preferences(self: &Rc<Self>) {
+        let settings = self.state.borrow().settings;
+        let page = adw::PreferencesPage::new();
+        let video = adw::PreferencesGroup::builder()
+            .title("Video")
+            .description(
+                "For streams started from now on. A fixed resolution streams less at a large \
+                 or full-screen window; hardware decoding uses the GPU where it decodes AV1.",
+            )
+            .build();
+        let resolutions = Resolution::choices();
+        let labels: Vec<String> = resolutions.iter().map(|choice| choice.label()).collect();
+        let resolution = combo_row(
+            "Resolution",
+            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+            resolutions
+                .iter()
+                .position(|choice| *choice == settings.resolution),
+        );
+        let this = Rc::clone(self);
+        resolution.connect_selected_notify(move |row| {
+            if let Some(&choice) = resolutions.get(row.selected() as usize) {
+                this.change_settings(|settings| settings.resolution = choice);
             }
         });
+        let decoder = combo_row(
+            "Decoding",
+            &Decoder::CHOICES.map(Decoder::label),
+            Decoder::CHOICES
+                .iter()
+                .position(|choice| *choice == settings.decoder),
+        );
+        let this = Rc::clone(self);
+        decoder.connect_selected_notify(move |row| {
+            if let Some(&choice) = Decoder::CHOICES.get(row.selected() as usize) {
+                this.change_settings(|settings| settings.decoder = choice);
+            }
+        });
+        video.add(&resolution);
+        video.add(&decoder);
+
+        let sound_group = adw::PreferencesGroup::builder().title("Sound").build();
+        let sound = adw::SwitchRow::builder()
+            .title("Play the computer’s sound")
+            .active(settings.sound == Sound::On)
+            .build();
+        let this = Rc::clone(self);
+        sound.connect_active_notify(move |row| {
+            let choice = if row.is_active() {
+                Sound::On
+            } else {
+                Sound::Off
+            };
+            this.change_settings(|settings| settings.sound = choice);
+        });
+        let microphone = adw::SwitchRow::builder()
+            .title("Send the microphone")
+            .subtitle("The computer’s apps hear this one’s microphone")
+            .active(settings.microphone == Microphone::On)
+            .build();
+        let this = Rc::clone(self);
+        microphone.connect_active_notify(move |row| {
+            let choice = if row.is_active() {
+                Microphone::On
+            } else {
+                Microphone::Off
+            };
+            this.change_settings(|settings| settings.microphone = choice);
+        });
+        sound_group.add(&sound);
+        sound_group.add(&microphone);
+
+        let input = adw::PreferencesGroup::builder()
+            .title("Input")
+            .description("The clipboard shares copied text with the computer streamed.")
+            .build();
+        let clipboard = combo_row(
+            "Clipboard",
+            &Clipboard::CHOICES.map(Clipboard::label),
+            Clipboard::CHOICES
+                .iter()
+                .position(|choice| *choice == settings.clipboard),
+        );
+        let this = Rc::clone(self);
+        clipboard.connect_selected_notify(move |row| {
+            if let Some(&choice) = Clipboard::CHOICES.get(row.selected() as usize) {
+                this.change_settings(|settings| settings.clipboard = choice);
+            }
+        });
+        let touchpad = adw::SwitchRow::builder()
+            .title("Touchpad gestures")
+            .subtitle("Send the touchpad’s fingers for the computer’s own gestures; needs the input group")
+            .active(settings.touchpad == Touchpad::Gestures)
+            .build();
+        let this = Rc::clone(self);
+        touchpad.connect_active_notify(move |row| {
+            let choice = if row.is_active() {
+                Touchpad::Gestures
+            } else {
+                Touchpad::Pointer
+            };
+            this.change_settings(|settings| settings.touchpad = choice);
+        });
+        input.add(&clipboard);
+        input.add(&touchpad);
+
+        page.add(&video);
+        page.add(&sound_group);
+        page.add(&input);
+        let dialog = adw::PreferencesDialog::new();
+        dialog.add(&page);
+        dialog.present(Some(&self.window));
+    }
+
+    /// Changes the settings as `change` does, and keeps them.
+    fn change_settings(&self, change: impl FnOnce(&mut Settings)) {
+        let settings = {
+            let mut state = self.state.borrow_mut();
+            change(&mut state.settings);
+            state.settings
+        };
+        if let Err(error) = settings.save(&self.settings_path) {
+            self.toast(&format!("Can’t keep the settings: {error}"));
+        }
     }
 
     /// Asks whether to forget `host`, and forgets it if so.
@@ -642,6 +881,16 @@ impl Window {
         let this = Rc::clone(self);
         glib::spawn_future_local(async move {
             if dialog.choose_future(Some(&this.window)).await != FORGET {
+                return;
+            }
+            if host.token.is_some() {
+                match this.files.remove_token_host(&host.pin) {
+                    Ok(_) => this.reload_paired(),
+                    Err(error) => this.alert(
+                        &format!("Couldn’t Forget {}", host.name),
+                        &sentence(&error.to_string()),
+                    ),
+                }
                 return;
             }
             let identity = this.files.identity();
@@ -717,6 +966,23 @@ fn sentence(error: &str) -> String {
         sentence.push('.');
     }
     sentence
+}
+
+/// Returns a combo row titled `title`, offering `choices`, with the one at
+/// `selected` chosen, or the first.
+fn combo_row(title: &str, choices: &[&str], selected: Option<usize>) -> adw::ComboRow {
+    let row = adw::ComboRow::builder()
+        .title(title)
+        .model(&gtk::StringList::new(choices))
+        .build();
+    row.set_selected(u32::try_from(selected.unwrap_or(0)).unwrap_or(0));
+    row
+}
+
+/// Reads a key pin as users paste it: 64 hexadecimal digits, perhaps with
+/// colons or spaces between them.
+fn typed_pin(text: &str) -> Option<KeyPin> {
+    KeyPin::parse(&text.replace([':', ' '], ""))
 }
 
 /// Returns whether `text` is a whole pairing code.
