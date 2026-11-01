@@ -13,6 +13,8 @@
 mod audio;
 #[cfg(feature = "discovery")]
 pub(crate) mod avahi;
+#[cfg(feature = "discovery")]
+pub(crate) mod avahi_browse;
 #[cfg(feature = "screen-capture")]
 mod desktop_layout;
 #[cfg(feature = "screen-capture")]

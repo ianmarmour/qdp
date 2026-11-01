@@ -19,6 +19,7 @@ Usage:
   qdp serve [options]          Serve this machine's desktop
   qdp connect HOST [options]   Connect to a host, by address or name,
                                with an optional :PORT (default 4433)
+  qdp discover                 List the hosts advertising on the local network
   qdp pin [--identity DIR]     Print this host's key pin for clients
   qdp pin --client [--identity DIR]
                                Print this client's key pin for hosts
@@ -104,6 +105,9 @@ Connect options:
   --frames N           Disconnect after N frames
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
   --headless           Open no window; only log statistics
+  --events             Report the session's progress as lines on standard
+                       output, and read a pairing code from standard input,
+                       for an app that runs qdp connect for its stream
   --resolution WxH     Ask the host for video WIDTHxHEIGHT pixels, whatever
                        the window's size, and stretch it to fill the window,
                        to stream less at a large or full-screen window
@@ -178,6 +182,8 @@ pub enum Command {
     /// and output, for a host streaming the console from outside any
     /// session, which starts it. Not for people to run.
     SessionHelper,
+    /// List the hosts advertising on the local network.
+    Discover,
     /// Print the key pin of the host's or the client's identity.
     Pin {
         /// The directory of the identity.
@@ -263,6 +269,17 @@ pub enum SourceKind {
     Console,
     /// A moving test pattern.
     TestPattern,
+}
+
+/// Where `qdp connect` reports the session's progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EventOutput {
+    /// In the log only.
+    #[default]
+    Log,
+    /// Also as the lines apps read (see `qdp_app::events`), on standard
+    /// output, with the code a pairing host shows read from standard input.
+    Lines,
 }
 
 /// The options of `qdp serve`.
@@ -409,6 +426,8 @@ pub struct ConnectArgs {
     pub output: Option<PathBuf>,
     /// Where to show the stream.
     pub presentation: Presentation,
+    /// Where the session's progress is reported.
+    pub events: EventOutput,
     /// Whether to decode in hardware or software.
     pub decoder: CodecPreference,
     /// Where to decode the host's video.
@@ -545,6 +564,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
         Some("serve") => parse_serve(arguments).map(Command::Serve),
         Some("connect") => parse_connect(arguments).map(Command::Connect),
         Some(DECODER_COMMAND) => Ok(Command::Decoder),
+        Some("discover") => no_more(arguments).map(|()| Command::Discover),
         Some(qdp_desktop::SESSION_HELPER_COMMAND) => Ok(Command::SessionHelper),
         Some("pin") => {
             let mut identity = None;
@@ -835,6 +855,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         frames: None,
         output: None,
         presentation: Presentation::Window,
+        events: EventOutput::Log,
         decoder: CodecPreference::Auto,
         decoder_process: DecoderPlacement::InProcess,
         clipboard: Some(ClipboardDirections::Both),
@@ -856,6 +877,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--frames" => connect.frames = Some(parse("--frames", &mut arguments)?),
             "--output" => connect.output = Some(value("--output", &mut arguments)?.into()),
             "--headless" => connect.presentation = Presentation::Headless,
+            "--events" => connect.events = EventOutput::Lines,
             "--decoder" => {
                 connect.decoder =
                     parse_preference("--decoder", &value("--decoder", &mut arguments)?)?
@@ -1250,6 +1272,8 @@ mod tests {
     /// No arguments, or help, shows the usage text.
     #[test]
     fn help() {
+        assert_eq!(parse_line("discover").unwrap(), Command::Discover);
+        assert!(parse_line("discover now").is_err());
         assert_eq!(parse_line("").unwrap(), Command::Help);
         assert_eq!(parse_line("help").unwrap(), Command::Help);
         assert!(parse_line("bogus").is_err());

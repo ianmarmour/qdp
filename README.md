@@ -81,6 +81,14 @@ the token beside paired clients, and `--pairing off` turns pairing off:
 ./target/release/qdp connect 192.0.2.7 --pin PIN --token my-secret
 ```
 
+`qdp discover` lists the hosts advertising on the local network, through Avahi
+on Linux, with their addresses and whether they offer pairing. An app can drive
+`qdp connect` for its stream window with `--events`, which reports the session's
+progress on standard output as the lines the apps' cores report (see
+[`qdp-app`'s events](crates/qdp-app/src/events.rs)), such as `connected`,
+`pair first`, `paired PIN` and `failed ERROR`, and reads the code the host
+shows from standard input after each `pair` line.
+
 The host sends video at the window's size, up to its screen's. To stream less
 at a large or full-screen window, `--resolution 1920x1080` asks for that size
 instead, whatever the window's, and the client stretches the picture to fill
