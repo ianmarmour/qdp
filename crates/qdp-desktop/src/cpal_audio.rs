@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use qdp_runtime::{ActiveDevice, AudioInput, AudioOutput, CaptureSink, Playout, SAMPLE_RATE};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// The channels a client plays the host's audio in.
 const SPEAKER_CHANNELS: u16 = 2;
@@ -280,9 +280,28 @@ impl AudioOutput for CpalOutput {
         );
         let mut feed = DeviceFeed::new(channels, config.sample_rate, config.channels);
         let stopped = playout.clone();
-        // A stream whose device went away, or stopped being the default,
-        // plays no more: the player starts another.
-        let error = move |error: cpal::Error| stopped.stopped(error.to_string());
+        let error = move |error: cpal::Error| match error.kind() {
+            // The stream, built from the default device, followed the
+            // system's new default output, and plays on: starting another
+            // would only cut the sound.
+            cpal::ErrorKind::DeviceChanged => {
+                let device = cpal::default_host()
+                    .default_output_device()
+                    .and_then(|device| device.description().ok())
+                    .map_or_else(
+                        || "unnamed".to_owned(),
+                        |description| description.name().to_owned(),
+                    );
+                info!(device, "audio playback follows the system's output");
+            }
+            // A late buffer, or no real-time thread: playback goes on.
+            cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied => {
+                debug!(%error, "audio playback glitched");
+            }
+            // The device went away, or the stream no longer plays: the
+            // player starts another.
+            _ => stopped.stopped(error.to_string()),
+        };
         let stream = match format {
             SampleFormat::F32 => device.build_output_stream(
                 config,
