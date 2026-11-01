@@ -1,7 +1,7 @@
 //! What the app connects with: the host's address and key pin, as the user
 //! typed them, and the display the video is shown on.
 
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use qdp_quic::KeyPin;
 use qdp_runtime::DisplaySize;
@@ -24,6 +24,11 @@ const MAX_DISPLAY_SIDE: u32 = 16_384;
 
 /// Resolves the host's address: an IP address or a host name, with or
 /// without a port, on [`DEFAULT_PORT`] when there is none.
+///
+/// An IP address may name the interface it was found on after a `%`, as
+/// Apple's Network framework writes the addresses Bonjour finds, such as
+/// `192.168.1.44%en0`: IPv4 addresses need none, so it is dropped, and the
+/// system resolves the interfaces of IPv6 ones, such as `fe80::1%en0`.
 pub fn resolve_address(text: &str) -> Result<SocketAddr, String> {
     let text = text.trim();
     if let Ok(address) = text.parse::<SocketAddr>() {
@@ -32,18 +37,41 @@ pub fn resolve_address(text: &str) -> Result<SocketAddr, String> {
     if let Ok(ip) = text.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, DEFAULT_PORT));
     }
-    let has_port = text
-        .rsplit_once(':')
-        .is_some_and(|(_, port)| port.parse::<u16>().is_ok());
-    let resolved = if has_port {
-        text.to_socket_addrs()
-    } else {
-        (text, DEFAULT_PORT).to_socket_addrs()
-    };
-    resolved
+    let (host, port) = host_and_port(text);
+    let port = port.unwrap_or(DEFAULT_PORT);
+    let ipv4_with_interface = host
+        .split_once('%')
+        .and_then(|(address, _interface)| address.parse::<Ipv4Addr>().ok());
+    if let Some(ip) = ipv4_with_interface {
+        return Ok(SocketAddr::new(IpAddr::V4(ip), port));
+    }
+    (host, port)
+        .to_socket_addrs()
         .map_err(|error| format!("cannot resolve {text}: {error}"))?
         .next()
         .ok_or_else(|| format!("{text} has no address"))
+}
+
+/// Splits an address into its host, without the brackets around an IPv6
+/// address, and its port, if it names one.
+fn host_and_port(text: &str) -> (&str, Option<u16>) {
+    if let Some((host, rest)) = text
+        .strip_prefix('[')
+        .and_then(|bracketed| bracketed.split_once(']'))
+    {
+        return (
+            host,
+            rest.strip_prefix(':').and_then(|port| port.parse().ok()),
+        );
+    }
+    match text.rsplit_once(':') {
+        // A host name or IPv4 address has no colon of its own.
+        Some((host, port)) if !host.contains(':') => match port.parse() {
+            Ok(port) => (host, Some(port)),
+            Err(_) => (text, None),
+        },
+        _ => (text, None),
+    }
 }
 
 /// Parses a key pin: 64 hexadecimal digits, with `:` and spaces ignored.
@@ -100,6 +128,36 @@ mod tests {
             resolve_address("::1").unwrap(),
             "[::1]:4433".parse().unwrap()
         );
+    }
+
+    /// The interface Apple's Network framework writes after the IPv4
+    /// addresses Bonjour finds is dropped.
+    #[test]
+    fn drops_interfaces_of_ipv4_addresses() {
+        assert_eq!(
+            resolve_address("192.168.1.44%en0:4433").unwrap(),
+            "192.168.1.44:4433".parse().unwrap()
+        );
+        assert_eq!(
+            resolve_address("192.168.1.44%en0").unwrap(),
+            "192.168.1.44:4433".parse().unwrap()
+        );
+    }
+
+    /// Hosts and ports are told apart, with IPv6 addresses in brackets.
+    #[test]
+    fn splits_hosts_and_ports() {
+        assert_eq!(
+            host_and_port("my-pc.local:5000"),
+            ("my-pc.local", Some(5000))
+        );
+        assert_eq!(host_and_port("my-pc.local"), ("my-pc.local", None));
+        assert_eq!(
+            host_and_port("[fe80::1%en0]:4433"),
+            ("fe80::1%en0", Some(4433))
+        );
+        assert_eq!(host_and_port("[fe80::1%en0]"), ("fe80::1%en0", None));
+        assert_eq!(host_and_port("fe80::1%en0"), ("fe80::1%en0", None));
     }
 
     /// Pins are 64 hexadecimal digits, however they are grouped.

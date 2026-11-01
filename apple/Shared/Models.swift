@@ -126,6 +126,17 @@ enum TouchMode: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// What an iPhone and iPad app's touches come from.
+enum TouchSource {
+    /// Fingers on the device's screen, and any pointer attached to it.
+    case touchscreen
+    /// The pointer of the Mac the app runs on, which has no touchscreen.
+    case macPointer
+
+    /// Where this device's touches come from.
+    static let current: TouchSource = ProcessInfo.processInfo.isiOSAppOnMac ? .macPointer : .touchscreen
+}
+
 /// The keys settings are kept under.
 enum SettingsKey {
     static let resolution = "resolution"

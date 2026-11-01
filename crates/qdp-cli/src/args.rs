@@ -74,6 +74,9 @@ Serve options:
   --lock on|off        Lock this machine's desktop when a session ends other
                        than by its client disconnecting, as when the network
                        drops (default on)
+  --privacy on|off     Cover this machine's displays and ignore its own
+                       keyboard and mouse while a session streams the screen,
+                       on Windows 10 version 2004 or later (default off)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (default: the one
@@ -272,6 +275,9 @@ pub struct ServeArgs {
     /// What happens to the desktop when a session ends other than by its
     /// client disconnecting.
     pub lock: LockPolicy,
+    /// Whether the host's displays are covered, and its own input held
+    /// back, while a session streams the screen.
+    pub privacy: Privacy,
     /// Whether the screen may reach the encoder in GPU memory.
     pub gpu_capture: GpuCapture,
 }
@@ -284,6 +290,16 @@ pub enum LockPolicy {
     Lock,
     /// The desktop is left as it is.
     Leave,
+}
+
+/// Whether a host covers its displays, and holds back its own keyboard and
+/// mouse, while a session streams the screen (Section 11.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Privacy {
+    /// The displays are covered and the input held back.
+    On,
+    /// The displays show the session, and the host's input works.
+    Off,
 }
 
 /// Whether the screen may reach a hardware encoder in GPU memory.
@@ -559,6 +575,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         passthrough: PassthroughPolicy::GameControllers,
         resumption: Some(qdp_runtime::DEFAULT_RESUMPTION_LIFETIME),
         lock: LockPolicy::Lock,
+        privacy: Privacy::Off,
         gpu_capture: GpuCapture::On,
     };
     while let Some(argument) = arguments.next() {
@@ -650,6 +667,22 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     "on" => LockPolicy::Lock,
                     "off" => LockPolicy::Leave,
                     other => return Err(error(format!("--lock must be on or off, not {other}"))),
+                }
+            }
+            "--privacy" => {
+                serve.privacy = match value("--privacy", &mut arguments)?.as_str() {
+                    "on" if !qdp_desktop::HAS_PRIVACY => {
+                        return Err(error(
+                            "--privacy on needs a Windows host: this system cannot cover its \
+                             displays without covering the stream"
+                                .to_owned(),
+                        ));
+                    }
+                    "on" => Privacy::On,
+                    "off" => Privacy::Off,
+                    other => {
+                        return Err(error(format!("--privacy must be on or off, not {other}")));
+                    }
                 }
             }
             other => return Err(error(format!("unknown option: {other}"))),
@@ -880,6 +913,17 @@ mod tests {
         };
         assert_eq!(serve.lock, LockPolicy::Leave);
         assert!(parse_line("serve --token abc --lock maybe").is_err());
+        assert_eq!(serve.privacy, Privacy::Off);
+        let privacy = parse_line("serve --token abc --privacy on");
+        if qdp_desktop::HAS_PRIVACY {
+            let Ok(Command::Serve(serve)) = privacy else {
+                panic!("expected serve");
+            };
+            assert_eq!(serve.privacy, Privacy::On);
+        } else {
+            assert!(privacy.is_err());
+        }
+        assert!(parse_line("serve --token abc --privacy maybe").is_err());
         assert_eq!(serve.match_display, DisplayMatching::Off);
         let Command::Serve(serve) = parse_line("serve --token abc --match-display on").unwrap()
         else {

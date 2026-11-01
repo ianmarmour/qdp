@@ -45,6 +45,9 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
+        # The stream's QUIC endpoint binds a UDP socket of its own, which
+        # the sandbox allows only to servers.
+        com.apple.security.network.server: true
         com.apple.security.device.audio-input: true
     settings:
       base:

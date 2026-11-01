@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Windows app: a WinUI 3 window that finds hosts, pairs with them and
+    keeps settings, around the Rust core, qdp_windows.dll, which runs each
+    session in a stream window of its own. Unpackaged and self-contained, so
+    that it runs from its folder without installing anything.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RootNamespace>Qdp</RootNamespace>
+    <AssemblyName>QDP</AssemblyName>
+    <Product>QDP</Product>
+    <Version>0.1.0</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\qdp.ico</ApplicationIcon>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <!-- Compiled ahead of time, so that the app opens without waiting for
+         the JIT compiler. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Program.cs starts the app, so that one instance runs at a time. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.250310001" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\qdp.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\qdp.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The Rust core, once windows/build.ps1 or cargo built it. -->
+    <None Include="..\..\target\release\qdp_windows.dll" Link="qdp_windows.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('..\..\target\release\qdp_windows.dll')" />
+  </ItemGroup>
+
+</Project>

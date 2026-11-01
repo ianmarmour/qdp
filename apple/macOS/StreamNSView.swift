@@ -264,13 +264,13 @@ final class StreamNSView: NSView {
     /// Returns where `event` happened in the video's pixels, clamped to the
     /// picture, once a frame arrived.
     private func videoPosition(of event: NSEvent) -> CGPoint? {
-        guard let video = model.videoSize else { return nil }
-        let point = convertToBacking(convert(event.locationInWindow, from: nil))
-        // Backing coordinates run up from the bottom; the picture's rows run
-        // down from the top.
-        let pixels = pixelSize
-        let fromTop = CGPoint(x: point.x, y: pixels.height - point.y)
-        guard let rect = Placement.fit(video: video, in: pixels) else { return nil }
+        guard let video = model.videoSize, let window else { return nil }
+        // The view is flipped, so its points run down from the top, as the
+        // picture's rows do; only their size differs from the pixels'.
+        let point = convert(event.locationInWindow, from: nil)
+        let scale = window.backingScaleFactor
+        let fromTop = CGPoint(x: point.x * scale, y: point.y * scale)
+        guard let rect = Placement.fit(video: video, in: pixelSize) else { return nil }
         return rect.videoPoint(fromTop, video: video)
     }
 
