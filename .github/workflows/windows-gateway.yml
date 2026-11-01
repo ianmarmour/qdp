@@ -1,0 +1,81 @@
+# Builds the gateway for Windows servers, zipped and as its installer,
+# qdp-gateway-windows-x64.msi, then installs, starts, upgrades and removes
+# it on the runner as an administrator would. CI calls it for every change
+# merged into main; it can also be started by hand on any branch.
+name: Windows gateway
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.97.0
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  WIX_VERSION: 5.0.2
+
+jobs:
+  windows-gateway:
+    name: Windows gateway
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-gateway
+
+      # WiX builds the installer; it is a .NET tool.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          wix extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION"
+
+      - name: Build the gateway
+        shell: bash
+        run: cargo build --release --locked -p qdp-gateway
+
+      # And a later build of it, to upgrade to.
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          ./packaging/windows/build-msi.ps1 gateway qdp-gateway-windows-x64.msi
+          ./packaging/windows/build-msi.ps1 gateway upgrade.msi ([int]$env:GITHUB_RUN_NUMBER + 1)
+          Compress-Archive -Path target/release/qdp-gateway.exe -DestinationPath qdp-gateway-windows-x86_64.zip
+
+      - name: Try the installer
+        shell: pwsh
+        run: ./packaging/windows/try-gateway-msi.ps1 qdp-gateway-windows-x64.msi upgrade.msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qdp-gateway-windows-x86_64
+          path: |
+            qdp-gateway-windows-x86_64.zip
+            qdp-gateway-windows-x64.msi
+          if-no-files-found: error
+
+      # Not released: only artifacts named qdp-* are.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-logs-windows-gateway
+          path: |
+            *.log
+            C:\ProgramData\qdp-gateway\gateway.log
+          if-no-files-found: ignore

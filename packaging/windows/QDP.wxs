@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The QDP installer for Windows: the Windows app, self-contained with .NET and
+  the Windows App SDK, under Program Files\QDP with a Start menu shortcut,
+  and the qdp command, which hosts, in its bin folder on the PATH (beside the
+  app, its name would be the app's QDP.exe on Windows' case-blind file
+  system). Built with WiX Toolset 5 by windows-app.yml, from absolute paths:
+
+    wix build packaging/windows/QDP.wxs -arch x64 -d Version=0.1.42
+      -d AppDir=C:\src\qdp\windows\publish -d QdpExe=C:\src\qdp\target\release\qdp.exe
+      -d Icon=C:\src\qdp\windows\QDP\Assets\qdp.ico -o qdp-windows-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="QDP" Manufacturer="Ian Armour" Version="$(Version)"
+           UpgradeCode="5E1C4C0B-6F3A-4D8B-9E2C-1A7D3F9B6C21" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of QDP is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="qdp.ico" SourceFile="$(Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="qdp.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/ianmarmour/qdp" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/ianmarmour/qdp/issues" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="QDP">
+        <Directory Id="BINFOLDER" Name="bin" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Every file of the app's self-contained build, but its symbols. -->
+    <ComponentGroup Id="App" Directory="INSTALLFOLDER">
+      <Files Include="$(AppDir)\**">
+        <Exclude Files="$(AppDir)\**\*.pdb" />
+      </Files>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="QDP">
+      <ComponentGroupRef Id="App" />
+
+      <Component Id="QdpCommand" Directory="BINFOLDER">
+        <File Id="QdpExe" Source="$(QdpExe)" KeyPath="yes" />
+        <Environment Id="QdpOnPath" Name="PATH" Value="[BINFOLDER]"
+                     Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+
+      <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
+        <Shortcut Id="AppShortcut" Name="QDP"
+                  Description="Stream the desktops of your computers"
+                  Target="[INSTALLFOLDER]QDP.exe" WorkingDirectory="INSTALLFOLDER"
+                  Icon="qdp.ico" />
+        <RegistryValue Root="HKLM" Key="Software\Ian Armour\QDP" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

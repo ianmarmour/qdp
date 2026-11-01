@@ -28,11 +28,6 @@ use crate::locations;
 #[cfg(any(target_os = "linux", windows))]
 const EXAMPLE_CONFIG: &str = include_str!("../../../../packaging/gateway.toml");
 
-/// Where the example configuration keeps the directory password, which
-/// Windows keeps in the gateway's ProgramData folder instead.
-#[cfg(windows)]
-const EXAMPLE_CONFIG_DIRECTORY: &str = "/etc/qdp-gateway/";
-
 /// Returns the options the service passes to say which configuration to
 /// read: none for the default one.
 #[cfg(target_os = "linux")]
@@ -194,7 +189,7 @@ mod platform {
         Account, WindowsService, allow_inbound_udp, installed_program, remove_firewall_rule,
         restrict_folder, run_as_service,
     };
-    use super::{EXAMPLE_CONFIG, EXAMPLE_CONFIG_DIRECTORY, Start, check_config};
+    use super::{EXAMPLE_CONFIG, Start, check_config};
     use crate::config::Config;
     use crate::locations;
     use crate::server::serve_until;
@@ -228,9 +223,7 @@ mod platform {
                 Start::Now
             }
             None => {
-                let folder = format!("{}\\", folder.display());
-                let example = EXAMPLE_CONFIG.replace(EXAMPLE_CONFIG_DIRECTORY, &folder);
-                std::fs::write(config, example)
+                std::fs::write(config, EXAMPLE_CONFIG)
                     .map_err(|error| format!("cannot write {}: {error}", config.display()))?;
                 Start::Later
             }

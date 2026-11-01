@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The QDP gateway installer for Windows servers: qdp-gateway under Program
+  Files\QDP Gateway, on the PATH; the qdp-gateway service, which runs it as
+  LocalService from boot; its folder in ProgramData, which only the service,
+  the system and administrators may read, with an example configuration
+  that upgrades and removal leave alone; and a Windows Firewall rule for UDP
+  port 443, where it listens by default. The service starts once configured,
+  and again after each upgrade. Built with WiX Toolset 5 by
+  windows-gateway.yml, from absolute paths:
+
+    wix build packaging/windows/QDPGateway.wxs -arch x64 -ext WixToolset.Firewall.wixext
+      -d Version=0.1.42 -d GatewayExe=C:\src\qdp\target\release\qdp-gateway.exe
+      -d ExampleConfig=C:\src\qdp\packaging\gateway.toml
+      -d Icon=C:\src\qdp\windows\QDP\Assets\qdp.ico -o qdp-gateway-windows-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
+  <Package Name="QDP Gateway" Manufacturer="Ian Armour" Version="$(Version)"
+           UpgradeCode="9B2F7E41-3C6D-4A5E-8F1B-2D4C6E8A0B13" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of the QDP gateway is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="qdp.ico" SourceFile="$(Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="qdp.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/ianmarmour/qdp" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="QDP Gateway" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAFOLDER" Name="qdp-gateway" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="QDP Gateway">
+      <Component Id="Gateway" Directory="INSTALLFOLDER">
+        <File Id="GatewayExe" Source="$(GatewayExe)" KeyPath="yes">
+          <fw:FirewallException Id="GatewayFirewall" Name="QDP Gateway" Protocol="udp"
+                                Port="443" Scope="any" />
+        </File>
+        <Environment Id="GatewayOnPath" Name="PATH" Value="[INSTALLFOLDER]"
+                     Part="last" Action="set" System="yes" Permanent="no" />
+        <!-- `qdp-gateway service install` makes the same service, for a
+             gateway installed without this installer. -->
+        <ServiceInstall Id="GatewayService" Name="qdp-gateway" DisplayName="QDP Gateway"
+                        Description="Signs users in with the organization's directory and a TOTP code, and tunnels their QDP sessions to the hosts they may reach."
+                        Type="ownProcess" Start="auto" ErrorControl="normal"
+                        Account="NT AUTHORITY\LocalService"
+                        Arguments="service run --config &quot;[DATAFOLDER]gateway.toml&quot;">
+          <ServiceConfigFailureActions OnInstall="yes" OnReinstall="yes" ResetPeriod="86400">
+            <Failure Action="restartService" Delay="5000" />
+            <Failure Action="restartService" Delay="5000" />
+            <Failure Action="restartService" Delay="5000" />
+          </ServiceConfigFailureActions>
+        </ServiceInstall>
+        <ServiceControl Id="StopGateway" Name="qdp-gateway" Stop="both" Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+
+      <!-- An upgrade starts the gateway it stopped; a first install leaves
+           it to start once configured. -->
+      <Component Id="RestartAfterUpgrade" Directory="INSTALLFOLDER"
+                 Condition="WIX_UPGRADE_DETECTED">
+        <ServiceControl Id="StartGateway" Name="qdp-gateway" Start="install" Wait="no" />
+        <RegistryValue Root="HKLM" Key="Software\Ian Armour\QDP Gateway"
+                       Name="RestartAfterUpgrade" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- The configuration, the directory account's password, keys, TOTP
+           secrets and log. The example configuration is kept through
+           upgrades and removal. -->
+      <Component Id="Configuration" Directory="DATAFOLDER" NeverOverwrite="yes" Permanent="yes">
+        <File Id="ExampleConfig" Name="gateway.toml" Source="$(ExampleConfig)" KeyPath="yes" />
+        <CreateFolder>
+          <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;LS)" />
+        </CreateFolder>
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

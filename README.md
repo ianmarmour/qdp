@@ -453,11 +453,20 @@ RX 6000 and later, Intel Arc and Xe, Snapdragon X) and in software otherwise.
 Each stream shows in a window of the core's own, drawn with a flip-model swap
 chain by a render thread that takes pictures straight from the decoder, so
 that full screen, the system hands it to the display without composing it.
-The app needs no installing: it runs from its folder, the release's
-`qdp-windows-app-x64.zip`. Building it needs Rust, NASM and the .NET 8 SDK:
+
+Install it with the release's `qdp-windows-x64.msi`, which needs nothing else
+installed first: the app carries its own .NET and Windows App SDK, and QDP's
+programs their own C runtime. It installs the app in `C:\Program Files\QDP`
+with a Start menu shortcut, and the `qdp` command, for hosting a PC, on the
+PATH; installing a later build upgrades it in place, and Settings, Apps
+removes it. The app also runs without installing from its folder, the
+release's `qdp-windows-app-x64.zip`. Building it needs Rust, NASM and the
+.NET 8 SDK, and the installer the [WiX Toolset](https://wixtoolset.org) 5:
 
 ```powershell
 .\windows\build.ps1
+cargo build --release -p qdp-cli
+.\packaging\windows\build-msi.ps1 app qdp-windows-x64.msi 1
 ```
 
 The app lists the hosts on the local network and those it connected to
@@ -523,11 +532,17 @@ and hosts, and runs as a service on Linux and Windows servers.
 On Linux, install the release's `qdp-gateway-linux-x86_64.rpm`, or run
 `sudo qdp-gateway service install`, which makes the user `qdp-gateway`, a
 hardened systemd unit and, the first time, an example configuration in
-`/etc/qdp-gateway/gateway.toml` to edit. On Windows, run
-`qdp-gateway service install` from an administrator's terminal: it installs a
-service running as LocalService, with its configuration, keys and log in
-`C:\ProgramData\qdp-gateway`, readable only by it and administrators, and,
-once configured, a firewall rule for its port. Then:
+`/etc/qdp-gateway/gateway.toml` to edit. On Windows, install the release's
+`qdp-gateway-windows-x64.msi`: it installs the gateway, on the PATH, and its
+service, which runs as LocalService from boot, with its configuration, keys
+and log in `C:\ProgramData\qdp-gateway`, readable only by it and
+administrators, an example configuration to edit there, and a firewall rule
+for UDP port 443. Once the configuration is edited and the directory
+account's password is in `directory-password` beside it, start the service;
+upgrades keep the configuration and start it again. Without the installer,
+`qdp-gateway service install` from an administrator's terminal makes the same
+service and, once configured, opens the firewall for its port; run it after
+moving the gateway off port 443 too. Then:
 
 ```bash
 sudo qdp-gateway check                  # the configuration and directory account

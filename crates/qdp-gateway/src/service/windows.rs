@@ -22,8 +22,9 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use super::Start;
 
-/// The folder of Program Files that QDP's programs are installed in.
-const INSTALL_FOLDER: &str = "QDP";
+/// The folder of Program Files the gateway is installed in, as its
+/// installer installs it.
+const INSTALL_FOLDER: &str = "QDP Gateway";
 
 /// How long to wait after a failure before restarting the service.
 const RESTART_DELAY: Duration = Duration::from_secs(5);

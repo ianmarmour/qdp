@@ -1,15 +1,16 @@
 # Checks every change merged into main on Linux, Windows and macOS, builds
-# the qdp command for each, the Android, Apple and Windows apps, and publishes them all as a
-# GitHub release once every job passed: a numbered build for each change
-# merged into main, and a version for each tag such as v0.2.0. Pull requests
-# are not checked here, so that merging never waits for it; a run can be
-# started on any branch by hand, which builds without releasing.
+# the qdp command for each, the Android, Apple and Windows apps, the gateway
+# and the Windows installers, and publishes them all as a GitHub release once
+# every job passed: a numbered build for each change merged into main, and a
+# version for each tag such as v0.2.0. Pull requests are not checked here, so
+# that merging never waits for it; a run can be started on any branch by
+# hand, which builds without releasing.
 #
 # Runs started by hand check only what the branch changes, as Windows and
 # macOS runners cost two and ten times Linux's minutes: Linux always, and the
-# Windows, Windows app, macOS, Apple and Android jobs only when the branch
-# touches their code or the build itself. They skip release builds and
-# packages, and the macOS tests, which main's runs keep.
+# Windows, Windows app, Windows gateway, macOS, Apple and Android jobs only
+# when the branch touches their code or the build itself. They skip release
+# builds and packages, and the macOS tests, which main's runs keep.
 name: CI
 
 on:
@@ -41,6 +42,7 @@ jobs:
     outputs:
       windows: ${{ steps.areas.outputs.windows }}
       windows-app: ${{ steps.areas.outputs.windows-app }}
+      windows-gateway: ${{ steps.areas.outputs.windows-gateway }}
       apple: ${{ steps.areas.outputs.apple }}
       android: ${{ steps.areas.outputs.android }}
     steps:
@@ -54,7 +56,7 @@ jobs:
       - name: Find the platforms the change touches
         id: areas
         run: |
-          areas="windows windows-app apple android"
+          areas="windows windows-app windows-gateway apple android"
           # Writes `value` for every platform.
           all() {
             for area in $areas; do echo "$area=$1" >> "$GITHUB_OUTPUT"; done
@@ -74,14 +76,19 @@ jobs:
             all true
             exit 0
           fi
-          app='^(windows/|crates/qdp-windows/|\.github/workflows/windows-app\.yml)'
+          # The installers' sources and the Windows linker settings concern
+          # both of Windows' installers.
+          installers='^(packaging/windows/|\.cargo/)'
+          app="$installers|^(windows/|crates/qdp-windows/|\.github/workflows/windows-app\.yml)"
           declare -A file_patterns=(
             [windows]="$app|/win32/|/d3d11va/|/nvenc/|Cargo\.toml$"
             [windows-app]="$app"
+            [windows-gateway]="$installers|^(crates/qdp-gateway/|packaging/gateway\.toml|\.github/workflows/windows-gateway\.yml)"
             [apple]='^(apple/|crates/qdp-apple/|\.github/workflows/apple\.yml)|/macos/|metal_video|videotoolbox'
             [android]='^(android/|crates/qdp-android/)|mediacodec'
           )
-          # Lines of shared code that name a platform; the Windows app has none.
+          # Lines of shared code that name a platform; the Windows app and
+          # gateway have none.
           declare -A line_patterns=(
             [windows]='cfg\((all\(|any\()?windows|target_os = "windows"|win32::'
             [apple]='target_os = "(macos|ios)"|macos::'
@@ -240,19 +247,6 @@ jobs:
           path: qdp-windows-x86_64.zip
           if-no-files-found: error
 
-      - name: Build and package the gateway
-        if: github.event_name == 'push'
-        run: |
-          cargo build --release --locked -p qdp-gateway
-          7z a qdp-gateway-windows-x86_64.zip ./target/release/qdp-gateway.exe
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
-        with:
-          name: qdp-gateway-windows-x86_64
-          path: qdp-gateway-windows-x86_64.zip
-          if-no-files-found: error
-
   macos:
     name: macOS
     needs: changes
@@ -379,12 +373,18 @@ jobs:
     if: needs.changes.outputs.windows-app == 'true'
     uses: ./.github/workflows/windows-app.yml
 
+  windows-gateway:
+    name: Windows gateway
+    needs: changes
+    if: needs.changes.outputs.windows-gateway == 'true'
+    uses: ./.github/workflows/windows-gateway.yml
+
   release:
     name: Release
     # Every change merged into main and every version tag is released once
     # all the builds passed; runs started by hand are not.
     if: github.event_name == 'push'
-    needs: [linux, windows, macos, android, apple, windows-app]
+    needs: [linux, windows, macos, android, apple, windows-app, windows-gateway]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -415,7 +415,8 @@ jobs:
           cat > notes.md <<NOTES
           | Platform | Download |
           |---|---|
-          | Windows app (x86-64, Windows 10 or later) | \`qdp-windows-app-x64.zip\` |
+          | Windows app installer, with the qdp command (x86-64, Windows 10 or later) | \`qdp-windows-x64.msi\` |
+          | Windows app, without installing (x86-64, Windows 10 or later) | \`qdp-windows-app-x64.zip\` |
           | Android (64-bit ARM, Android 10 or later) | \`qdp-android-arm64.apk\` |
           | Mac app (Apple silicon, macOS 26 or later) | \`qdp-macos-app.zip\` |
           | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
@@ -427,7 +428,8 @@ jobs:
           | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
           | Gateway for Linux (x86-64) | \`qdp-gateway-linux-x86_64.tar.gz\` |
           | Gateway RPM (x86-64; Fedora 40 or later, RHEL 9 or later) | \`qdp-gateway-linux-x86_64.rpm\` |
-          | Gateway for Windows (x86-64; Windows Server 2019 or later) | \`qdp-gateway-windows-x86_64.zip\` |
+          | Gateway installer for Windows (x86-64; Windows Server 2019 or later) | \`qdp-gateway-windows-x64.msi\` |
+          | Gateway for Windows, without installing (x86-64) | \`qdp-gateway-windows-x86_64.zip\` |
 
           The newest build is always at
           \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/FILE\`.

@@ -13,9 +13,9 @@ listen = "0.0.0.0:443"
 # starttls = true.
 url = "ldaps://dc1.corp.example.com"
 # The account the gateway finds users with, and the file holding its
-# password, which only the gateway may read.
+# password, which only the gateway may read: here, one beside this file.
 bind_dn = "CN=qdp-gateway,OU=Service Accounts,DC=corp,DC=example,DC=com"
-bind_password_file = "/etc/qdp-gateway/directory-password"
+bind_password_file = "directory-password"
 base_dn = "DC=corp,DC=example,DC=com"
 # For OpenLDAP rather than Active Directory:
 # user_filter = "(&(objectClass=inetOrgPerson)(uid={user}))"
