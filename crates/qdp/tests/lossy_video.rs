@@ -5,14 +5,15 @@
 //! The host follows the reference runtime's policy: a key frame first, and a key
 //! frame flagged `RECOVERY` whenever the sender reports that one is needed.
 
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use qdp::message::{
     BlockGrid, BlockSet, Datagram, FeedbackRecord, FrameHeader, StreamId, Timestamp, VideoLayer,
 };
 use qdp::time::SessionClock;
-use qdp::video::{FrameKind, VideoReceiver, VideoSender};
+use qdp::video::{FrameKind, SendQueue, SentWhen, VideoReceiver, VideoSender};
 use qdp::wire::VarInt;
 
 /// The time between frames, for 60 frames per second.
@@ -69,6 +70,13 @@ struct Network {
     /// The time each datagram takes to leave the host, as its congestion
     /// controller paces them, or zero to send a frame's at once.
     pacing: Duration,
+    /// How many datagrams leave the host at once, as a congestion window
+    /// lets them, before it waits for the pacing of all of them.
+    burst: u32,
+    /// How the host counts its fragments as sent.
+    sent_when: SentWhen,
+    /// The time between frames.
+    frame_interval: Duration,
     /// The temporal unit size of a delta frame.
     delta_frame_size: usize,
     /// The bytes per second the link carries toward the client, or zero for
@@ -85,6 +93,9 @@ impl Network {
             away_every: Duration::ZERO,
             away_for: Duration::ZERO,
             pacing: Duration::ZERO,
+            burst: 1,
+            sent_when: SentWhen::Returned,
+            frame_interval: FRAME_INTERVAL,
             delta_frame_size: DELTA_FRAME_SIZE,
             capacity: 0.0,
         }
@@ -150,6 +161,10 @@ struct Outcome {
     longest_stall: Duration,
     /// The key frames sent after the first.
     recovery_key_frames: u64,
+    /// The fragments sent, retransmissions excepted.
+    fragments: u64,
+    /// The fragments sent again.
+    retransmissions: u64,
 }
 
 /// Streams for `duration` across `network`.
@@ -157,7 +172,7 @@ fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
     let loss = network.loss;
     let start = Instant::now();
     let stream_id = StreamId(VarInt::from_u32(1));
-    let mut sender = VideoSender::new(stream_id);
+    let mut sender = VideoSender::counting_sent(stream_id, network.sent_when);
     let mut receiver = VideoReceiver::new(
         stream_id,
         VideoLayer::Motion,
@@ -169,8 +184,15 @@ fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
     let mut uplink = Uplink::new();
     let mut sequence = 0u64;
     let mut bottleneck = Bottleneck::default();
-    // When the host's pacing lets the next datagram leave.
+    // When the host's pacing lets the next datagram leave, and how many
+    // have left together before it.
     let mut paced_until = start;
+    let mut in_burst = 0;
+    // The bytes handed to the host's queue, and when each datagram leaves
+    // it, with the bytes handed to it by then.
+    let offered = Cell::new(0u64);
+    let departures = RefCell::new(VecDeque::<(Instant, u64)>::new());
+    let mut departed = 0u64;
     let mut next_frame_at = start;
     let mut outcome = Outcome {
         sent: 0,
@@ -178,16 +200,42 @@ fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
         last_decoded: 0,
         longest_stall: Duration::ZERO,
         recovery_key_frames: 0,
+        fragments: 0,
+        retransmissions: 0,
     };
     let mut last_decode_at = start;
 
     let mut now = start;
     while now < start + duration {
+        // The host looks at its queue.
+        {
+            let mut queue = departures.borrow_mut();
+            while queue.front().is_some_and(|&(left_at, _)| left_at <= now) {
+                if let Some((_, end)) = queue.pop_front() {
+                    departed = end;
+                }
+            }
+        }
+        sender.queue_drained(
+            SendQueue {
+                offered: offered.get(),
+                departed,
+            },
+            now,
+        );
         let mut send = |datagrams: Vec<Vec<u8>>, random: &mut Random, sequence: &mut u64| {
             for datagram in datagrams {
                 *sequence += 1;
                 let sent = paced_until.max(now);
-                paced_until = sent + network.pacing;
+                in_burst += 1;
+                if in_burst >= network.burst {
+                    in_burst = 0;
+                    paced_until = sent + network.pacing * network.burst;
+                } else {
+                    paced_until = sent;
+                }
+                offered.set(offered.get() + datagram.len() as u64);
+                departures.borrow_mut().push_back((sent, offered.get()));
                 if random.next() < loss {
                     continue;
                 }
@@ -224,10 +272,12 @@ fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
                 .send_frame(header, &vec![0x55; size], kind, DATAGRAM_SIZE, now)
                 .unwrap();
             outcome.sent += 1;
+            outcome.fragments += sent.datagrams.len() as u64;
             send(sent.datagrams, &mut random, &mut sequence);
-            next_frame_at += FRAME_INTERVAL;
+            next_frame_at += network.frame_interval;
         }
         let retransmissions = sender.handle_timeout(RTT, now);
+        outcome.retransmissions += retransmissions.len() as u64;
         send(retransmissions, &mut random, &mut sequence);
 
         // Feedback arrives at the host.
@@ -244,6 +294,7 @@ fn simulate(duration: Duration, network: Network, seed: u64) -> Outcome {
                     FeedbackRecord::Loss(loss) => sender.handle_loss(&loss, RTT, now),
                     FeedbackRecord::Nack(nack) => {
                         let retransmissions = sender.handle_nack(&nack, RTT, now);
+                        outcome.retransmissions += retransmissions.len() as u64;
                         send(retransmissions, &mut random, &mut sequence);
                     }
                     _ => {}
@@ -322,7 +373,11 @@ fn recovers_from_random_loss() {
 ///
 /// Before failed recovery frames backed off, each was repeated as soon as
 /// the client reported it incomplete: over 330 recovery key frames in 20
-/// seconds, and the client decoded nothing after the first frame.
+/// seconds, and the client decoded nothing after the first frame. Before
+/// the host repaired a still frame with its last fragment rather than all
+/// of them, and stopped keeping frames longer for each fragment it sent
+/// again, the client decoded half as many frames, with stalls of up to
+/// 2.3 seconds.
 #[test]
 fn recovery_does_not_flood_an_overloaded_link() {
     for capacity in [0.9, 0.7] {
@@ -335,7 +390,9 @@ fn recovery_does_not_flood_an_overloaded_link() {
         };
         let outcome = simulate(Duration::from_secs(20), network, 1);
         assert!(
-            outcome.recovery_key_frames <= 100 && outcome.decoded >= 10,
+            outcome.recovery_key_frames <= 200
+                && outcome.decoded >= 30
+                && outcome.longest_stall < Duration::from_secs(1),
             "capacity {capacity}: {outcome:?}"
         );
     }
@@ -368,4 +425,35 @@ fn late_fragments_are_not_lost() {
             "away {away_ms} ms: {outcome:?}"
         );
     }
+}
+
+/// A host whose fragments wait in its queue, behind a congestion window
+/// that lets them out in bursts, sends them again only if they are lost:
+/// with nothing lost, almost never. Each pause between bursts makes the
+/// client ask for the rest of the frame, and frames too large to leave
+/// before the next is due keep the host waiting for `DECODED`.
+///
+/// When the host counted a fragment as sent once it was queued, it sent
+/// again those still waiting in its queue: 62,312 fragments again for
+/// 104,662 sent, which lengthened the queue that delayed them, as a 4K
+/// stream's host did in practice.
+#[test]
+fn queued_fragments_are_not_sent_again() {
+    // Frames of about 210 fragments every 40 ms, which take about 25 ms
+    // to leave the host in bursts of 40 every 5 ms.
+    let network = Network {
+        pacing: Duration::from_micros(120),
+        burst: 40,
+        sent_when: SentWhen::LeftQueue,
+        frame_interval: Duration::from_millis(40),
+        delta_frame_size: 250_000,
+        ..Network::lossy(0.0)
+    };
+    let outcome = simulate(Duration::from_secs(20), network, 1);
+    assert!(
+        outcome.retransmissions * 100 <= outcome.fragments
+            && outcome.recovery_key_frames <= 1
+            && outcome.decoded + 2 >= outcome.sent,
+        "{outcome:?}"
+    );
 }

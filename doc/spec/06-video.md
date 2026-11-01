@@ -413,7 +413,9 @@ Missing Range {
 - **DECODED**: the highest Frame Number of the stream the client has decoded. The
   client SHOULD send it after each decoded frame, and MUST send it at least every
   100 ms while frames of the stream are arriving and at least once per second
-  otherwise, so that the host can detect a lost final frame.
+  otherwise, so that the host can detect a lost final frame. A retransmitted
+  fragment of a frame the client has decoded means the host has not seen it
+  decoded, and the client SHOULD send `DECODED` at once.
 - **NACK**: fragments of one frame that the client is missing. A Missing Range with
   Count 0 means "First Index and every later fragment", for when the `LAST` fragment
   has not arrived and the frame's length is unknown. Missing Range is a frozen
@@ -436,12 +438,20 @@ later frame of the same stream, has arrived. A frame none of whose fragments has
 arrived is missing entirely once a fragment of a later frame arrives, and its `NACK`
 names all of its fragments. The client MAY also send a `NACK` when a frame has been
 incomplete with no new fragment for max(1 ms, smoothed RTT / 8). It SHOULD NOT
-request the same fragment again within one smoothed RTT.
+request the same fragment again within one smoothed RTT, and ignores fragments of a
+frame it is decoding, or has abandoned for it.
 
 The host SHOULD retransmit requested fragments it still holds, unless sending a
 recovery frame would reach the client sooner. It ignores requests for fragments it
 has not sent yet, and does not resend a fragment it sent less than one smoothed RTT
-ago. It MUST keep each frame's fragments for at least two smoothed RTTs after sending
+ago. A fragment is sent when it leaves the host for the network, not when it is
+queued: one waiting behind the congestion window will still arrive, and queuing it
+again would only lengthen the wait for everything behind it. The Missing Ranges of a
+`NACK` are whole runs of missing fragments, so the fragment after a range with a
+nonzero Count that ends inside the frame has arrived; fragments arrive in the order
+they were sent, so those sent before it are lost rather than late, and the host MAY
+resend them at once however recently they were sent. The host MUST keep each frame's
+fragments for at least two smoothed RTTs after sending
 them, and SHOULD keep them for the longer of 100 ms and four smoothed RTTs, so that a
 large frame can recover over several rounds of `NACK`s. At the round-trip times QDP targets, a retransmission usually arrives
 within a frame interval.
@@ -477,8 +487,12 @@ In the `LOSS` and `KEY_ONLY` states the client:
    discards other frames;
 2. sends `NACK` only for acceptable frames and the frames after them;
 3. MUST include a `LOSS` record for the stream, with Last Decoded Frame L, in every
-   `VIDEO_FEEDBACK` datagram, and MUST send `VIDEO_FEEDBACK` at least every 20 ms. In
-   the `KEY_ONLY` state, L is 0, which forces the host to send a key frame.
+   `VIDEO_FEEDBACK` datagram, and MUST send `VIDEO_FEEDBACK` at least every 20 ms,
+   until it holds a complete frame it would decode. In the `KEY_ONLY` state, L is 0,
+   which forces the host to send a key frame. A frame that arrived whole is not lost
+   while the decoder works on it: a `LOSS` record then, its Highest Frame Seen at or
+   above that frame, would tell the host that its recovery frame failed
+   ([Section 6.8.4](#684-host-rules)), and cost another.
 
 ### 6.8.4 Host rules
 
@@ -509,8 +523,13 @@ reports a recovery frame decoded, the count starts again and nothing is held bac
 If the client's `DECODED` records have not reached the newest frame N of a stream
 within 2 × smoothed RTT + 10 ms of the host sending N's last fragment, and the host
 has sent no later frame, N or its last fragments may have been lost while the screen
-stayed still. The host MUST then resend N's unacknowledged fragments or send a new
-frame of the current content.
+stayed still. The host MUST then resend N's last fragment or send a new frame of the
+current content. The last fragment is enough: a client that lacks others of N's
+fragments learns from it how many N has, and asks for them
+([Section 6.8.1](#681-retransmission)); one that decoded N answers with `DECODED`.
+Resending all of N, which may be hundreds of datagrams, would add most to the very
+queue that may be what delays the `DECODED`. The timer starts again when the
+resent fragment is sent.
 
 Recovery from an earlier reference is much smaller than a key frame. Encoders that
 support reference invalidation or long-term references can provide it

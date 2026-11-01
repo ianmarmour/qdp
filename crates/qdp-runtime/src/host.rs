@@ -16,7 +16,7 @@ use qdp::message::{
 use qdp::registry::ErrorCode;
 use qdp::session::{AuthResponse, HostConfig, HostEvent};
 use qdp::time::{SessionClock, answer_ping};
-use qdp::video::{FrameKind, VideoSender};
+use qdp::video::{FrameKind, SentWhen, VideoSender};
 use qdp::wire::VarInt;
 use qdp_codec::{CodecPreference, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportError};
@@ -539,7 +539,7 @@ async fn serve_session(
         encoder,
         pending_since: None,
         frames_requested: 0,
-        sender: VideoSender::new(display.stream_id()),
+        sender: VideoSender::counting_sent(display.stream_id(), SentWhen::LeftQueue),
         input: InputReceiver::new(),
         clock,
         devices,
@@ -784,6 +784,8 @@ impl ActiveHost {
                 self.pending_since = None;
                 self.send_encoded(result?, now)?;
             }
+            self.sender
+                .queue_drained(self.driver.connection().datagram_queue(), now);
             for datagram in self.sender.handle_timeout(smoothed_rtt, now) {
                 self.summary.retransmissions += 1;
                 self.stats.retransmitted();
@@ -1188,7 +1190,7 @@ impl ActiveHost {
     /// layout's Scale.
     fn reconfigure(&mut self, change: StreamChange) -> Result<(), RuntimeError> {
         if change == StreamChange::Replaced {
-            self.sender = VideoSender::new(self.display.stream_id());
+            self.sender = VideoSender::counting_sent(self.display.stream_id(), SentWhen::LeftQueue);
             self.frames_requested = 0;
             self.cursor.forget_images();
         }
@@ -1266,6 +1268,8 @@ impl ActiveHost {
             blocks: output.blocks,
         };
         let max_datagram_size = self.driver.connection().max_datagram_size();
+        self.sender
+            .queue_drained(self.driver.connection().datagram_queue(), now);
         let sent = self.sender.send_frame(
             header,
             &output.frame.temporal_unit,
@@ -1430,8 +1434,11 @@ impl ActiveHost {
                 self.sender.handle_decoded(decoded.last_decoded_frame);
             }
             FeedbackRecord::Nack(nack) if nack.stream_id == self.display.stream_id() => {
+                self.sender
+                    .queue_drained(self.driver.connection().datagram_queue(), now);
                 for datagram in self.sender.handle_nack(nack, smoothed_rtt, now) {
                     self.summary.retransmissions += 1;
+                    self.stats.retransmitted();
                     self.send(datagram)?;
                 }
             }

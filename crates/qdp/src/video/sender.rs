@@ -38,6 +38,44 @@ const MIN_RETENTION: Duration = Duration::from_millis(100);
 /// [`MIN_RETENTION`].
 const RETENTION_RTTS: u32 = 4;
 
+/// How often a host that reports its datagram queue is asked to look at it
+/// again while fragments wait in it: how precisely it knows when they were
+/// sent.
+const QUEUE_CHECK_INTERVAL: Duration = Duration::from_millis(1);
+
+/// When a fragment counts as sent, which decides when it may be sent again
+/// and when the newest frame's tail-loss timer starts (Sections 6.8.1 and
+/// 6.8.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SentWhen {
+    /// When the sender returns it, for callers that cannot see their queue.
+    Returned,
+    /// When it has left the host's datagram queue, as
+    /// [`VideoSender::queue_drained`] reports. A fragment waiting behind the
+    /// congestion window will still arrive: sending it again would only
+    /// lengthen the queue that delays it.
+    LeftQueue,
+}
+
+/// How far a host's datagram queue has drained, in bytes of datagrams
+/// counted from the start of the connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SendQueue {
+    /// The bytes of datagrams handed to the queue so far.
+    pub offered: u64,
+    /// The bytes of them that have left it, for the network or dropped.
+    pub departed: u64,
+}
+
+/// The latest send of one fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentSend {
+    /// Waiting in the host's datagram queue since the time.
+    Queued(Instant),
+    /// Sent at the time.
+    Sent(Instant),
+}
+
 /// What a frame is, which decides its fragment flags and its Recovery Base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameKind {
@@ -96,19 +134,99 @@ struct SentFrame {
     datagrams: Vec<Vec<u8>>,
     /// The offset of the Flags byte in every datagram of this frame.
     flags_offset: usize,
-    /// When each fragment was last sent.
-    last_sent: Vec<Instant>,
-    /// When the frame's last fragment was last sent.
-    completed_at: Instant,
+    /// Each fragment's latest send.
+    sends: Vec<FragmentSend>,
+    /// Where each fragment's latest send ends in the host's queue: the
+    /// queue's offered bytes once it was handed to it.
+    ends: Vec<u64>,
+    /// Where each fragment's first send ended in the queue.
+    first_ends: Vec<u64>,
+    /// How many of the fragments still wait in the host's queue.
+    queued: usize,
+    /// When the frame was first sent whole, which its retention counts
+    /// from.
+    sent_at: Option<Instant>,
 }
 
 impl SentFrame {
-    /// Returns fragment `index` as a retransmission and records the time.
-    fn retransmit(&mut self, index: usize, now: Instant) -> Vec<u8> {
+    /// Records that fragment `index` is handed to the queue at `now`, as
+    /// `sent_when` counts it.
+    fn hand_over(
+        &mut self,
+        index: usize,
+        sent_when: SentWhen,
+        queue: &mut SendQueue,
+        now: Instant,
+    ) {
+        queue.offered += self.datagrams[index].len() as u64;
+        self.ends[index] = queue.offered;
+        let send = match sent_when {
+            SentWhen::Returned => FragmentSend::Sent(now),
+            SentWhen::LeftQueue => FragmentSend::Queued(now),
+        };
+        if matches!(send, FragmentSend::Queued(_))
+            && !matches!(self.sends[index], FragmentSend::Queued(_))
+        {
+            self.queued += 1;
+        }
+        self.sends[index] = send;
+    }
+
+    /// Returns fragment `index` as a retransmission, handed to the queue at
+    /// `now`.
+    fn retransmit(
+        &mut self,
+        index: usize,
+        sent_when: SentWhen,
+        queue: &mut SendQueue,
+        now: Instant,
+    ) -> Vec<u8> {
         let mut datagram = self.datagrams[index].clone();
         datagram[self.flags_offset] |= FragmentFlags::RETRANSMISSION.0;
-        self.last_sent[index] = now;
+        self.hand_over(index, sent_when, queue, now);
         datagram
+    }
+
+    /// Records the fragments that have left the queue by `departed` bytes,
+    /// found at `now`, as sent as early as they can have been: when the
+    /// queue was last looked at, `since`, or when they were queued, if
+    /// later. A host too busy to look often must not count fragments that
+    /// left long ago as just sent, or it would refuse the `NACK`s that ask
+    /// for them while the client gives them up as lost.
+    fn drained(&mut self, departed: u64, since: Instant, now: Instant) {
+        if self.queued == 0 {
+            return;
+        }
+        let mut latest = since;
+        for (send, &end) in self.sends.iter_mut().zip(&self.ends) {
+            if let FragmentSend::Queued(queued_at) = *send {
+                if end <= departed {
+                    let sent_at = since.max(queued_at).min(now);
+                    latest = latest.max(sent_at);
+                    *send = FragmentSend::Sent(sent_at);
+                    self.queued -= 1;
+                }
+            }
+        }
+        if self.queued == 0 && self.sent_at.is_none() {
+            self.sent_at = Some(latest);
+        }
+    }
+
+    /// Returns whether fragment `index` was sent at least `interval` before
+    /// `now`.
+    fn sent_before(&self, index: usize, interval: Duration, now: Instant) -> bool {
+        match self.sends[index] {
+            FragmentSend::Sent(at) => now.saturating_duration_since(at) >= interval,
+            FragmentSend::Queued(_) => false,
+        }
+    }
+
+    /// Returns whether fragment `index` must be lost, the client holding
+    /// fragment `held`: every copy of `held` left the queue after the latest
+    /// of `index`, and the queue and the network keep their order.
+    fn lost_before(&self, index: usize, held: usize) -> bool {
+        self.ends[index] < self.first_ends[held]
     }
 }
 
@@ -153,11 +271,28 @@ pub struct VideoSender {
     last_recovery: Option<SentRecovery>,
     /// How many recovery frames in a row did not reach the client.
     recovery_failures: u32,
+    /// When fragments count as sent.
+    sent_when: SentWhen,
+    /// How far the host's datagram queue had drained when last reported,
+    /// with the fragments handed to it since counted as offered.
+    queue: SendQueue,
+    /// When the queue was last reported.
+    queue_checked_at: Option<Instant>,
 }
 
 impl VideoSender {
-    /// Creates the sender of a new stream, whose first frame is number 1.
+    /// Creates the sender of a new stream, whose first frame is number 1 and
+    /// whose fragments count as sent once they are returned.
     pub fn new(stream_id: StreamId) -> Self {
+        Self::counting_sent(stream_id, SentWhen::Returned)
+    }
+
+    /// Creates the sender of a new stream whose fragments count as sent as
+    /// `sent_when` says. With [`SentWhen::LeftQueue`], the caller reports
+    /// its datagram queue with [`VideoSender::queue_drained`] before each
+    /// call that returns datagrams, and queues those datagrams at once and
+    /// in order.
+    pub fn counting_sent(stream_id: StreamId, sent_when: SentWhen) -> Self {
         Self {
             stream_id,
             next_frame_number: FrameNumber::FIRST.0.into_inner(),
@@ -167,6 +302,21 @@ impl VideoSender {
             recovery_not_before: None,
             last_recovery: None,
             recovery_failures: 0,
+            sent_when,
+            queue: SendQueue::default(),
+            queue_checked_at: None,
+        }
+    }
+
+    /// Notes how far the host's datagram queue has drained at `now`: the
+    /// fragments that have left it since it was last reported count as sent
+    /// from then, the earliest they can have left.
+    pub fn queue_drained(&mut self, queue: SendQueue, now: Instant) {
+        let since = self.queue_checked_at.unwrap_or(now);
+        self.queue = queue;
+        self.queue_checked_at = Some(now);
+        for frame in &mut self.sent {
+            frame.drained(queue.departed, since, now);
         }
     }
 
@@ -278,13 +428,22 @@ impl VideoSender {
                 });
             }
         }
-        self.sent.push_back(SentFrame {
+        let mut frame = SentFrame {
             frame_number,
             flags_offset: datagrams[0].len() - pieces[0].len() - FLAGS_LENGTH,
-            last_sent: vec![now; datagrams.len()],
+            sends: vec![FragmentSend::Sent(now); datagrams.len()],
+            ends: vec![0; datagrams.len()],
+            first_ends: Vec::new(),
+            queued: 0,
+            sent_at: None,
             datagrams: datagrams.clone(),
-            completed_at: now,
-        });
+        };
+        for index in 0..datagrams.len() {
+            frame.hand_over(index, self.sent_when, &mut self.queue, now);
+        }
+        frame.first_ends = frame.ends.clone();
+        frame.sent_at = (frame.queued == 0).then_some(now);
+        self.sent.push_back(frame);
         Ok(SentFrameInfo {
             frame_number,
             datagrams,
@@ -311,14 +470,20 @@ impl VideoSender {
 
     /// Processes a `NACK` record and returns the fragments to retransmit.
     ///
-    /// Fragments not yet sent, fragments sent less than one smoothed RTT ago and
-    /// frames no longer held are skipped (Section 6.8.1).
+    /// Fragments not yet sent, among them those still waiting in the host's
+    /// queue, fragments sent less than one smoothed RTT ago, which may be on
+    /// their way, and frames no longer held are skipped (Section 6.8.1). A
+    /// fragment the client shows lost is sent again at once: one sent before
+    /// a fragment the client holds, as the one after a Missing Range that
+    /// ends inside the frame is.
     pub fn handle_nack(
         &mut self,
         nack: &NackRecord,
         smoothed_rtt: Duration,
         now: Instant,
     ) -> Vec<Vec<u8>> {
+        let sent_when = self.sent_when;
+        let queue = &mut self.queue;
         let Some(frame) = self
             .sent
             .iter_mut()
@@ -330,14 +495,18 @@ impl VideoSender {
         let mut retransmissions = Vec::new();
         for range in &nack.missing {
             let first = usize::try_from(range.first_index.into_inner()).unwrap_or(usize::MAX);
-            let end = match range.count.into_inner() {
-                0 => fragment_count,
-                count => usize::try_from(count)
-                    .map_or(fragment_count, |count| first.saturating_add(count)),
+            let (end, held) = match range.count.into_inner() {
+                0 => (fragment_count, None),
+                count => {
+                    let end = usize::try_from(count)
+                        .map_or(fragment_count, |count| first.saturating_add(count));
+                    (end, Some(end).filter(|&end| end < fragment_count))
+                }
             };
             for index in first..end.min(fragment_count) {
-                if now.saturating_duration_since(frame.last_sent[index]) >= smoothed_rtt {
-                    retransmissions.push(frame.retransmit(index, now));
+                let lost = held.is_some_and(|held| frame.lost_before(index, held));
+                if lost || frame.sent_before(index, smoothed_rtt, now) {
+                    retransmissions.push(frame.retransmit(index, sent_when, queue, now));
                 }
             }
         }
@@ -382,37 +551,57 @@ impl VideoSender {
         self.recovery_not_before = None;
     }
 
-    /// Returns when [`VideoSender::handle_timeout`] must next be called to repair
-    /// the possible loss of the newest frame.
+    /// Returns when [`VideoSender::handle_timeout`] must next be called: to
+    /// repair the possible loss of the newest frame, or, while fragments
+    /// wait in the host's queue, to report the queue again.
     pub fn poll_timeout(&self, smoothed_rtt: Duration) -> Option<Instant> {
-        let newest = self.sent.back()?;
-        (self.last_decoded < newest.frame_number)
-            .then(|| newest.completed_at + 2 * smoothed_rtt + TAIL_LOSS_MARGIN)
+        let queue_check = self
+            .queue_checked_at
+            .filter(|_| self.sent.iter().any(|frame| frame.queued > 0))
+            .map(|checked_at| checked_at + QUEUE_CHECK_INTERVAL);
+        let tail = self.tail_deadline(smoothed_rtt);
+        queue_check.into_iter().chain(tail).min()
     }
 
-    /// Returns the newest frame's fragments for retransmission if the client has
-    /// not reported it decoded in time, as Section 6.8.4 requires when the screen
-    /// stays still; also discards frames past their retention time.
+    /// Returns the newest frame's last fragment for retransmission if the
+    /// client has not reported the frame decoded in time, as Section 6.8.4
+    /// requires when the screen stays still; also discards frames past their
+    /// retention time. The last fragment is enough: a client that lacks
+    /// others learns from it how many the frame has, and asks for them.
     pub fn handle_timeout(&mut self, smoothed_rtt: Duration, now: Instant) -> Vec<Vec<u8>> {
         self.expire(now, smoothed_rtt);
         let due = self
-            .poll_timeout(smoothed_rtt)
+            .tail_deadline(smoothed_rtt)
             .is_some_and(|deadline| now >= deadline);
+        let sent_when = self.sent_when;
         let Some(newest) = self.sent.back_mut().filter(|_| due) else {
             return Vec::new();
         };
-        newest.completed_at = now;
-        (0..newest.datagrams.len())
-            .map(|index| newest.retransmit(index, now))
-            .collect()
+        let last = newest.datagrams.len() - 1;
+        vec![newest.retransmit(last, sent_when, &mut self.queue, now)]
     }
 
-    /// Discards frames whose fragments were sent longer ago than the retention
-    /// time, keeping the newest frame for tail-loss repair (Section 6.8.1).
+    /// Returns when the newest frame needs repair if the client has not
+    /// reported it decoded: 2 × smoothed RTT + 10 ms after its last fragment
+    /// was last sent.
+    fn tail_deadline(&self, smoothed_rtt: Duration) -> Option<Instant> {
+        let newest = self.sent.back()?;
+        let FragmentSend::Sent(sent_at) = *newest.sends.last()? else {
+            return None;
+        };
+        (self.last_decoded < newest.frame_number)
+            .then(|| sent_at + 2 * smoothed_rtt + TAIL_LOSS_MARGIN)
+    }
+
+    /// Discards frames whose fragments were all sent longer ago than the
+    /// retention time, keeping the newest frame for tail-loss repair
+    /// (Section 6.8.1).
     fn expire(&mut self, now: Instant, smoothed_rtt: Duration) {
         let retention = (RETENTION_RTTS * smoothed_rtt).max(MIN_RETENTION);
         while self.sent.len() > 1
-            && now.saturating_duration_since(self.sent[0].completed_at) >= retention
+            && self.sent[0]
+                .sent_at
+                .is_some_and(|sent_at| now.saturating_duration_since(sent_at) >= retention)
         {
             self.sent.pop_front();
         }
@@ -594,6 +783,55 @@ mod tests {
         assert!(sender.handle_nack(&nack, RTT, later).is_empty());
     }
 
+    /// A fragment the client shows lost, by holding one sent after it, is
+    /// sent again at once, however recently it left; one it lacks without
+    /// such evidence waits a smoothed RTT, and so does a repeat.
+    #[test]
+    fn evidence_of_loss() {
+        let mut sender =
+            VideoSender::counting_sent(StreamId(VarInt::from_u32(1)), SentWhen::LeftQueue);
+        let start = Instant::now();
+        sender.queue_drained(SendQueue::default(), start);
+        let sent = sender
+            .send_frame(
+                header(510),
+                &vec![0; 5000],
+                FrameKind::Key,
+                DATAGRAM_SIZE,
+                start,
+            )
+            .unwrap();
+        let offered: u64 = sent.datagrams.iter().map(|d| d.len() as u64).sum();
+        let left = start + Duration::from_millis(1);
+        sender.queue_drained(
+            SendQueue {
+                offered,
+                departed: offered,
+            },
+            left,
+        );
+        let stream_id = sender.stream_id();
+        let nack = |first: u32, count: u32| NackRecord {
+            stream_id,
+            frame_number: sent.frame_number,
+            missing: vec![MissingRange {
+                first_index: VarInt::from_u32(first),
+                count: VarInt::from_u32(count),
+            }],
+        };
+        // Fragment 1 is missing and fragment 2 arrived.
+        let now = left + Duration::from_millis(1);
+        let repeated = sender.handle_nack(&nack(1, 1), RTT, now);
+        assert_eq!(repeated.len(), 1);
+        // The repeat left after fragment 2, so fragment 2 shows nothing.
+        assert!(sender.handle_nack(&nack(1, 1), RTT, now).is_empty());
+        // The tail, which nothing follows, may be on its way.
+        let tail = sent.datagrams.len() as u32 - 1;
+        assert!(sender.handle_nack(&nack(tail, 1), RTT, now).is_empty());
+        assert!(sender.handle_nack(&nack(tail, 0), RTT, now).is_empty());
+        assert_eq!(sender.handle_nack(&nack(tail, 0), RTT, left + RTT).len(), 1);
+    }
+
     /// A loss asks for recovery, which is not repeated while the recovery frame
     /// may still be arriving.
     #[test]
@@ -731,13 +969,20 @@ mod tests {
         );
     }
 
-    /// The newest frame is resent if the client does not report it decoded.
+    /// The newest frame's last fragment is resent if the client does not
+    /// report the frame decoded, and again after each resend.
     #[test]
     fn tail_loss_repair() {
         let mut sender = VideoSender::new(StreamId(VarInt::from_u32(1)));
         let start = Instant::now();
         let sent = sender
-            .send_frame(header(1), &[1], FrameKind::Key, DATAGRAM_SIZE, start)
+            .send_frame(
+                header(510),
+                &vec![0; 5000],
+                FrameKind::Key,
+                DATAGRAM_SIZE,
+                start,
+            )
             .unwrap();
         let deadline = sender.poll_timeout(RTT).unwrap();
         assert_eq!(deadline, start + 2 * RTT + TAIL_LOSS_MARGIN);
@@ -747,9 +992,120 @@ mod tests {
                 .is_empty()
         );
         let repaired = sender.handle_timeout(RTT, deadline);
-        assert_eq!(repaired.len(), sent.datagrams.len());
+        assert_eq!(repaired.len(), 1);
+        let last = fragment(&repaired[0]);
+        assert!(last.flags.contains(FragmentFlags::LAST));
+        assert!(last.flags.contains(FragmentFlags::RETRANSMISSION));
+        assert_eq!(
+            last.fragment_index.into_inner() as usize,
+            sent.datagrams.len() - 1
+        );
+        assert_eq!(
+            sender.poll_timeout(RTT),
+            Some(deadline + 2 * RTT + TAIL_LOSS_MARGIN)
+        );
 
         sender.handle_decoded(sent.frame_number);
         assert_eq!(sender.poll_timeout(RTT), None);
+    }
+
+    /// Fragments waiting in the host's queue are not sent yet: a `NACK` does
+    /// not repeat them, and the tail-loss timer starts once the last has
+    /// left the queue, which the sender asks to be told of every
+    /// millisecond while fragments wait.
+    #[test]
+    fn counts_fragments_sent_once_they_leave_the_queue() {
+        let mut sender =
+            VideoSender::counting_sent(StreamId(VarInt::from_u32(1)), SentWhen::LeftQueue);
+        let start = Instant::now();
+        // 1000 bytes of other datagrams were queued first, and 400 have left.
+        sender.queue_drained(
+            SendQueue {
+                offered: 1000,
+                departed: 400,
+            },
+            start,
+        );
+        let sent = sender
+            .send_frame(
+                header(510),
+                &vec![0; 5000],
+                FrameKind::Key,
+                DATAGRAM_SIZE,
+                start,
+            )
+            .unwrap();
+        let sizes: Vec<u64> = sent.datagrams.iter().map(|d| d.len() as u64).collect();
+        let offered = 1000 + sizes.iter().sum::<u64>();
+        let nack = NackRecord {
+            stream_id: sender.stream_id(),
+            frame_number: sent.frame_number,
+            missing: vec![MissingRange {
+                first_index: VarInt::ZERO,
+                count: VarInt::ZERO,
+            }],
+        };
+        let queued = start + 2 * RTT;
+        assert_eq!(sender.poll_timeout(RTT), Some(start + QUEUE_CHECK_INTERVAL));
+        sender.queue_drained(
+            SendQueue {
+                offered,
+                departed: 1000,
+            },
+            queued,
+        );
+        assert!(sender.handle_nack(&nack, RTT, queued).is_empty());
+        assert!(sender.handle_timeout(RTT, queued).is_empty());
+
+        // The first two fragments leave between two looks at the queue, a
+        // millisecond apart; they count as sent at the first look, and only
+        // they may be repeated, one smoothed RTT after that.
+        let looked = queued + RTT;
+        sender.queue_drained(
+            SendQueue {
+                offered,
+                departed: 1000,
+            },
+            looked,
+        );
+        let left = looked + QUEUE_CHECK_INTERVAL;
+        sender.queue_drained(
+            SendQueue {
+                offered,
+                departed: 1000 + sizes[0] + sizes[1],
+            },
+            left,
+        );
+        assert!(sender.handle_nack(&nack, RTT, left).is_empty());
+        let repeated = sender.handle_nack(&nack, RTT, looked + RTT);
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(fragment(&repeated[1]).fragment_index.into_inner(), 1);
+
+        // A host too busy to look at its queue for a while finds the rest
+        // gone, and the repeats behind them: they count as sent when it
+        // last looked, and the tail-loss timer starts then.
+        let offered = offered + sizes[0] + sizes[1];
+        let busy_until = looked + 5 * RTT;
+        sender.queue_drained(
+            SendQueue {
+                offered,
+                departed: offered,
+            },
+            busy_until,
+        );
+        assert_eq!(
+            sender.poll_timeout(RTT),
+            Some(left + 2 * RTT + TAIL_LOSS_MARGIN)
+        );
+        let probe = sender.handle_timeout(RTT, busy_until);
+        assert_eq!(probe.len(), 1);
+        // Every fragment but the probed one left at least a smoothed RTT
+        // ago.
+        assert_eq!(
+            sender.handle_nack(&nack, RTT, busy_until).len(),
+            sent.datagrams.len() - 1
+        );
+        // The probe waits in the queue in turn.
+        assert!(sender.handle_timeout(RTT, busy_until + 10 * RTT).is_empty());
     }
 }
