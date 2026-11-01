@@ -2,14 +2,16 @@
 //! Windows the desktop's sound, through WASAPI loopback capture of the default
 //! output.
 //!
-//! Streams play at [`SAMPLE_RATE`], which the platforms convert to the
-//! device's rate. Capture takes the device's own rate and channels, which the
-//! input converts.
+//! Devices play and capture in their own rate, channels and samples, which
+//! the output and the input convert from and to the streams' [`SAMPLE_RATE`]
+//! and channels: a display's HDMI audio may take none other.
+
+use std::collections::VecDeque;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use qdp_runtime::{ActiveDevice, AudioInput, AudioOutput, CaptureSink, Playout, SAMPLE_RATE};
-use tracing::warn;
+use tracing::{info, warn};
 
 /// The channels a client plays the host's audio in.
 const SPEAKER_CHANNELS: u16 = 2;
@@ -83,6 +85,64 @@ impl Resampler {
             self.position -= frames as f64;
         }
         output
+    }
+}
+
+/// Feeds a playback device in its own rate and channels from a stream at
+/// [`SAMPLE_RATE`]: the stream's samples are pulled as the device asks for
+/// them, converted to its rate and remixed to its channels.
+#[derive(Debug)]
+struct DeviceFeed {
+    /// The stream's channels.
+    stream_channels: usize,
+    /// The device's channels.
+    device_channels: usize,
+    /// Converts the stream's rate to the device's.
+    resampler: Resampler,
+    /// Converted samples, in the stream's channels, not yet played.
+    ready: VecDeque<f32>,
+    /// The stream's samples last pulled.
+    pulled: Vec<f32>,
+}
+
+impl DeviceFeed {
+    /// Returns a feed from a stream of `stream_channels` channels to a device
+    /// of `device_channels` channels at `device_rate` hertz.
+    fn new(stream_channels: u16, device_rate: u32, device_channels: u16) -> Self {
+        let stream_channels = usize::from(stream_channels.max(1));
+        Self {
+            stream_channels,
+            device_channels: usize::from(device_channels.max(1)),
+            resampler: Resampler::new(SAMPLE_RATE, device_rate, stream_channels),
+            ready: VecDeque::new(),
+            pulled: Vec::new(),
+        }
+    }
+
+    /// Fills `output`, interleaved in the device's channels, with samples
+    /// `pull` gives at the stream's rate and channels.
+    fn fill(&mut self, output: &mut [f32], mut pull: impl FnMut(&mut [f32])) {
+        let frames = output.len() / self.device_channels;
+        let wanted = frames * self.stream_channels;
+        while self.ready.len() < wanted {
+            let missing = (wanted - self.ready.len()).div_ceil(self.stream_channels);
+            let input_frames = (missing as f64 * self.resampler.step).ceil() as usize + 1;
+            self.pulled.resize(input_frames * self.stream_channels, 0.0);
+            pull(&mut self.pulled);
+            self.ready.extend(self.resampler.process(&self.pulled));
+        }
+        let (stream, device) = (self.stream_channels, self.device_channels);
+        for frame in output.chunks_exact_mut(device) {
+            let samples: Vec<f32> = self.ready.drain(..stream).collect();
+            for (channel, sample) in frame.iter_mut().enumerate() {
+                *sample = match (stream, device) {
+                    (_, 1) => samples.iter().sum::<f32>() / stream as f32,
+                    (1, _) => samples[0],
+                    _ => samples.get(channel).copied().unwrap_or(0.0),
+                };
+            }
+        }
+        output[frames * device..].fill(0.0);
     }
 }
 
@@ -202,22 +262,58 @@ impl AudioOutput for CpalOutput {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or("there is no audio output device")?;
-        let config = StreamConfig {
-            channels,
-            sample_rate: SAMPLE_RATE,
-            buffer_size: cpal::BufferSize::Default,
-        };
+        let name = device.description().map_or_else(
+            |_| "unnamed".to_owned(),
+            |description| description.name().to_owned(),
+        );
+        let supported = device
+            .default_output_config()
+            .map_err(|error| message("cannot read the audio device's format", error))?;
+        let format = supported.sample_format();
+        let config: StreamConfig = supported.into();
+        info!(
+            device = name,
+            sample_rate = config.sample_rate,
+            channels = config.channels,
+            %format,
+            "playing audio"
+        );
+        let mut feed = DeviceFeed::new(channels, config.sample_rate, config.channels);
         let stopped = playout.clone();
-        let stream = device
-            .build_output_stream(
+        // A stream whose device went away, or stopped being the default,
+        // plays no more: the player starts another.
+        let error = move |error: cpal::Error| stopped.stopped(error.to_string());
+        let stream = match format {
+            SampleFormat::F32 => device.build_output_stream(
                 config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| playout.pull(data),
-                // A stream whose device went away, or stopped being the
-                // default, plays no more: the player starts another.
-                move |error: cpal::Error| stopped.stopped(error.to_string()),
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    feed.fill(data, |samples| playout.pull(samples));
+                },
+                error,
                 None,
-            )
-            .map_err(|error| message("cannot play audio", error))?;
+            ),
+            SampleFormat::I16 => {
+                let mut converted = Vec::new();
+                device.build_output_stream(
+                    config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        converted.resize(data.len(), 0.0);
+                        feed.fill(&mut converted, |samples| playout.pull(samples));
+                        for (sample, &value) in data.iter_mut().zip(&converted) {
+                            *sample = (value.clamp(-1.0, 1.0) * (I16_SCALE - 1.0)) as i16;
+                        }
+                    },
+                    error,
+                    None,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "the audio device's {other} samples are not supported"
+                ));
+            }
+        }
+        .map_err(|error| message("cannot play audio", error))?;
         stream
             .play()
             .map_err(|error| message("cannot start playing audio", error))?;
@@ -267,6 +363,36 @@ pub(crate) fn desktop_input() -> Option<Box<dyn AudioInput>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stereo stream plays on a device of another rate and channels: as
+    /// many frames as the device asks for, its extra channels silent, or
+    /// both mixed into one.
+    #[test]
+    fn feeds_devices_in_their_own_format() {
+        let mut pulled = 0usize;
+        let mut pull = |samples: &mut [f32]| {
+            pulled += samples.len();
+            samples.fill(0.5);
+        };
+        let mut surround = DeviceFeed::new(2, 48_000, 8);
+        let mut output = vec![1.0; 8 * 480];
+        surround.fill(&mut output, &mut pull);
+        assert!(
+            output
+                .chunks(8)
+                .skip(1)
+                .all(|frame| frame[..2] == [0.5, 0.5] && frame[2..] == [0.0; 6])
+        );
+        let mut mono = DeviceFeed::new(2, 44_100, 1);
+        let mut output = vec![0.0; 441];
+        for _ in 0..100 {
+            mono.fill(&mut output, &mut pull);
+        }
+        assert!(output.iter().all(|&sample| sample == 0.5));
+        // About 480 stereo frames for each 441 the device played.
+        let per_chunk = (pulled - 2 * 482) / 100;
+        assert!((955..=970).contains(&per_chunk), "{per_chunk}");
+    }
 
     /// Converting 24 kHz to 48 kHz doubles the samples and interpolates
     /// between them, across chunks.
