@@ -47,13 +47,28 @@ pub const FASTEST_SPEED: u8 = 10;
 /// Capture Timestamps, so it only affects rate control.
 const TIME_BASE: Rational = Rational { num: 1, den: 60 };
 
-/// Whether the next frame must be a key frame.
+/// What the next frame may be predicted from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyFrameRequest {
     /// Let the encoder decide; it produces key frames only when asked.
     Auto,
-    /// Force a key frame, as recovery from a loss requires.
+    /// Force a key frame, as recovery from a loss requires when the
+    /// receiver has no frame to start from.
     Force,
+    /// A frame predicted only from the frame with this input index, for a
+    /// receiver that decoded that frame and none after it, as recovery from
+    /// a loss allows; or a key frame, from encoders that no longer hold that
+    /// frame or cannot predict from it. [`EncodedFrame::recovered_from`]
+    /// says which.
+    RecoverFrom(u64),
+}
+
+impl KeyFrameRequest {
+    /// Returns whether the frame starts afresh rather than following the
+    /// frame before it: a key frame, or a recovery frame.
+    pub fn restarts(self) -> bool {
+        self != Self::Auto
+    }
 }
 
 /// The settings of an encoder.
@@ -84,6 +99,10 @@ pub struct EncodedFrame {
     pub temporal_unit: Vec<u8>,
     /// Whether the frame is a key frame.
     pub is_key_frame: bool,
+    /// The input index of the only frame this one is predicted from, when
+    /// it was encoded to recover from that frame
+    /// ([`KeyFrameRequest::RecoverFrom`]).
+    pub recovered_from: Option<u64>,
 }
 
 /// Returns the minimum number of tiles for a frame of `width × height` luma
@@ -157,7 +176,7 @@ impl Av1Encoder {
     /// a frame encoded as `request` asks.
     fn should_reopen(&self, request: KeyFrameRequest) -> bool {
         self.wanted_quantizer != self.quantizer
-            && (request == KeyFrameRequest::Force
+            && (request.restarts()
                 || (self.wanted_quantizer.abs_diff(self.quantizer) >= REOPEN_STEP
                     && self.frames_in_context >= REOPEN_FRAMES))
     }
@@ -192,9 +211,11 @@ impl Av1Encoder {
         input.planes[1].copy_from_raw_u8(frame.u(), frame.chroma_width(), 1);
         input.planes[2].copy_from_raw_u8(frame.v(), frame.chroma_width(), 1);
         let parameters = FrameParameters {
+            // rav1e predicts from the frames it chooses, so recovery needs a
+            // key frame.
             frame_type_override: match request {
                 KeyFrameRequest::Auto => FrameTypeOverride::No,
-                KeyFrameRequest::Force => FrameTypeOverride::Key,
+                KeyFrameRequest::Force | KeyFrameRequest::RecoverFrom(_) => FrameTypeOverride::Key,
             },
             ..FrameParameters::default()
         };
@@ -235,6 +256,7 @@ impl Av1Encoder {
                         input_index: self.index_offset + packet.input_frameno,
                         temporal_unit,
                         is_key_frame,
+                        recovered_from: None,
                     });
                 }
                 Err(EncoderStatus::Encoded) => continue,

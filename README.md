@@ -112,6 +112,10 @@ distributions install with Mesa (`mesa-va-drivers`) or Intel's media driver
 (`intel-media-driver`); `vainfo` lists `VAProfileAV1Profile0` with
 `VAEntrypointEncSlice` when hardware encoding is available. The host logs which
 encoder it uses, and `--encoder software` or `--encoder hardware` forces one.
+When packets are lost, the hardware encoder recovers from the last frame the
+client decoded, a frame of ordinary size, rather than with a key frame many
+times larger, on Mesa 24.3 or later and Intel's driver; the host's stats count
+these as `recoveries`.
 
 With hardware encoding, the screen stays in GPU memory from the compositor to
 the encoder: the desktop shares it as DMA-BUFs, and the GPU's video processor

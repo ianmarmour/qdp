@@ -19,6 +19,7 @@
 
 mod conversion;
 mod ffi;
+mod references;
 
 use std::ffi::{CStr, c_int, c_void};
 use std::fs::{File, OpenOptions};
@@ -33,11 +34,12 @@ use self::ffi::{
     ConfigAttrib, Image, ImageFormat, LibVa, PackedHeaderParameters, PictureParameters,
     SequenceParameters, SurfaceAttrib, TileGroupParameters, VaDisplay, VaId, VaStatus, Zeroed,
 };
+use self::references::{Plan, RECONSTRUCTED_SURFACES, ReferenceSlots, SlotUse};
 use crate::frame::workers;
 use crate::headers::{
     ALL_REFERENCE_SLOTS, CDEF_DAMPING_MINUS_3, FrameHeader, FrameKind, INTERPOLATION_EIGHTTAP,
-    ORDER_HINT_BITS, PREVIOUS_FRAME_SLOT, PRIMARY_REF_LAST, PRIMARY_REF_NONE, REFS_PER_FRAME,
-    StreamFormat, TileLayout, TxMode, frame_header_obu, sequence_header_obu,
+    ORDER_HINT_BITS, PRIMARY_REF_LAST, PRIMARY_REF_NONE, REFS_PER_FRAME, StreamFormat, TileLayout,
+    TxMode, frame_header_obu, sequence_header_obu,
 };
 use crate::{
     CodecError, DmaBufFrame, EncodedFrame, EncoderSettings, KeyFrameRequest, VideoEncoder,
@@ -51,9 +53,16 @@ const DRI_DIRECTORY: &str = "/dev/dri";
 /// privileges.
 const RENDER_NODE_PREFIX: &str = "renderD";
 
-/// The number of reconstructed surfaces: the previous frame, which the next
-/// frame refers to, and the frame being encoded.
-const RECONSTRUCTED_SURFACES: usize = 2;
+/// The first Mesa release that keeps the reference frames VA-API names
+/// rather than only the previous frame: 24.3.
+const MESA_ANY_REFERENCE: (u32, u32) = (24, 3);
+
+/// How Mesa's VA-API driver begins its vendor string, before its version.
+const MESA_VENDOR_PREFIX: &str = "Mesa Gallium driver ";
+
+/// What Intel's VA-API driver's vendor string begins with; it keeps the
+/// reference frames VA-API names.
+const INTEL_VENDOR_PREFIX: &str = "Intel iHD driver";
 
 /// The key frame period given to the driver. QDP asks for key frames itself,
 /// so this only needs to be long.
@@ -322,6 +331,28 @@ struct DriverSupport {
     tx_mode: TxMode,
     /// `TileSizeBytes` in the driver's tile groups.
     tile_size_bytes: u8,
+    /// How inter frames may use the reference slots.
+    slot_use: SlotUse,
+}
+
+/// Returns how a driver whose vendor string is `vendor` lets inter frames
+/// use the reference slots: any slot, for Mesa 24.3 or later and Intel's
+/// driver, which keep the reference frames VA-API names, or only the
+/// previous frame's, for others.
+fn slot_use(vendor: &str) -> SlotUse {
+    if vendor.starts_with(INTEL_VENDOR_PREFIX) {
+        return SlotUse::Rotating;
+    }
+    let mesa_version = vendor.strip_prefix(MESA_VENDOR_PREFIX).and_then(|rest| {
+        let mut numbers = rest
+            .split(|character: char| !character.is_ascii_digit())
+            .map(str::parse::<u32>);
+        Some((numbers.next()?.ok()?, numbers.next()?.ok()?))
+    });
+    match mesa_version {
+        Some(version) if version >= MESA_ANY_REFERENCE => SlotUse::Rotating,
+        _ => SlotUse::PreviousOnly,
+    }
 }
 
 /// Returns an encoder error.
@@ -358,9 +389,8 @@ pub struct VaapiEncoder {
     base_q_idx: u8,
     /// The sequence header, for key frames whose output lacks one.
     sequence_header: Vec<u8>,
-    /// The index of the reconstructed surface holding the previous frame, if
-    /// any.
-    previous: Option<usize>,
+    /// The frames in the reference slots, and their reconstructed surfaces.
+    slots: ReferenceSlots,
     /// The number of frames encoded.
     frames: u64,
     /// The driver and device, for messages.
@@ -607,7 +637,7 @@ impl VaapiEncoder {
             support,
             base_q_idx: settings.quantizer.max(1),
             sequence_header: sequence_header_obu(&format),
-            previous: None,
+            slots: ReferenceSlots::new(support.slot_use),
             frames: 0,
             description,
             staging: None,
@@ -621,6 +651,7 @@ impl VaapiEncoder {
             level = format.level,
             tiles = tiles.count(),
             packed_headers = support.packed_headers,
+            slots = ?support.slot_use,
             gpu_frames = ?encoder.gpu.as_ref().err(),
             "hardware encoder ready"
         );
@@ -697,10 +728,12 @@ impl VaapiEncoder {
                 value: packed_headers,
             });
         }
+        let slot_use = slot_use(&display.vendor());
         let support = DriverSupport {
             packed_headers,
             tx_mode,
             tile_size_bytes,
+            slot_use,
         };
         Ok((support, attributes))
     }
@@ -726,6 +759,7 @@ impl VaapiEncoder {
         self.display.check(status, "vaCreateSurfaces")?;
         self.input = surfaces[0];
         self.reconstructed.copy_from_slice(&surfaces[1..]);
+        // The context renders to the input and every reconstructed surface.
 
         // SAFETY: the configuration and surfaces belong to this display.
         let status = unsafe {
@@ -861,16 +895,15 @@ impl VaapiEncoder {
         }
     }
 
-    /// Returns the picture parameters of a frame encoded into the
-    /// reconstructed surface `current`.
-    fn picture_parameters(&self, header: &FrameHeader, current: usize) -> PictureParameters {
+    /// Returns the picture parameters of a frame encoded as `plan` says.
+    fn picture_parameters(&self, header: &FrameHeader, plan: Plan) -> PictureParameters {
         let mut parameters = PictureParameters {
             frame_width_minus_1: (self.format.width - 1) as u16,
             frame_height_minus_1: (self.format.height - 1) as u16,
-            reconstructed_frame: self.reconstructed[current],
+            reconstructed_frame: self.reconstructed[plan.surface()],
             coded_buf: self.coded,
             reference_frames: [ffi::VA_INVALID_ID; 8],
-            ref_frame_idx: [PREVIOUS_FRAME_SLOT; REFS_PER_FRAME],
+            ref_frame_idx: [0; REFS_PER_FRAME],
             primary_ref_frame: PRIMARY_REF_NONE,
             order_hint: header.order_hint,
             refresh_frame_flags: ALL_REFERENCE_SLOTS,
@@ -894,23 +927,38 @@ impl VaapiEncoder {
         parameters.width_in_sbs_minus_1[..columns].fill((header.tiles.col_width_sb - 1) as u16);
         let rows = header.tiles.rows as usize - 1;
         parameters.height_in_sbs_minus_1[..rows].fill((header.tiles.row_height_sb - 1) as u16);
-        match (header.kind, self.previous) {
-            (FrameKind::Inter, Some(previous)) => {
-                // Every slot holds the previous frame.
-                parameters.reference_frames = [self.reconstructed[previous]; 8];
+        match header.kind {
+            FrameKind::Inter {
+                reference_slot,
+                refresh_frame_flags,
+            } => {
+                // Every slot's frame is named, so that the driver keeps each
+                // for later frames to refer to; every reference names the
+                // one the frame is predicted from.
+                for (named, surface) in parameters
+                    .reference_frames
+                    .iter_mut()
+                    .zip(self.slots.surfaces())
+                {
+                    if let Some(surface) = surface {
+                        *named = self.reconstructed[surface];
+                    }
+                }
+                parameters.ref_frame_idx = [reference_slot; REFS_PER_FRAME];
+                parameters.refresh_frame_flags = refresh_frame_flags;
                 parameters.primary_ref_frame = PRIMARY_REF_LAST;
                 parameters.ref_frame_ctrl_l0 = ffi::SEARCH_LAST_FRAME_ONLY;
                 parameters.picture_flags = 1 << ffi::picture_flags::FRAME_TYPE_SHIFT;
             }
-            _ => {
+            FrameKind::Key => {
                 parameters.picture_flags = ffi::picture_flags::ERROR_RESILIENT_MODE;
             }
         }
         parameters
     }
 
-    /// Submits one frame to the driver.
-    fn submit(&self, header: &FrameHeader, current: usize) -> Result<(), CodecError> {
+    /// Submits one frame to the driver, encoded as `plan` says.
+    fn submit(&self, header: &FrameHeader, plan: Plan) -> Result<(), CodecError> {
         let va = self.display.va;
         let display = self.display.handle;
         let mut buffers = PictureBuffers {
@@ -928,7 +976,7 @@ impl VaapiEncoder {
         buffers.add(
             self.context,
             ffi::BUFFER_PICTURE_PARAMETERS,
-            &self.picture_parameters(header, current),
+            &self.picture_parameters(header, plan),
         )?;
         if key && self.support.packed_headers & ffi::PACKED_HEADER_SEQUENCE != 0 {
             buffers.add_packed_header(
@@ -1060,13 +1108,22 @@ impl VaapiEncoder {
         request: KeyFrameRequest,
         started: Instant,
     ) -> Result<Vec<EncodedFrame>, CodecError> {
-        let kind = match (request, self.previous) {
-            (KeyFrameRequest::Auto, Some(_)) => FrameKind::Inter,
-            _ => FrameKind::Key,
+        let plan = self.slots.plan(request);
+        let (kind, recovered_from) = match plan {
+            Plan::Key { .. } => (FrameKind::Key, None),
+            Plan::Inter {
+                reference_slot,
+                refresh_frame_flags,
+                recovered_from,
+                ..
+            } => (
+                FrameKind::Inter {
+                    reference_slot,
+                    refresh_frame_flags,
+                },
+                recovered_from,
+            ),
         };
-        let current = self
-            .previous
-            .map_or(0, |previous| (previous + 1) % RECONSTRUCTED_SURFACES);
         let header = FrameHeader {
             kind,
             order_hint: (self.frames % (1 << ORDER_HINT_BITS)) as u8,
@@ -1079,22 +1136,25 @@ impl VaapiEncoder {
         };
         let uploaded = Instant::now();
         // A failed frame leaves no usable reference, so the next is a key frame.
-        self.previous = None;
-        self.submit(&header, current)?;
+        let slots = self.slots.clone();
+        self.slots.clear();
+        self.submit(&header, plan)?;
         let encoded = Instant::now();
         let bytes = self.read_coded()?;
         let read = Instant::now();
         self.timing
             .record(uploaded - started, encoded - uploaded, read - encoded, read);
-        self.previous = Some(current);
         let is_key_frame = kind == FrameKind::Key;
         let temporal_unit = to_qdp_temporal_unit(&bytes, is_key_frame, &self.sequence_header)?;
         let input_index = self.frames;
+        self.slots = slots;
+        self.slots.encoded(plan, input_index);
         self.frames += 1;
         Ok(vec![EncodedFrame {
             input_index,
             temporal_unit,
             is_key_frame,
+            recovered_from,
         }])
     }
 }
@@ -1119,7 +1179,9 @@ impl Drop for VaapiEncoder {
             if self.context != ffi::VA_INVALID_ID {
                 (va.destroy_context)(display, self.context);
             }
-            let mut surfaces = [self.input, self.reconstructed[0], self.reconstructed[1]];
+            let mut surfaces = [ffi::VA_INVALID_ID; RECONSTRUCTED_SURFACES + 1];
+            surfaces[0] = self.input;
+            surfaces[1..].copy_from_slice(&self.reconstructed);
             if self.input != ffi::VA_INVALID_ID {
                 (va.destroy_surfaces)(display, surfaces.as_mut_ptr(), surfaces.len() as c_int);
             }
@@ -1131,6 +1193,31 @@ impl Drop for VaapiEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mesa from 24.3 and Intel's driver keep any reference frame named;
+    /// older Mesa and other drivers follow only the previous frame.
+    #[test]
+    fn chooses_how_slots_are_used() {
+        let rotating = [
+            "Mesa Gallium driver 26.2.4 for AMD Radeon RX 7900 XTX (radeonsi, navi31, ACO)",
+            "Mesa Gallium driver 24.3.0 for AMD Radeon RX 7600",
+            "Mesa Gallium driver 25.0.0-devel for AMD Radeon 780M",
+            "Intel iHD driver for Intel(R) Gen Graphics - 24.2.5 ()",
+        ];
+        for vendor in rotating {
+            assert_eq!(slot_use(vendor), SlotUse::Rotating, "{vendor}");
+        }
+        let previous_only = [
+            "Mesa Gallium driver 24.2.8 for AMD Radeon RX 7900 XTX",
+            "Mesa Gallium driver 23.3.6 for AMD Radeon RX 7600",
+            "Mesa Gallium driver for something",
+            "Some other driver 99.0",
+            "",
+        ];
+        for vendor in previous_only {
+            assert_eq!(slot_use(vendor), SlotUse::PreviousOnly, "{vendor}");
+        }
+    }
 
     /// Writing in bands puts each plane where the layout says, padding left
     /// alone, for sizes large enough to split and odd enough not to split

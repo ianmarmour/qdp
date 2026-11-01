@@ -45,6 +45,7 @@ mod layout;
 mod lock_keys;
 mod media;
 mod rate_control;
+mod recovery_bases;
 mod resumption;
 mod send_stats;
 mod standing_input;
