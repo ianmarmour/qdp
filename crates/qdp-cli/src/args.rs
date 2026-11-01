@@ -49,6 +49,11 @@ Serve options:
   --client-key HEX     Accept clients presenting the key HEX, from their
                        `qdp pin --client` (repeatable)
   --user NAME          Accept NAME with the password in QDP_PASSWORD
+  --gateway-key HEX    Accept the users a qdp-gateway vouches for, whose
+                       assertion key HEX `qdp-gateway keys` prints
+                       (repeatable)
+  --gateway-group NAME Accept only the gateway's users in the group NAME
+                       (repeatable; default: every user it vouches for)
   --pairing on|off     Let new clients pair by typing a four-digit code that
                        this host shows in its log; paired clients are kept
                        in the identity directory (default on)
@@ -319,6 +324,11 @@ pub struct ServeArgs {
     pub tokens: Vec<String>,
     /// The keys of the accepted client certificates.
     pub client_keys: Vec<KeyPin>,
+    /// The assertion keys of the gateways whose users are accepted
+    /// (Section 13.7).
+    pub gateway_keys: Vec<[u8; 32]>,
+    /// The groups a gateway's user must be in, one of them, if any.
+    pub gateway_groups: Vec<String>,
     /// The accepted user, whose password is in `QDP_PASSWORD`.
     pub user: Option<String>,
     /// What to stream.
@@ -693,6 +703,8 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         identity: PathBuf::from(DEFAULT_IDENTITY_DIR),
         tokens: Vec::new(),
         client_keys: Vec::new(),
+        gateway_keys: Vec::new(),
+        gateway_groups: Vec::new(),
         user: None,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         match_display: DisplayMatching::Off,
@@ -717,6 +729,16 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             "--client-key" => serve
                 .client_keys
                 .push(parse_pin(&value("--client-key", &mut arguments)?)?),
+            "--gateway-key" => {
+                let key = value("--gateway-key", &mut arguments)?;
+                let key = KeyPin::from_hex(&key).ok_or_else(|| {
+                    error("a gateway key is 64 hexadecimal digits, as `qdp-gateway keys` prints")
+                })?;
+                serve.gateway_keys.push(key.0);
+            }
+            "--gateway-group" => serve
+                .gateway_groups
+                .push(value("--gateway-group", &mut arguments)?),
             "--user" => serve.user = Some(value("--user", &mut arguments)?),
             "--size" => serve.size = parse_size(&value("--size", &mut arguments)?)?,
             "--fps" => serve.fps = parse("--fps", &mut arguments)?,
@@ -820,13 +842,18 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
-    let credentials =
-        !serve.tokens.is_empty() || serve.user.is_some() || !serve.client_keys.is_empty();
+    let credentials = !serve.tokens.is_empty()
+        || serve.user.is_some()
+        || !serve.client_keys.is_empty()
+        || !serve.gateway_keys.is_empty();
     if serve.pairing == PairingMode::Off && !credentials {
         return Err(error(
-            "serve with --pairing off needs --token, --user or --client-key, or no client \
-             can connect",
+            "serve with --pairing off needs --token, --user, --client-key or --gateway-key, \
+             or no client can connect",
         ));
+    }
+    if !serve.gateway_groups.is_empty() && serve.gateway_keys.is_empty() {
+        return Err(error("--gateway-group needs --gateway-key"));
     }
     if serve.fps == 0 {
         return Err(error("--fps must be above 0"));
@@ -1085,6 +1112,16 @@ mod tests {
         };
         assert_eq!(serve.client_keys, [KeyPin([0xab; PIN_HEX_LENGTH / 2])]);
         assert!(parse_line("serve --client-key nothex").is_err());
+        let Command::Serve(serve) = parse_line(&format!(
+            "serve --pairing off --gateway-key {pin} --gateway-group QDP-Users"
+        ))
+        .unwrap() else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.gateway_keys, [[0xab; PIN_HEX_LENGTH / 2]]);
+        assert_eq!(serve.gateway_groups, ["QDP-Users"]);
+        assert!(parse_line("serve --gateway-key nothex").is_err());
+        assert!(parse_line("serve --gateway-group QDP-Users").is_err());
         assert_eq!(
             parse_line("pin --client").unwrap(),
             Command::Pin {

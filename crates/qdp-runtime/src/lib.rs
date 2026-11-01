@@ -35,6 +35,7 @@ mod decode_thread;
 mod decoder_lag;
 mod encode_thread;
 mod frame_pacing;
+mod gateway_trust;
 mod host;
 mod host_cursor;
 mod host_display;
@@ -73,6 +74,7 @@ pub use client_input::{
     input_channel,
 };
 pub use clipboard::{Clipboard, ClipboardDirections, Focus, SharedClipboard};
+pub use gateway_trust::{GatewayTrust, GatewayUser};
 pub use host::{
     DesktopLock, DesktopOpener, EncoderTuning, HostDesktop, HostOptions, HostSummary,
     OpenedDesktop, input_classes, serve,

@@ -83,6 +83,16 @@ the token beside paired clients, and `--pairing off` turns pairing off:
 ./target/release/qdp connect 192.0.2.7 --pin PIN --token my-secret
 ```
 
+A host inside an organization's network can also accept the users a
+`qdp-gateway` signs in with the organization's directory and a TOTP code
+([Section 13](doc/spec/13-gateway.md) of the spec): `--gateway-key KEY`
+trusts the gateway whose assertion key `qdp-gateway keys` prints, and
+`--gateway-group NAME` admits only its users in that group:
+
+```bash
+./target/release/qdp serve --gateway-key KEY --gateway-group "QDP Users"
+```
+
 `qdp discover` lists the hosts advertising on the local network, through Avahi
 on Linux, with their addresses and whether they offer pairing; with `--watch`
 it writes a line as each comes and goes, until its standard input closes, for

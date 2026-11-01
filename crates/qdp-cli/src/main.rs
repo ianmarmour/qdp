@@ -36,9 +36,9 @@ use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
 use qdp_runtime::{
     Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
     ClipboardDirections, DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource,
-    HostAudio, HostAuthenticator, HostDesktop, HostOptions, InputQueue, OpenedDesktop, Pairing,
-    PairingEvent, PairingOutcome, PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard,
-    TestPattern,
+    GatewayTrust, HostAudio, HostAuthenticator, HostDesktop, HostOptions, InputQueue,
+    OpenedDesktop, Pairing, PairingEvent, PairingOutcome, PairingPrompt, ResumptionSlot,
+    RuntimeError, SharedClipboard, TestPattern,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -270,6 +270,20 @@ async fn serve(args: ServeArgs) -> CliResult {
     }
     for &pin in &args.client_keys {
         authenticator.add_client_key(pin);
+    }
+    if !args.gateway_keys.is_empty() {
+        let mut trust = GatewayTrust::new(pin);
+        for &key in &args.gateway_keys {
+            trust.add_key(key);
+        }
+        for group in &args.gateway_groups {
+            trust.require_group(group.clone());
+        }
+        authenticator.trust_gateways(trust);
+        info!(
+            gateways = args.gateway_keys.len(),
+            "users the gateways vouch for may connect"
+        );
     }
     let paired = PairedFile::clients(&args.identity);
     for client in paired
