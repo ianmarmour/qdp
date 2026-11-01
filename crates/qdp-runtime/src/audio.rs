@@ -76,6 +76,10 @@ const SENDER_THREAD: &str = "qdp-audio-send";
 /// The name of the audio playback thread.
 const PLAYER_THREAD: &str = "qdp-audio-play";
 
+/// How long playback waits before it starts again on the default device,
+/// once its device stopped or could not start.
+const PLAYBACK_RETRY: Duration = Duration::from_millis(500);
+
 /// Keeps an audio device capturing or playing until it is dropped. It stays
 /// on the thread that started the device, which some platforms require.
 pub struct ActiveDevice(pub Box<dyn Any>);
@@ -101,19 +105,40 @@ impl CaptureSink {
     }
 }
 
-/// Where a playback device takes its samples from.
+/// Where a playback device takes its samples from, and tells the player
+/// that it stopped.
 #[derive(Debug, Clone)]
-pub struct Playout(Arc<Mutex<AudioReceiver>>);
+pub struct Playout {
+    /// The stream's samples.
+    receiver: Arc<Mutex<AudioReceiver>>,
+    /// Tells the player thread that the device stopped.
+    signals: mpsc::Sender<PlayerSignal>,
+}
 
 impl Playout {
     /// Fills `output` with the next interleaved samples at [`SAMPLE_RATE`],
     /// or silence while the stream's buffer fills.
     pub fn pull(&self, output: &mut [f32]) {
-        match self.0.lock() {
+        match self.receiver.lock() {
             Ok(mut receiver) => receiver.pull(output),
             Err(_) => output.fill(0.0),
         }
     }
+
+    /// Reports that the device stopped playing, as when the system's default
+    /// output changes: playback starts again, on the default device then.
+    pub fn stopped(&self, error: String) {
+        let _ = self.signals.send(PlayerSignal::DeviceStopped(error));
+    }
+}
+
+/// What the player thread is told.
+#[derive(Debug)]
+enum PlayerSignal {
+    /// The session no longer plays the stream.
+    Stop,
+    /// The device stopped playing, for the reason.
+    DeviceStopped(String),
 }
 
 /// Captures audio for a session: the host's desktop audio, or the client's
@@ -512,8 +537,8 @@ pub(crate) struct AudioPlayer {
     stream_id: StreamId,
     /// The jitter buffer the device pulls from.
     receiver: Arc<Mutex<AudioReceiver>>,
-    /// Ends the thread; dropping it does too.
-    stop: Option<mpsc::Sender<()>>,
+    /// Signals the thread.
+    signals: mpsc::Sender<PlayerSignal>,
     /// The thread, which gives the output back when it ends.
     thread: Option<JoinHandle<Box<dyn AudioOutput>>>,
 }
@@ -531,29 +556,22 @@ impl AudioPlayer {
             decoder,
             Instant::now(),
         )));
-        let playout = Playout(Arc::clone(&receiver));
-        let (stop, stopped) = mpsc::channel::<()>();
+        let (signals, signalled) = mpsc::channel();
+        let playout = Playout {
+            receiver: Arc::clone(&receiver),
+            signals: signals.clone(),
+        };
         let thread = std::thread::Builder::new()
             .name(PLAYER_THREAD.to_owned())
             .spawn(move || {
-                match output.start(format.channels, playout) {
-                    Ok(device) => {
-                        let _ = stopped.recv();
-                        drop(device);
-                    }
-                    Err(error) => warn!(
-                        error,
-                        device = output.description(),
-                        "audio playback failed"
-                    ),
-                }
+                play(output.as_mut(), format.channels, &playout, &signalled);
                 output
             })
             .map_err(|error| RuntimeError::Audio(error.to_string()))?;
         Ok(Self {
             stream_id,
             receiver,
-            stop: Some(stop),
+            signals,
             thread: Some(thread),
         })
     }
@@ -580,16 +598,66 @@ impl AudioPlayer {
         if let Ok(receiver) = self.receiver.lock() {
             debug!(stats = ?receiver.stats(), "audio stream ended");
         }
-        self.stop = None;
+        let _ = self.signals.send(PlayerSignal::Stop);
         self.thread.take()?.join().ok()
     }
 }
 
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
-        self.stop = None;
+        let _ = self.signals.send(PlayerSignal::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+    }
+}
+
+/// Plays `channels` channels from `playout` through `output` until told to
+/// stop, starting the device again, on the default device then, whenever it
+/// stops or cannot start.
+fn play(
+    output: &mut dyn AudioOutput,
+    channels: u16,
+    playout: &Playout,
+    signalled: &Receiver<PlayerSignal>,
+) {
+    loop {
+        let device = output
+            .start(channels, playout.clone())
+            .inspect_err(|error| {
+                warn!(
+                    error,
+                    device = output.description(),
+                    "audio playback failed; trying again"
+                );
+            })
+            .ok();
+        let signal = match device {
+            Some(_) => signalled.recv().ok(),
+            None => match signalled.recv_timeout(PLAYBACK_RETRY) {
+                Ok(signal) => Some(signal),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => None,
+            },
+        };
+        drop(device);
+        match signal {
+            Some(PlayerSignal::DeviceStopped(error)) => {
+                warn!(
+                    error,
+                    device = output.description(),
+                    "audio playback stopped; starting it again"
+                );
+                // The device may be gone a moment, and report its end more
+                // than once.
+                std::thread::sleep(PLAYBACK_RETRY);
+                while let Ok(signal) = signalled.try_recv() {
+                    if matches!(signal, PlayerSignal::Stop) {
+                        return;
+                    }
+                }
+            }
+            Some(PlayerSignal::Stop) | None => return,
         }
     }
 }
