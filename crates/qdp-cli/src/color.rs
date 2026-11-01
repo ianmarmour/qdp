@@ -1,4 +1,11 @@
 //! Conversion of decoded frames to RGB for display.
+//!
+//! Converting and scaling a frame each run on bands of rows in parallel,
+//! one band for each processor, since a large window at a high frame rate
+//! asks more of one processor than it has.
+
+use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 
 use qdp_codec::Yuv420Frame;
 
@@ -43,6 +50,10 @@ const RED_BLUE: u32 = 0x00ff_00ff;
 /// The green component of a `0x00RRGGBB` pixel.
 const GREEN: u32 = 0x0000_ff00;
 
+/// The fewest rows a band holds: smaller bands cost more to hand to a thread
+/// than they save.
+const MIN_BAND_ROWS: usize = 64;
+
 /// An RGB image with one `0x00RRGGBB` pixel per element, as `softbuffer`
 /// expects.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,10 +74,32 @@ fn component(value: i32) -> u32 {
 /// Converts a limited-range BT.709 YUV 4:2:0 frame, the format QDP's standard
 /// dynamic range streams use, to RGB.
 pub fn yuv420_to_rgb(frame: &Yuv420Frame) -> RgbFrame {
+    convert_in_bands(frame, band_count(frame.height()))
+}
+
+/// Converts `frame` to RGB in `bands` bands of rows at once.
+fn convert_in_bands(frame: &Yuv420Frame, bands: usize) -> RgbFrame {
     let (width, height) = (frame.width(), frame.height());
-    let chroma_width = frame.chroma_width();
     let mut pixels = vec![0; width * height];
-    for (row, output_row) in pixels.chunks_exact_mut(width).enumerate() {
+    if width > 0 {
+        in_bands(&mut pixels, width, bands, |first_row, band| {
+            convert_rows(frame, first_row, band);
+        });
+    }
+    RgbFrame {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// Converts the rows of `frame` from `first_row` into `output`, which holds
+/// whole rows of RGB pixels.
+fn convert_rows(frame: &Yuv420Frame, first_row: usize, output: &mut [u32]) {
+    let width = frame.width();
+    let chroma_width = frame.chroma_width();
+    for (index, output_row) in output.chunks_exact_mut(width).enumerate() {
+        let row = first_row + index;
         let luma_row = &frame.y()[row * width..(row + 1) * width];
         let chroma_offset = (row / 2) * chroma_width;
         let u_row = &frame.u()[chroma_offset..chroma_offset + chroma_width];
@@ -81,11 +114,46 @@ pub fn yuv420_to_rgb(frame: &Yuv420Frame) -> RgbFrame {
             *pixel = (red << 16) | (green << 8) | blue;
         }
     }
-    RgbFrame {
-        width,
-        height,
-        pixels,
+}
+
+/// Returns how many threads drawing uses: one for each processor, found once.
+fn drawing_threads() -> usize {
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, NonZeroUsize::get))
+}
+
+/// Returns how many bands `rows` rows are drawn in: one for each thread, of
+/// at least [`MIN_BAND_ROWS`] rows.
+fn band_count(rows: usize) -> usize {
+    (rows / MIN_BAND_ROWS).clamp(1, drawing_threads())
+}
+
+/// Runs `work` on up to `bands` bands of whole `row_length`-long rows of
+/// `pixels` at once, each given the index of its first row. The calling
+/// thread works on the first band.
+fn in_bands(
+    pixels: &mut [u32],
+    row_length: usize,
+    bands: usize,
+    work: impl Fn(usize, &mut [u32]) + Sync,
+) {
+    let rows = pixels.len() / row_length.max(1);
+    let band_rows = rows.div_ceil(bands.max(1)).max(1);
+    if band_rows >= rows {
+        work(0, pixels);
+        return;
     }
+    std::thread::scope(|scope| {
+        let mut chunks = pixels.chunks_mut(band_rows * row_length).enumerate();
+        let first = chunks.next();
+        for (index, band) in chunks {
+            let work = &work;
+            scope.spawn(move || work(index * band_rows, band));
+        }
+        if let Some((_, band)) = first {
+            work(0, band);
+        }
+    });
 }
 
 /// Where a scaled picture sits in a window: centred, with its aspect ratio
@@ -174,51 +242,84 @@ impl Placement {
 /// window's size is copied as it is; any other is scaled bilinearly, so
 /// that edges and text stay smooth rather than turn jagged.
 pub fn scale_into(frame: &RgbFrame, target: &mut [u32], target_width: usize, target_height: usize) {
-    target.fill(0);
+    scale_in_bands(
+        frame,
+        target,
+        target_width,
+        target_height,
+        band_count(target_height),
+    );
+}
+
+/// Draws `frame` into `target`, as [`scale_into`] does, in `bands` bands of
+/// rows at once.
+fn scale_in_bands(
+    frame: &RgbFrame,
+    target: &mut [u32],
+    target_width: usize,
+    target_height: usize,
+    bands: usize,
+) {
     let Some(placement) = Placement::fit(frame.width, frame.height, target_width, target_height)
     else {
+        target.fill(0);
         return;
     };
-    let destination_row = |row: usize| {
-        let start = (placement.top + row) * target_width + placement.left;
-        start..start + placement.width
+    let exact = (placement.width, placement.height) == (frame.width, frame.height);
+    let (columns, rows) = if exact {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            samples(frame.width, placement.width),
+            samples(frame.height, placement.height),
+        )
     };
-    if (placement.width, placement.height) == (frame.width, frame.height) {
-        for (row, source) in frame.pixels.chunks_exact(frame.width).enumerate() {
-            target[destination_row(row)].copy_from_slice(source);
-        }
-        return;
-    }
-    let columns = samples(frame.width, placement.width);
-    // The two source rows each output row blends, scaled horizontally, with
-    // the source row each holds: consecutive output rows mostly share them.
-    let mut upper = (usize::MAX, vec![0; placement.width]);
-    let mut lower = (usize::MAX, vec![0; placement.width]);
-    for (row, sample) in samples(frame.height, placement.height)
-        .into_iter()
-        .enumerate()
-    {
-        if upper.0 != sample.first {
-            if lower.0 == sample.first {
-                std::mem::swap(&mut upper, &mut lower);
-            } else {
-                scale_row(frame, sample.first, &columns, &mut upper.1);
-                upper.0 = sample.first;
+    let picture = placement.left..placement.left + placement.width;
+    in_bands(target, target_width, bands, |first_row, band| {
+        // The two source rows each output row blends, scaled horizontally,
+        // with the source row each holds: consecutive output rows mostly
+        // share them.
+        let mut upper = (usize::MAX, vec![0; if exact { 0 } else { placement.width }]);
+        let mut lower = (usize::MAX, vec![0; if exact { 0 } else { placement.width }]);
+        for (index, line) in band.chunks_exact_mut(target_width).enumerate() {
+            let Some(picture_row) = (first_row + index)
+                .checked_sub(placement.top)
+                .filter(|row| *row < placement.height)
+            else {
+                line.fill(0);
+                continue;
+            };
+            // Only the bars beside the picture are cleared.
+            line[..picture.start].fill(0);
+            line[picture.end..].fill(0);
+            let destination = &mut line[picture.clone()];
+            if exact {
+                let start = picture_row * frame.width;
+                destination.copy_from_slice(&frame.pixels[start..start + frame.width]);
+                continue;
+            }
+            let sample = rows[picture_row];
+            if upper.0 != sample.first {
+                if lower.0 == sample.first {
+                    std::mem::swap(&mut upper, &mut lower);
+                } else {
+                    scale_row(frame, sample.first, &columns, &mut upper.1);
+                    upper.0 = sample.first;
+                }
+            }
+            if lower.0 != sample.second {
+                scale_row(frame, sample.second, &columns, &mut lower.1);
+                lower.0 = sample.second;
+            }
+            if sample.weight == 0 {
+                destination.copy_from_slice(&upper.1);
+                continue;
+            }
+            for ((pixel, &top), &bottom) in destination.iter_mut().zip(&upper.1).zip(&lower.1) {
+                *pixel = blend(top, bottom, sample.weight);
             }
         }
-        if lower.0 != sample.second {
-            scale_row(frame, sample.second, &columns, &mut lower.1);
-            lower.0 = sample.second;
-        }
-        let destination = &mut target[destination_row(row)];
-        if sample.weight == 0 {
-            destination.copy_from_slice(&upper.1);
-            continue;
-        }
-        for ((pixel, &top), &bottom) in destination.iter_mut().zip(&upper.1).zip(&lower.1) {
-            *pixel = blend(top, bottom, sample.weight);
-        }
-    }
+    });
 }
 
 /// Where a scaled pixel samples the source along one axis: the two source
@@ -398,6 +499,41 @@ mod tests {
         assert_eq!(placement.to_window(50.0, 25.0, 100, 50), (200.0, 200.0));
         assert!(placement.contains(200.0, 200.0));
         assert!(!placement.contains(200.0, 50.0));
+    }
+
+    /// Drawing in bands gives exactly what drawing in one does, for odd
+    /// sizes whose rows do not split evenly.
+    #[test]
+    fn draws_the_same_in_bands() {
+        let (width, height) = (334, 202);
+        // A varied picture from a simple generator.
+        let mut seed = 7_u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (seed >> 16) as u8
+        };
+        let chroma = (width / 2) * (height / 2);
+        let frame = Yuv420Frame::from_planes(
+            width,
+            height,
+            (0..width * height).map(|_| next()).collect(),
+            (0..chroma).map(|_| next()).collect(),
+            (0..chroma).map(|_| next()).collect(),
+        )
+        .unwrap();
+        let rgb = convert_in_bands(&frame, 1);
+        assert_eq!(convert_in_bands(&frame, 3), rgb);
+        assert_eq!(convert_in_bands(&frame, 4), rgb);
+        for (target_width, target_height) in [(517, 389), (334, 202), (200, 640)] {
+            let draw = |bands| {
+                let mut target = vec![5; target_width * target_height];
+                scale_in_bands(&rgb, &mut target, target_width, target_height, bands);
+                target
+            };
+            let whole = draw(1);
+            assert_eq!(draw(3), whole, "{target_width}x{target_height}");
+            assert_eq!(draw(4), whole, "{target_width}x{target_height}");
+        }
     }
 
     /// Empty pictures and windows have no placement.
