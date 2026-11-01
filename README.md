@@ -461,6 +461,25 @@ Ctrl, Alt and Shift, Z releases the mouse, X switches between full screen and
 a window, S shows or hides the stream's statistics, M turns the microphone on
 or off, and Q disconnects.
 
+## Linux app
+
+The app in [`qdp-gtk`](crates/qdp-gtk) is QDP's for Linux desktops: a GTK 4
+and libadwaita app, which GNOME uses and KDE Plasma and other desktops show
+well, needing GTK 4.14 and libadwaita 1.5 or later (Ubuntu 24.04, Fedora 40
+and later). It lists the hosts on the local network, which it follows with
+`qdp discover --watch`, and those it paired with; choosing a new host pairs
+with it by the code the host shows, and choosing a paired one streams at once,
+in the window `qdp connect` opens, which the app runs with `--events` and
+follows. It keeps the client's key and the hosts it paired with in
+`~/.local/share/qdp`, and runs the `qdp` installed beside it, or else the one
+on the `PATH`. Building it needs GTK's and libadwaita's development files, as
+`libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu, or `gtk4-devel`
+and `libadwaita-devel` on Fedora:
+
+```bash
+cargo build --release -p qdp-cli -p qdp-gtk && ./target/release/qdp-gtk
+```
+
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
@@ -517,4 +536,5 @@ key from `QDP_KEYSTORE`, `QDP_KEYSTORE_PASSWORD`, `QDP_KEY_ALIAS` and
 | `qdp-runtime` | Host and client media pipelines |
 | `qdp-desktop` | Screen capture and input injection for Linux, macOS and Windows hosts |
 | `qdp-cli` | The `qdp` command |
+| `qdp-gtk` | The Linux app, in GTK 4 and libadwaita, which runs `qdp` for its streams |
 | `qdp-android` | The Android app's Rust core, which its Kotlin code calls through JNI |
