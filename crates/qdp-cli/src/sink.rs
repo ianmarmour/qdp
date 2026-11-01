@@ -148,8 +148,10 @@ impl CliSink {
     }
 }
 
-impl FrameSink for CliSink {
-    fn present(&mut self, frame: &Yuv420Frame, info: FrameInfo) -> SinkControl {
+impl CliSink {
+    /// Counts and logs a decoded frame, writes it to the output if there is
+    /// one, and says whether to keep streaming.
+    pub fn record(&mut self, frame: &Yuv420Frame, info: FrameInfo) -> SinkControl {
         self.frames += 1;
         self.window.frames += 1;
         if let Some(latency) = info.latency {
@@ -168,5 +170,11 @@ impl FrameSink for CliSink {
             Some(limit) if self.frames >= limit => SinkControl::Stop,
             _ => SinkControl::Continue,
         }
+    }
+}
+
+impl FrameSink for CliSink {
+    fn present(&mut self, frame: Yuv420Frame, info: FrameInfo) -> SinkControl {
+        self.record(&frame, info)
     }
 }

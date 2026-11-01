@@ -353,6 +353,9 @@ fn encode_one(
     #[cfg(target_os = "linux")]
     let captured = match captured {
         CapturedFrame::DmaBuf(frame) => {
+            // The encoder scales the frame as it encodes it, so capturing is
+            // all that comes before.
+            let capture_time = capture_started_at.elapsed();
             match encode_dma_buf(&mut *opened.encoder, &frame, job.request)? {
                 Some(encoded) => {
                     let capture_size = (frame.width(), frame.height());
@@ -362,7 +365,7 @@ fn encode_one(
                         cursor: source.cursor(),
                         placement: source.monitor_placement(),
                         desktop_scale: source.desktop_scale(),
-                        scale_time: capture_started_at.elapsed(),
+                        scale_time: capture_time,
                         encoded,
                     });
                 }

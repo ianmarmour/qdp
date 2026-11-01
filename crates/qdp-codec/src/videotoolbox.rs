@@ -384,17 +384,6 @@ fn read_planes(image: &CVPixelBuffer) -> Result<Yuv420Frame, CodecError> {
             ),
         )
     };
-    let mut y = Vec::with_capacity(width * height);
-    for row in luma.chunks(luma_stride).take(height) {
-        y.extend_from_slice(&row[..width]);
-    }
-    let mut u = Vec::with_capacity(chroma_width * chroma_height);
-    let mut v = Vec::with_capacity(chroma_width * chroma_height);
-    for row in chroma.chunks(chroma_stride).take(chroma_height) {
-        for pair in row[..2 * chroma_width].chunks_exact(2) {
-            u.push(pair[0]);
-            v.push(pair[1]);
-        }
-    }
-    Yuv420Frame::from_planes(width, height, y, u, v).ok_or(CodecError::UnsupportedFormat)
+    Yuv420Frame::from_nv12(width, height, (luma, luma_stride), (chroma, chroma_stride))
+        .ok_or(CodecError::UnsupportedFormat)
 }
