@@ -14,15 +14,14 @@
 //! host stops without turning them on, the real monitors' own layout returns
 //! when the virtual monitor goes.
 
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use qdp_codec::Yuv420Frame;
 use qdp_runtime::{
     CursorState, DesktopScale, FrameSource, MonitorPlacement, RuntimeError, WantedDisplay,
 };
-use tracing::{info, warn};
-use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use tracing::{debug, info, warn};
+use wayland_client::globals::{BindError, GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols_plasma::screencast::v1::client::zkde_screencast_stream_unstable_v1::{
@@ -32,6 +31,7 @@ use wayland_protocols_plasma::screencast::v1::client::zkde_screencast_unstable_v
 
 use super::desktop_layout::{self, OutputLayout};
 use super::screencast::ScreenCapture;
+use super::{kwin_registration, tools};
 use crate::RealMonitors;
 
 /// The name KWin gives the monitor.
@@ -71,8 +71,17 @@ const KSCREEN_DOCTOR: &str = "kscreen-doctor";
 /// that hangs cannot hold up the session.
 const KSCREEN_DOCTOR_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How often a running display tool is checked on.
-const KSCREEN_DOCTOR_POLL: Duration = Duration::from_millis(50);
+/// Interfaces only KWin offers, which tell it from other compositors when
+/// it keeps the virtual monitor interface back: Plasma 6's and Plasma 5's
+/// monitor descriptions.
+const KWIN_INTERFACES: [&str; 2] = ["kde_output_device_v2", "org_kde_kwin_outputdevice"];
+
+/// How many times KWin is asked again for the virtual monitor interface
+/// after the host registers with it, while KDE's service database catches up.
+const REGISTRATION_ATTEMPTS: u32 = 20;
+
+/// How long to wait between those requests.
+const REGISTRATION_RETRY: Duration = Duration::from_millis(250);
 
 /// What the stream of the monitor being made has said.
 #[derive(Debug, Default)]
@@ -178,20 +187,19 @@ impl VirtualMonitor {
     /// Connects to KWin and checks that it makes virtual monitors. The first
     /// monitor is made when the client's display is known, or at the first
     /// capture.
+    ///
+    /// KWin offers the interface that makes them only to programs a desktop
+    /// entry lists it for; if it keeps it back, the host registers itself
+    /// and asks again.
     pub fn open(real_monitors: RealMonitors) -> Result<Self, String> {
-        let connection = Connection::connect_to_env()
-            .map_err(|error| format!("cannot reach the Wayland compositor: {error}"))?;
-        let (globals, queue) = registry_queue_init::<StreamEvents>(&connection)
-            .map_err(|error| format!("cannot list the compositor's interfaces: {error}"))?;
-        let manager = globals
-            .bind::<ZkdeScreencastUnstableV1, _, _>(
-                &queue.handle(),
-                VIRTUAL_OUTPUT_VERSION..=DESCRIPTION_VERSION,
-                (),
-            )
-            .map_err(|error| {
-                format!("the compositor does not make virtual monitors, as KWin does: {error}")
-            })?;
+        let Bound {
+            connection,
+            queue,
+            manager,
+        } = match connect()?.ready()? {
+            Some(bound) => bound,
+            None => register_and_connect()?,
+        };
         Ok(Self {
             connection,
             queue,
@@ -422,27 +430,98 @@ fn is_ours(output: &OutputLayout) -> bool {
 /// stopped if it takes longer than [`KSCREEN_DOCTOR_TIMEOUT`].
 fn set_enabled(names: &[String], enabled: bool) -> Result<(), String> {
     let action = if enabled { "enable" } else { "disable" };
-    let mut child = Command::new(KSCREEN_DOCTOR)
-        .args(names.iter().map(|name| format!("output.{name}.{action}")))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("cannot run {KSCREEN_DOCTOR}: {error}"))?;
-    let deadline = Instant::now() + KSCREEN_DOCTOR_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => return Err(format!("{KSCREEN_DOCTOR} failed: {status}")),
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("{KSCREEN_DOCTOR} did not finish in time"));
-            }
-            Ok(None) => std::thread::sleep(KSCREEN_DOCTOR_POLL),
-            Err(error) => return Err(format!("cannot wait for {KSCREEN_DOCTOR}: {error}")),
+    tools::run(
+        KSCREEN_DOCTOR,
+        names.iter().map(|name| format!("output.{name}.{action}")),
+        KSCREEN_DOCTOR_TIMEOUT,
+    )
+}
+
+/// A connection to KWin, with the interface that makes virtual monitors.
+struct Bound {
+    /// The connection.
+    connection: Connection,
+    /// Its event queue.
+    queue: EventQueue<StreamEvents>,
+    /// The interface.
+    manager: ZkdeScreencastUnstableV1,
+}
+
+/// A connection to the compositor, and whether it offers this program the
+/// interface that makes virtual monitors.
+enum Connected {
+    /// It does.
+    Ready(Bound),
+    /// The compositor is KWin, which keeps the interface from programs no
+    /// desktop entry lists it for.
+    Withheld,
+    /// The compositor does not offer it, for this reason.
+    Unsupported(BindError),
+}
+
+impl Connected {
+    /// Returns the connection if the compositor offers the interface, or
+    /// why it cannot.
+    fn ready(self) -> Result<Option<Bound>, String> {
+        match self {
+            Self::Ready(bound) => Ok(Some(bound)),
+            Self::Withheld => Ok(None),
+            Self::Unsupported(error) => Err(format!(
+                "the compositor does not make virtual monitors, as KWin does: {error}"
+            )),
         }
     }
+}
+
+/// Connects to the compositor and asks for the interface that makes virtual
+/// monitors.
+fn connect() -> Result<Connected, String> {
+    let connection = Connection::connect_to_env()
+        .map_err(|error| format!("cannot reach the Wayland compositor: {error}"))?;
+    let (globals, queue) = registry_queue_init::<StreamEvents>(&connection)
+        .map_err(|error| format!("cannot list the compositor's interfaces: {error}"))?;
+    let bound = globals.bind::<ZkdeScreencastUnstableV1, _, _>(
+        &queue.handle(),
+        VIRTUAL_OUTPUT_VERSION..=DESCRIPTION_VERSION,
+        (),
+    );
+    Ok(match bound {
+        Ok(manager) => Connected::Ready(Bound {
+            connection,
+            queue,
+            manager,
+        }),
+        Err(BindError::NotPresent) if is_kwin(&globals) => Connected::Withheld,
+        Err(error) => Connected::Unsupported(error),
+    })
+}
+
+/// Registers the host with KWin, and asks it for the interface again until
+/// it offers it, while KDE's service database catches up.
+fn register_and_connect() -> Result<Bound, String> {
+    info!("KWin keeps virtual monitors from programs it does not know; registering this one");
+    let entry = kwin_registration::register(&[ZkdeScreencastUnstableV1::interface().name])?;
+    for attempt in 1..=REGISTRATION_ATTEMPTS {
+        if let Some(bound) = connect()?.ready()? {
+            info!(attempt, "KWin makes virtual monitors for this program now");
+            return Ok(bound);
+        }
+        debug!(attempt, "KWin still keeps virtual monitors back");
+        std::thread::sleep(REGISTRATION_RETRY);
+    }
+    Err(format!(
+        "KWin still keeps virtual monitors from this program, although {} lists it for them; \
+         log out and in again so that KWin rereads it",
+        entry.display()
+    ))
+}
+
+/// Returns whether the compositor listing `globals` is KWin.
+fn is_kwin(globals: &GlobalList) -> bool {
+    globals.contents().with_list(|list| {
+        list.iter()
+            .any(|global| KWIN_INTERFACES.contains(&global.interface.as_str()))
+    })
 }
 
 impl FrameSource for VirtualMonitor {

@@ -16,11 +16,15 @@ mod gamepad;
 mod hidraw;
 mod keycodes;
 #[cfg(feature = "screen-capture")]
+mod kwin_registration;
+#[cfg(feature = "screen-capture")]
 mod kwin_virtual;
 mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
 mod seat;
+#[cfg(feature = "screen-capture")]
+mod tools;
 mod touchpad;
 mod touchpad_capture;
 mod touchscreen;
