@@ -1180,9 +1180,13 @@ impl ActiveClient<'_> {
                 let frame_number = decoded.frame.frame_number;
                 match decoded.picture {
                     Ok(picture) => {
-                        stream
-                            .receiver
-                            .frame_decoded(frame_number, decoded.decoded_at);
+                        // The frame counts as decoded once this loop takes
+                        // it, which is when DECODED reports it, rather than
+                        // when its decoder finished: a frame that waits for
+                        // this loop, busy presenting the one before, waits
+                        // just as one queued for its decoder does, and its
+                        // FRAME_TIMING must show the host so (Section 6.11).
+                        stream.receiver.frame_decoded(frame_number, Instant::now());
                         // A hardware encoder may have padded the frame.
                         let picture = picture.cropped(stream.size.0, stream.size.1);
                         let latency = self
