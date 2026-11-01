@@ -273,7 +273,11 @@ final class HostStore {
         let address: String
         switch host {
         case let .ipv4(ip):
-            address = "\(ip):\(port.rawValue)"
+            // The address's description names the interface it was found
+            // on, as 192.168.1.44%en0, which no resolver takes for an IPv4
+            // address: it is written from its four bytes instead.
+            let octets = ip.rawValue.map { String($0) }.joined(separator: ".")
+            address = "\(octets):\(port.rawValue)"
         case let .ipv6(ip):
             address = "[\(ip)]:\(port.rawValue)"
         case let .name(hostName, _):
