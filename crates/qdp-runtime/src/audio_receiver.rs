@@ -76,6 +76,8 @@ pub(crate) struct AudioReceiver {
     playing: bool,
     /// The depth to keep, in samples per channel.
     target: usize,
+    /// The most samples per channel the device has taken in one pull.
+    largest_pull: usize,
     /// The jitter estimate, in seconds.
     jitter: f64,
     /// The previous packet's transit time, in seconds, against `epoch`.
@@ -111,6 +113,7 @@ impl AudioReceiver {
             decoded: VecDeque::new(),
             playing: false,
             target: 0,
+            largest_pull: 0,
             jitter: 0.0,
             last_transit: None,
             epoch: now,
@@ -169,13 +172,22 @@ impl AudioReceiver {
         }
     }
 
-    /// Sets the target depth from the jitter estimate.
+    /// Sets the target depth from the jitter estimate and the device's
+    /// pulls.
+    ///
+    /// The depth is measured as a pull starts, and the pull takes its
+    /// samples at once, so the target holds what the device takes beyond a
+    /// frame on top of the margin for the network's jitter: a device that
+    /// takes 40 ms a time, as Android's does outside its low-latency mode,
+    /// would otherwise empty the buffer with each pull.
     fn update_target(&mut self) {
         let rate = f64::from(self.format.sample_rate);
         let frame = self.format.frame_samples as f64;
         let wanted = frame + JITTER_MARGIN * self.jitter * rate;
         let smallest = (MIN_TARGET_SECONDS * rate).max(frame * 1.5);
-        self.target = wanted.clamp(smallest, MAX_TARGET_SECONDS * rate) as usize;
+        let pull_beyond_frame = self.largest_pull.saturating_sub(self.format.frame_samples);
+        self.target =
+            wanted.clamp(smallest, MAX_TARGET_SECONDS * rate) as usize + pull_beyond_frame;
     }
 
     /// Fills `output` with interleaved samples to play, or silence while the
@@ -183,6 +195,10 @@ impl AudioReceiver {
     pub(crate) fn pull(&mut self, output: &mut [f32]) {
         let channels = self.channels();
         let frames = output.len() / channels;
+        if frames > self.largest_pull {
+            self.largest_pull = frames;
+            self.update_target();
+        }
         if !self.playing {
             if self.depth() < self.target {
                 output.fill(0.0);
@@ -391,6 +407,9 @@ mod tests {
         for sequence in 1..=target_packets {
             receiver.push(sequence, (sequence - 1) * 48, &packet(7), now);
         }
+        // Playout starts, then a pull takes more than is left.
+        let mut output = vec![0.0; FORMAT.frame_samples];
+        receiver.pull(&mut output);
         let mut output = vec![0.0; receiver.target() * 2];
         receiver.pull(&mut output);
         assert_eq!(receiver.stats().underruns, 1);
@@ -442,6 +461,30 @@ mod tests {
             receiver.target()
         );
         assert_eq!(receiver.stats().underruns, 0);
+    }
+
+    /// A device that takes several frames a pull, as Android's does, plays
+    /// steady packets without running dry: the target holds a pull's worth.
+    #[test]
+    fn keeps_a_large_pull_buffered() {
+        let start = Instant::now();
+        let mut receiver = receiver(start);
+        // Packets of 1 ms arrive steadily; the device takes 20 ms a pull,
+        // four times the smallest target.
+        let frame = FORMAT.frame_samples;
+        let pull_frames = 20;
+        let mut output = vec![0.0; frame * pull_frames];
+        let mut sequence = 0_u64;
+        for packet_time in 1..=4_000_u64 {
+            let now = start + Duration::from_millis(packet_time);
+            sequence += 1;
+            receiver.push(sequence, (sequence - 1) * frame as u64, &packet(1), now);
+            if packet_time % pull_frames as u64 == 0 {
+                receiver.pull(&mut output);
+            }
+        }
+        assert!(receiver.target() >= frame * pull_frames);
+        assert_eq!(receiver.stats().underruns, 0, "{:?}", receiver.stats());
     }
 
     /// Jittery arrivals raise the target depth.

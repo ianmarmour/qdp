@@ -64,6 +64,25 @@ const OUTPUT_POLL: Duration = Duration::from_millis(5);
 /// order them.
 const FRAME_TIMESTAMP_STEP: u64 = 1000;
 
+/// Returns the time on the monotonic clock, which the display's timestamps
+/// use, in nanoseconds.
+fn monotonic_now() -> i64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the call to write.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    // The fields are C longs, 64 bits on 64-bit Android but not on 32-bit.
+    #[allow(clippy::unnecessary_cast)]
+    (now.tv_sec as i64)
+        .saturating_mul(NANOS_PER_SECOND)
+        .saturating_add(now.tv_nsec as i64)
+}
+
+/// Nanoseconds per second.
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
 /// The surface the app shows the video in, once it has one.
 static VIDEO_SURFACE: Mutex<Option<NativeWindow>> = Mutex::new(None);
 
@@ -94,12 +113,27 @@ unsafe impl Send for Codec {}
 unsafe impl Sync for Codec {}
 
 impl Codec {
-    /// Releases output buffer `index`, rendering it into the surface if
-    /// `render`.
-    fn release(&self, index: usize, render: bool) -> Result<(), CodecError> {
+    /// Renders output buffer `index` into the surface, to be shown now.
+    ///
+    /// The buffer is stamped with the current time rather than its own
+    /// timestamp, which only orders frames: the display then shows a
+    /// picture at its next refresh, and drops one still waiting when a newer
+    /// one arrives, rather than showing each in turn a refresh apart, which
+    /// after a burst of frames would keep the picture behind until the
+    /// stream paused.
+    fn render(&self, index: usize) -> Result<(), CodecError> {
+        // SAFETY: the codec is live and the index is one it handed out.
+        let status = unsafe {
+            ffi::AMediaCodec_releaseOutputBufferAtTime(self.raw.as_ptr(), index, monotonic_now())
+        };
+        check(status, "showing a decoded picture")
+    }
+
+    /// Releases output buffer `index` without showing it.
+    fn discard(&self, index: usize) -> Result<(), CodecError> {
         // SAFETY: the codec is live and the index is one it handed out.
         let status =
-            unsafe { ffi::AMediaCodec_releaseOutputBuffer(self.raw.as_ptr(), index, render) };
+            unsafe { ffi::AMediaCodec_releaseOutputBuffer(self.raw.as_ptr(), index, false) };
         check(status, "releasing a decoded picture")
     }
 }
@@ -152,17 +186,17 @@ impl SurfacePicture {
     }
 
     /// Renders the picture into the video surface, which shows it at its
-    /// next refresh.
+    /// next refresh, unless a newer picture is rendered before then.
     pub fn render(mut self) -> Result<(), CodecError> {
         self.rendered = true;
-        self.codec.release(self.index, true)
+        self.codec.render(self.index)
     }
 }
 
 impl Drop for SurfacePicture {
     fn drop(&mut self) {
         if !self.rendered {
-            let _ = self.codec.release(self.index, false);
+            let _ = self.codec.discard(self.index);
         }
     }
 }
