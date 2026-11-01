@@ -13,7 +13,8 @@ repository.workspace = true
 [features]
 default = ["audio", "gamepad", "screen-capture"]
 # Plays and captures audio: through PipeWire on Linux, which needs PipeWire's
-# development files and libclang to build, and through cpal elsewhere.
+# development files and libclang to build, and through cpal elsewhere,
+# AAudio on Android.
 audio = ["dep:cpal", "dep:pipewire"]
 # Captures the client's gamepads. On Linux it needs libudev's development
 # files to build.
@@ -32,12 +33,15 @@ screen-capture = [
 ]
 
 [dependencies]
-arboard.workspace = true
 gilrs = { workspace = true, optional = true }
 qdp.workspace = true
 qdp-codec.workspace = true
 qdp-runtime.workspace = true
 tracing.workspace = true
+
+# Android has no clipboard arboard reaches.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { workspace = true, features = ["wayland-data-control"] }
@@ -67,7 +71,7 @@ objc2-metal.workspace = true
 objc2-quartz-core.workspace = true
 objc2-screen-capture-kit.workspace = true
 
-[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+[target.'cfg(any(target_os = "macos", windows, target_os = "android"))'.dependencies]
 cpal = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]

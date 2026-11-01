@@ -19,8 +19,12 @@
 //! [`TouchpadCapture`] sends the touchpad's raw contacts, and
 //! [`lock_desktop`] locks the desktop when a session ends unexpectedly.
 
+#[cfg(not(target_os = "android"))]
 mod clipboard;
-#[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
+#[cfg(all(
+    feature = "audio",
+    any(target_os = "macos", windows, target_os = "android")
+))]
 mod cpal_audio;
 mod desktop_lock;
 #[cfg(feature = "gamepad")]
@@ -49,8 +53,9 @@ pub use qdp_runtime::Microphone;
 use qdp_runtime::{
     ClientAudio, Clipboard, DisplayTiming, FrameSource, HostAudio, InputInjector, NoInput,
 };
-use tracing::{info, warn};
+use tracing::warn;
 
+#[cfg(not(target_os = "android"))]
 pub use clipboard::SystemClipboard;
 #[cfg(target_os = "linux")]
 pub use clipboard::adopt_wayland_display;
@@ -253,7 +258,10 @@ pub fn client_audio(microphone: Microphone) -> ClientAudio {
 
 /// Returns a client's audio devices: its speakers, and its microphone,
 /// which captures only while `microphone` says the user turned it on.
-#[cfg(all(feature = "audio", any(target_os = "macos", windows)))]
+#[cfg(all(
+    feature = "audio",
+    any(target_os = "macos", windows, target_os = "android")
+))]
 pub fn client_audio(microphone: Microphone) -> ClientAudio {
     ClientAudio {
         speakers: cpal_audio::speakers(),
@@ -265,7 +273,12 @@ pub fn client_audio(microphone: Microphone) -> ClientAudio {
 /// Returns a client's audio devices: none without the `audio` feature.
 #[cfg(not(all(
     feature = "audio",
-    any(target_os = "linux", target_os = "macos", windows)
+    any(
+        target_os = "linux",
+        target_os = "macos",
+        windows,
+        target_os = "android"
+    )
 )))]
 pub fn client_audio(_microphone: Microphone) -> ClientAudio {
     ClientAudio::default()
@@ -287,10 +300,11 @@ pub fn display_timing() -> Option<DisplayTiming> {
 
 /// Opens the system clipboard for sharing, or returns `None`, with a warning,
 /// if it cannot be used.
+#[cfg(not(target_os = "android"))]
 pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
     match SystemClipboard::open() {
         Ok(clipboard) => {
-            info!(clipboard = clipboard.description(), "sharing the clipboard");
+            tracing::info!(clipboard = clipboard.description(), "sharing the clipboard");
             Some(Box::new(clipboard))
         }
         Err(error) => {
@@ -298,6 +312,13 @@ pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
             None
         }
     }
+}
+
+/// Returns `None`: Android's clipboard is reached through the app, not
+/// here.
+#[cfg(target_os = "android")]
+pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
+    None
 }
 
 /// Returns the platform's input injector for a `width × height` pixel

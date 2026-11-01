@@ -19,6 +19,7 @@ const ALL: KeyboardLeds = KeyboardLeds(
 );
 
 /// Returns the LEDs of the lock keys that are on, by whether each is.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn leds(num: bool, caps: bool, scroll: bool) -> KeyboardLeds {
     let led = |on: bool, led: KeyboardLeds| if on { led.0 } else { 0 };
     KeyboardLeds(

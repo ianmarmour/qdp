@@ -33,6 +33,8 @@ mod frame;
 #[cfg(target_os = "linux")]
 mod headers;
 mod level;
+#[cfg(target_os = "android")]
+mod mediacodec;
 mod obu;
 mod picture;
 mod process_decoder;
@@ -59,6 +61,8 @@ pub use encoder::{
 };
 pub use frame::{Rgb32Order, Yuv420Frame};
 pub use level::{NO_LEVEL, TileCount, frame_rate_within, level_for};
+#[cfg(target_os = "android")]
+pub use mediacodec::{MediaCodecDecoder, SurfacePicture, set_video_surface, video_surface};
 pub use obu::{Obu, ObuType, parse_obus, to_qdp_temporal_unit};
 pub use picture::DecodedPicture;
 pub use process_decoder::{DecoderCommand, ProcessDecoder, serve_decoder, serve_decoder_on_stdio};

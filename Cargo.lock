@@ -2295,6 +2295,8 @@ name = "qdp-codec"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "ndk",
+ "ndk-sys",
  "objc2-core-foundation",
  "objc2-core-media",
  "objc2-core-video",
