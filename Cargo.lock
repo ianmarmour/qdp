@@ -2395,6 +2395,7 @@ dependencies = [
  "bytes",
  "qdp",
  "quinn",
+ "quinn-proto",
  "rcgen",
  "ring",
  "rustls",

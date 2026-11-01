@@ -17,6 +17,7 @@
 //!   [`ReceivedStream`]s.
 
 mod config;
+mod congestion;
 mod connection;
 mod driver;
 mod endpoint;

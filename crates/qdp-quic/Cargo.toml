@@ -14,6 +14,7 @@ repository.workspace = true
 bytes.workspace = true
 qdp.workspace = true
 quinn.workspace = true
+quinn-proto.workspace = true
 rcgen.workspace = true
 ring.workspace = true
 rustls.workspace = true
