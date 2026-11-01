@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.view.View
+import androidx.core.graphics.withTranslation
 
 /**
  * Draws the host's cursor over the video, at the pointer's position in
@@ -69,11 +70,10 @@ class CursorView(context: Context) : View(context) {
             return
         }
         val scale = width.toFloat() / videoWidth
-        canvas.save()
-        canvas.translate(pointerX * scale, pointerY * scale)
-        canvas.scale(scale, scale)
-        canvas.drawBitmap(image, -hotspotX, -hotspotY, paint)
-        canvas.restore()
+        canvas.withTranslation(pointerX * scale, pointerY * scale) {
+            scale(scale, scale)
+            drawBitmap(image, -hotspotX, -hotspotY, paint)
+        }
     }
 
     private companion object {

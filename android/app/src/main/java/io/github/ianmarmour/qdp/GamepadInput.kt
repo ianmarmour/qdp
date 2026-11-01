@@ -90,9 +90,28 @@ class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : Inpu
         pads.clear()
     }
 
+    /**
+     * Forgets the buttons, sticks and triggers held and sends every pad at
+     * rest, as when the stream's menu takes the gamepads: the presses that
+     * opened it are released to the menu, not to the host.
+     */
+    fun reset() {
+        for (pad in pads.values) {
+            pad.keys = 0
+            pad.hat = 0
+            pad.leftX = 0f
+            pad.leftY = 0f
+            pad.rightX = 0f
+            pad.rightY = 0f
+            pad.leftTrigger = 0f
+            pad.rightTrigger = 0f
+            pad.send()
+        }
+    }
+
     override fun onInputDeviceAdded(deviceId: Int) {
         val device = InputDevice.getDevice(deviceId) ?: return
-        if (!isGamepad(device) || pads.containsKey(deviceId)) {
+        if (!Gamepads.isGamepad(device) || pads.containsKey(deviceId)) {
             return
         }
         val own = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -231,15 +250,5 @@ class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : Inpu
 
         /** The length of one repetition of a rumble's pattern. */
         const val RUMBLE_PERIOD_MILLIS = 1000L
-
-        /** Returns whether [device] is a gamepad or joystick. */
-        fun isGamepad(device: InputDevice): Boolean {
-            if (device.isVirtual) {
-                return false
-            }
-            val sources = device.sources
-            return sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
-                sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
-        }
     }
 }

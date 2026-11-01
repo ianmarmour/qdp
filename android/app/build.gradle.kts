@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 // A keystore named in the environment, as CI's secrets give it, signs
@@ -41,9 +42,18 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 shrinks Compose from about 22 MB of dex to a few hundred
+            // kilobytes; proguard-rules.pro keeps the Rust core's JNI entry
+            // points.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName(if (releaseKeystore != null) "release" else "debug")
         }
+    }
+
+    buildFeatures {
+        compose = true
     }
 
     compileOptions {
@@ -56,6 +66,26 @@ kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+// These are the newest releases that build with compileSdk 35 and AGP 8
+// (Compose UI 1.11 and Material 3 1.4); newer ones need compileSdk 36 or 37
+// and AGP 9, a toolchain change of its own, so lint's reminders of them are
+// silenced here.
+dependencies {
+    //noinspection GradleDependency
+    implementation(platform("androidx.compose:compose-bom:2026.06.01"))
+    implementation("androidx.compose.material3:material3")
+    //noinspection GradleDependency
+    implementation("androidx.activity:activity-compose:1.10.1")
+    //noinspection GradleDependency
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    //noinspection GradleDependency
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+    //noinspection GradleDependency
+    implementation("androidx.compose.material3.adaptive:adaptive:1.2.0")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    debugImplementation("androidx.compose.ui:ui-tooling")
 }
 
 // Builds the Rust core into src/main/jniLibs before each build; pass

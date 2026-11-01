@@ -1,6 +1,7 @@
 package io.github.ianmarmour.qdp
 
 import android.content.Context
+import androidx.core.content.edit
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -52,6 +53,6 @@ object PairedHosts {
         for (host in hosts) {
             array.put(JSONObject().put(NAME, host.name).put(ADDRESS, host.address).put(PIN, host.pin))
         }
-        preferences(context).edit().putString(HOSTS, array.toString()).apply()
+        preferences(context).edit { putString(HOSTS, array.toString()) }
     }
 }

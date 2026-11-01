@@ -1,4 +1,200 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<!--
+The app's words: second person, present tense, sentence case; buttons are
+verbs; errors give one cause and one next step. The UI says "computer";
+"host", "pin" and "token" appear only in Advanced.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">QDP</string>
+
+    <!-- Shared actions. -->
+    <string name="action_cancel">Cancel</string>
+    <string name="action_close">Close</string>
+    <string name="action_back">Back</string>
+    <string name="action_connect">Connect</string>
+    <string name="action_pair">Pair</string>
+    <string name="action_try_again">Try again</string>
+    <string name="action_copy">Copy</string>
+
+    <!-- Hosts screen. -->
+    <string name="home_title">Computers</string>
+    <string name="action_add_by_address">Add by address</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_setup_help">Setup help</string>
+    <string name="action_wifi_settings">Wi-Fi settings</string>
+    <string name="action_options">Options</string>
+    <string name="searching_inline">Looking for more computers on your Wi-Fi…</string>
+
+    <!-- A computer's status, on its card and read aloud. -->
+    <string name="status_ready">Ready</string>
+    <string name="status_ready_spoken">ready, paired</string>
+    <string name="status_not_seen">Not on this network</string>
+    <string name="status_not_seen_spoken">paired, not on this network</string>
+    <string name="status_new">New</string>
+    <string name="status_new_spoken">new, ready to pair</string>
+    <string name="status_pairing_off">Pairing is off</string>
+    <string name="status_pairing_off_spoken">new, pairing is off</string>
+    <string name="status_key_mismatch">Not the computer you paired with</string>
+    <string name="status_key_mismatch_spoken">warning, not the computer you paired with</string>
+    <string name="card_spoken">%1$s, %2$s</string>
+
+    <!-- What tapping a computer does. -->
+    <string name="action_try_anyway">Try anyway</string>
+    <string name="action_how_to_pair">How to pair</string>
+    <string name="action_learn_more">Learn more</string>
+    <string name="action_forget">Forget</string>
+    <string name="action_details">Details</string>
+
+    <!-- Searching, and nothing found. -->
+    <string name="searching_title">Looking for computers on your Wi-Fi…</string>
+    <string name="searching_body">Start QDP on your computer and it\'ll show up here.</string>
+    <string name="quiet_title">No computers found yet</string>
+    <string name="quiet_body">A few things to check:</string>
+    <string name="check_same_wifi">This device and your computer are on the same Wi-Fi</string>
+    <string name="check_qdp_running">QDP is running on your computer</string>
+    <string name="check_firewall">Your computer\'s firewall lets QDP through</string>
+    <string name="no_wifi_title">You\'re not on Wi-Fi</string>
+    <string name="no_wifi_body">Connect to the same Wi-Fi as your computer to find it here.</string>
+
+    <!-- Setup help. -->
+    <string name="setup_help_title">Set up your computer</string>
+    <string name="setup_help_step_install">Install QDP on your computer.</string>
+    <string name="setup_help_step_start">Start it there by running qdp serve.</string>
+    <string name="setup_help_step_wifi">Keep this device on the same Wi-Fi.</string>
+    <string name="setup_help_step_pair">Your computer shows up here. Tap it and enter the code it shows.</string>
+
+    <!-- A computer with pairing off. -->
+    <string name="pairing_off_title">Pairing is off on %1$s</string>
+    <string name="pairing_off_body">Pairing is off on %1$s. Turn it on there to pair.</string>
+    <string name="pairing_off_advanced" tools:ignore="TypographyDashes">Advanced: QDP pairs unless the host was started with --pairing off. You can also connect with its key pin and a token under Add by address.</string>
+
+    <!-- A computer that has a paired computer's name but another key. -->
+    <string name="mismatch_title">Not the %1$s you paired with</string>
+    <string name="mismatch_body">This isn\'t the %1$s you paired with, so QDP won\'t connect automatically.</string>
+    <string name="mismatch_pair_hint">If you trust it, you can pair with it as a new computer.</string>
+    <string name="action_pair_as_new">Pair as new</string>
+
+    <!-- Forgetting a computer. -->
+    <string name="forget_title">Forget %1$s?</string>
+    <string name="forget_body">To connect again, you\'ll pair with a new code.</string>
+
+    <!-- A computer's details. -->
+    <string name="details_address">Address</string>
+    <string name="details_status">Status</string>
+    <string name="details_key_pin">Key pin</string>
+    <string name="details_none">None advertised</string>
+
+    <!-- Adding a computer by its address. -->
+    <string name="add_body">Enter your computer\'s address to pair with it.</string>
+    <string name="add_address_label">Address</string>
+    <string name="add_address_hint">192.168.1.20 or desk.local</string>
+    <string name="add_address_error">Enter an address like 192.168.1.20 or desk.local</string>
+    <string name="add_advanced">Advanced</string>
+    <string name="add_advanced_body">Connect with the host\'s key pin, from qdp pin, and a token it accepts.</string>
+    <string name="add_pin_label">Key pin</string>
+    <string name="add_pin_error">A key pin is 64 hex digits, as qdp pin prints</string>
+    <string name="add_token_label">Token</string>
+    <string name="add_token_error">Enter the token the host accepts</string>
+    <string name="action_connect_with_token">Connect with token</string>
+
+    <!-- Gamepad hints. -->
+    <string name="hint_select">Select</string>
+    <string name="hint_add">Add</string>
+    <string name="button_a">A</string>
+    <string name="button_x">X</string>
+    <string name="button_y">Y</string>
+    <string name="button_start">Start</string>
+
+    <!-- Settings. -->
+    <string name="settings_stream">Stream</string>
+    <string name="settings_resolution">Resolution</string>
+    <string name="settings_resolution_screen">Matches this screen (%1$d×%2$d)</string>
+    <string name="settings_resolution_scaled">Streams at %1$d×%2$d, the shape of this screen</string>
+    <string name="resolution_screen">Screen</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="settings_microphone">Microphone</string>
+    <string name="settings_microphone_supporting">Send your voice to the computer</string>
+    <string name="settings_microphone_denied">Allow microphone access for QDP in system settings to use this.</string>
+    <string name="settings_controls">Controls</string>
+    <string name="settings_touch">Touch</string>
+    <string name="touch_trackpad">Trackpad</string>
+    <string name="touch_trackpad_supporting">Drag to move the pointer</string>
+    <string name="touch_direct">Direct touch</string>
+    <string name="touch_direct_supporting">Tap where you want to click</string>
+    <string name="settings_stats">Performance overlay</string>
+    <string name="settings_stats_supporting">Show frame rate and latency while you stream</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_wallpaper_colors">Match wallpaper colors</string>
+    <string name="settings_wallpaper_colors_supporting">Use colors from your wallpaper instead of QDP\'s</string>
+    <string name="settings_advanced">Advanced</string>
+    <string name="settings_decoder">Decoder</string>
+    <string name="decoder_auto">Auto</string>
+    <string name="decoder_auto_supporting">Recommended. Uses this device\'s video hardware when it can.</string>
+    <string name="decoder_hardware">Hardware</string>
+    <string name="decoder_hardware_supporting">Always uses this device\'s video hardware.</string>
+    <string name="decoder_software">Software</string>
+    <string name="decoder_software_supporting">Decodes on the processor. Uses more battery.</string>
+    <string name="settings_about">About this device</string>
+    <string name="settings_device_name">Name</string>
+    <string name="settings_device_pin">Device pin</string>
+    <string name="settings_device_pin_supporting" tools:ignore="TypographyDashes">For qdp serve --client-key</string>
+    <string name="settings_device_pin_unavailable">Unavailable on this device</string>
+    <string name="settings_version">Version</string>
+    <string name="copied">Copied</string>
+
+    <!-- The stream. -->
+    <string name="stream_connecting">Connecting to %1$s…</string>
+    <string name="stream_starting">Starting the stream…</string>
+    <string name="stream_reconnecting_in">Connection dropped. Reconnecting in %1$d s…</string>
+    <string name="stream_reconnecting">Connection dropped. Reconnecting…</string>
+    <string name="stream_paired">Paired with %1$s</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="menu_resume">Resume</string>
+    <string name="menu_keyboard">Keyboard</string>
+    <string name="menu_touch">Touch</string>
+    <string name="menu_stats">Stats</string>
+    <string name="stats_hidden">Off</string>
+    <string name="stats_summary_level">Simple</string>
+    <string name="stats_detailed_level">Detailed</string>
+    <string name="stats_summary">%1$d fps · %2$s</string>
+    <string name="stats_latency">%1$.0f ms</string>
+    <string name="stats_latency_unknown">– ms</string>
+    <string name="stats_slowest">Slowest frame %1$.1f ms</string>
+    <string name="stats_stages">Host + network %1$.1f · transfer %2$.1f · queue %3$.1f · decode %4$.1f ms</string>
+    <string name="coachmark_menu">Press Back to open the menu.</string>
+    <string name="coachmark_menu_gamepad">Press Back, or Select + Start + L1 + R1 together, to open the menu.</string>
+
+    <!-- Pairing. -->
+    <string name="pair_title">Pair with %1$s</string>
+    <string name="pair_body">Enter the 4-digit code shown on %1$s.</string>
+    <string name="pair_footnote">%1$s will see this device as “%2$s”.</string>
+    <string name="pair_checking">Checking…</string>
+    <string name="pair_wrong_code">That code didn\'t match. %1$s is showing a new one.</string>
+    <plurals name="pair_code_spoken">
+        <item quantity="one">Pairing code, %1$d of %2$d digit</item>
+        <item quantity="other">Pairing code, %1$d of %2$d digits</item>
+    </plurals>
+    <string name="keypad_delete">Delete digit</string>
+
+    <!-- Why a stream ended, as a title naming the computer and one sentence of cause and fix. -->
+    <string name="error_not_found_title">Couldn\'t find %1$s</string>
+    <string name="error_not_found_body">Check the address, then try again.</string>
+    <string name="error_unreachable_title">Couldn\'t reach %1$s</string>
+    <string name="error_unreachable_body">Check it\'s awake and on the same Wi-Fi.</string>
+    <string name="error_key_changed_title">%1$s has a new key</string>
+    <string name="error_key_changed_body">It may not be the computer you paired with. If you trust it, forget it and pair again.</string>
+    <string name="error_pairing_busy_title">%1$s isn\'t pairing right now</string>
+    <string name="error_pairing_busy_body">It pairs with one device at a time and pauses after wrong codes, so wait a few minutes and try again.</string>
+    <string name="error_not_accepted_title">%1$s didn\'t accept this device</string>
+    <string name="error_not_accepted_body">Forget it and pair again, or check the token under Advanced.</string>
+    <string name="error_decoder_title">This device couldn\'t play the stream from %1$s</string>
+    <string name="error_decoder_body">Choose another decoder in Settings, then try again.</string>
+    <string name="error_other_title">The stream from %1$s stopped</string>
+    <string name="error_other_body">Something went wrong. Try again, or show details to see what happened.</string>
+    <string name="error_show_details">Show details</string>
+    <string name="error_hide_details">Hide details</string>
+    <string name="action_back_to_computers">Back to computers</string>
 </resources>
