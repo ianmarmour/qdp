@@ -17,7 +17,7 @@ use tokio::sync::{Notify, oneshot};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::media::{CursorState, FrameSource, WantedDisplay, changed_blocks};
+use crate::media::{CursorState, FrameSource, MonitorPlacement, WantedDisplay, changed_blocks};
 
 /// The name of the encoder thread, as debuggers and profilers show it.
 const THREAD_NAME: &str = "qdp-encoder";
@@ -62,6 +62,8 @@ pub(crate) struct EncodedOutput {
     /// The pointer when the frame was captured, if the source reports it
     /// apart from the frames.
     pub(crate) cursor: Option<CursorState>,
+    /// Where the captured monitor was in the desktop, if the source knows.
+    pub(crate) placement: Option<MonitorPlacement>,
 }
 
 /// A thread that owns the capture source and the encoder.
@@ -253,6 +255,7 @@ fn run(
                         scale_time: captured.scale_time,
                         capture_size: captured.capture_size,
                         cursor: captured.cursor.clone(),
+                        placement: captured.placement,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -278,6 +281,8 @@ struct Encoded {
     capture_size: (usize, usize),
     /// The pointer, if the source reports it.
     cursor: Option<CursorState>,
+    /// Where the captured monitor is in the desktop, if the source knows.
+    placement: Option<MonitorPlacement>,
     /// How long capturing and scaling took.
     scale_time: Duration,
     /// The encoded frames.
@@ -334,12 +339,14 @@ fn encode_one(
         }
     };
     let cursor = source.cursor();
+    let placement = source.monitor_placement();
     let scale_time = capture_started_at.elapsed();
     let encoded = opened.encoder.encode(&frame, job.request)?;
     Ok(Encoded {
         frame,
         capture_size,
         cursor,
+        placement,
         scale_time,
         encoded,
     })

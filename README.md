@@ -206,7 +206,9 @@ of a real one: KWin adds a monitor of exactly the client's display, its size
 and interface scale (with `qdp connect --resolution`, the chosen size), so the
 host streams it without scaling, and makes a new one when the client's
 display changes. The monitor joins the desktop beside the real ones while the
-session lasts. Run `qdp help` for every option, and set `QDP_LOG=debug`
+session lasts. On Linux the host finds where the streamed monitor, real or
+virtual, sits among the desktop's monitors through xdg-output, and places the
+client's pointer on it, since the virtual pointer covers them all. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail. `QDP_LOG` also takes levels for single parts after the
 default one: `QDP_LOG=info,qdp::window=debug` on the client and
 `QDP_LOG=info,qdp_runtime::host=debug,qdp_runtime::host_cursor=debug` on the

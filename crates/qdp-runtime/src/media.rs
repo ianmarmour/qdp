@@ -160,6 +160,88 @@ impl Default for DesktopScale {
     }
 }
 
+/// A rectangle of the host's desktop, in the desktop's own units, which the
+/// interface scale makes larger than the monitors' pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LayoutRect {
+    /// The left edge.
+    pub x: i32,
+    /// The top edge.
+    pub y: i32,
+    /// The width.
+    pub width: u32,
+    /// The height.
+    pub height: u32,
+}
+
+impl LayoutRect {
+    /// Returns the smallest rectangle holding all of `rects`, or `None` if
+    /// there are none.
+    pub fn union(rects: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let edges = |rect: Self| {
+            (
+                i64::from(rect.x),
+                i64::from(rect.y),
+                i64::from(rect.x) + i64::from(rect.width),
+                i64::from(rect.y) + i64::from(rect.height),
+            )
+        };
+        let (left, top, right, bottom) = rects
+            .into_iter()
+            .map(edges)
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))?;
+        Some(Self {
+            x: i32::try_from(left).ok()?,
+            y: i32::try_from(top).ok()?,
+            width: u32::try_from(right - left).ok()?,
+            height: u32::try_from(bottom - top).ok()?,
+        })
+    }
+}
+
+/// Where the captured monitor is in the host's desktop. Absolute pointing
+/// devices cover the whole desktop, every monitor together, while the
+/// client's positions are on the captured monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MonitorPlacement {
+    /// The captured monitor.
+    pub monitor: LayoutRect,
+    /// The whole desktop.
+    pub desktop: LayoutRect,
+}
+
+impl MonitorPlacement {
+    /// Returns where a position on a `capture`-sized monitor, in its pixels,
+    /// falls in the whole desktop, as a share of the desktop's width and
+    /// height, from 0 to 1.
+    pub fn desktop_share(&self, (x, y): (f64, f64), capture: (usize, usize)) -> (f64, f64) {
+        let share =
+            |position: f64, pixels: usize, start: i32, length: u32, from: i32, across: u32| {
+                let within = position / pixels.max(1) as f64 * f64::from(length);
+                ((f64::from(start) - f64::from(from) + within) / f64::from(across.max(1)))
+                    .clamp(0.0, 1.0)
+            };
+        (
+            share(
+                x,
+                capture.0,
+                self.monitor.x,
+                self.monitor.width,
+                self.desktop.x,
+                self.desktop.width,
+            ),
+            share(
+                y,
+                capture.1,
+                self.monitor.y,
+                self.monitor.height,
+                self.desktop.y,
+                self.desktop.height,
+            ),
+        )
+    }
+}
+
 /// The display a client asks the host's monitor to match (Section 6.2): its
 /// size, refresh rate and interface scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -206,6 +288,12 @@ pub trait FrameSource: Send {
     /// it is, and the host scales its frames to the client's display.
     fn match_display(&mut self, _display: &WantedDisplay) -> bool {
         false
+    }
+
+    /// Returns where the captured monitor is in the host's desktop, if the
+    /// source knows.
+    fn monitor_placement(&self) -> Option<MonitorPlacement> {
+        None
     }
 }
 
@@ -467,6 +555,53 @@ pub trait FrameSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A position on the captured monitor is placed within the whole
+    /// desktop, and the union of monitors is the desktop.
+    #[test]
+    fn places_monitors_in_the_desktop() {
+        let left = LayoutRect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 500,
+        };
+        let right = LayoutRect {
+            x: 1000,
+            y: 100,
+            width: 500,
+            height: 300,
+        };
+        let desktop = LayoutRect::union([left, right]).unwrap();
+        assert_eq!(
+            desktop,
+            LayoutRect {
+                x: 0,
+                y: 0,
+                width: 1500,
+                height: 500
+            }
+        );
+        assert_eq!(LayoutRect::union([]), None);
+        let placement = MonitorPlacement {
+            monitor: right,
+            desktop,
+        };
+        // The middle of a 1000 × 600 pixel capture of the right monitor, at
+        // 200 %.
+        let (x, y) = placement.desktop_share((500.0, 300.0), (1000, 600));
+        assert!((x - 1250.0 / 1500.0).abs() < 1e-9);
+        assert!((y - 250.0 / 500.0).abs() < 1e-9);
+        // A lone monitor maps one to one.
+        let alone = MonitorPlacement {
+            monitor: left,
+            desktop: left,
+        };
+        assert_eq!(
+            alone.desktop_share((250.0, 125.0), (1000, 500)),
+            (0.25, 0.25)
+        );
+    }
 
     /// A monitor's scale is its pixel width over its desktop width, within
     /// the scales desktops use.

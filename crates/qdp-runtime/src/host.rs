@@ -39,7 +39,7 @@ use crate::host_passthrough::{
     self, FeatureRequest, PassthroughDevice, PassthroughLink, PassthroughPolicy,
 };
 use crate::layout::VideoLayout;
-use crate::media::{CursorState, FrameSource};
+use crate::media::{CursorState, FrameSource, MonitorPlacement};
 use crate::rate_control::{QueueDetector, RateControl};
 use crate::send_stats::{SendStats, decode_window, queue_delay};
 use crate::stream_ids::StreamIds;
@@ -209,6 +209,9 @@ struct ActiveHost {
     decoder_lag: DecoderLag,
     /// When the last frame was sent, once one has been.
     frame_sent_at: Option<Instant>,
+    /// Where the captured monitor is in the desktop, and its size, as the
+    /// injector was last told.
+    placement: Option<(MonitorPlacement, (usize, usize))>,
     /// The session's statistics.
     summary: HostSummary,
     /// The statistics logged every second.
@@ -428,6 +431,12 @@ async fn serve_session(
             );
         }
     }
+    let placement = source
+        .monitor_placement()
+        .map(|placement| (placement, source.size()));
+    if let Some((placement, capture)) = placement {
+        injector.set_monitor_placement(placement, capture);
+    }
     let display = HostDisplay::new(
         source.size(),
         desktop_scale,
@@ -517,6 +526,7 @@ async fn serve_session(
         queue: QueueDetector::default(),
         decoder_lag: DecoderLag::default(),
         frame_sent_at: None,
+        placement,
         summary: HostSummary::default(),
         outputs: DeviceOutputs::default(),
         cursor: HostCursor::default(),
@@ -1143,6 +1153,16 @@ impl ActiveHost {
     fn send_encoded(&mut self, output: EncodedOutput, now: Instant) -> Result<(), RuntimeError> {
         if let Some(cursor) = &output.cursor {
             self.send_cursor(cursor, now)?;
+        }
+        let placement = output
+            .placement
+            .map(|placement| (placement, output.capture_size));
+        if placement.is_some() && placement != self.placement {
+            self.placement = placement;
+            if let Some((placement, capture)) = placement {
+                info!(?placement, "the captured monitor's place in the desktop");
+                self.injector.set_monitor_placement(placement, capture);
+            }
         }
         if output.job.stream_id != self.display.stream_id() {
             // Encoded for a stream a new configuration replaced.
