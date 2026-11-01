@@ -124,7 +124,10 @@ When a session ends other than by the client disconnecting, because the network
 dropped, a newer session replaced it or the host stopped, the host locks its
 desktop so that it is not left unlocked: through logind on Linux, which GNOME,
 KDE and `swayidle` lock for, and with the system's own lock on macOS and
-Windows. `qdp serve --lock off` leaves the desktop as it is.
+Windows. `qdp serve --lock off` leaves the desktop as it is. While a session
+streams the screen, a notification on Linux hosts says that a device sees and
+controls it, so that whoever is at the machine knows; it goes when the session
+ends.
 
 On Linux the host encodes on the GPU through VA-API when the GPU can encode
 AV1 (AMD RDNA 3 or newer, Intel Arc or newer), and otherwise falls back to

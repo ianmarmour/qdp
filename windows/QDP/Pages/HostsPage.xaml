@@ -54,7 +54,7 @@
             <GridView.ItemTemplate>
                 <DataTemplate x:DataType="core:HostRow">
                     <Grid
-                        Width="300"
+                        Width="320"
                         Padding="16"
                         RowSpacing="12"
                         ColumnSpacing="16"
@@ -85,14 +85,22 @@
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <StackPanel Orientation="Horizontal" Spacing="6">
+                            <!-- A grid rather than a horizontal stack, which would
+                                 let the detail run past the card untrimmed. -->
+                            <Grid ColumnSpacing="6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
                                 <FontIcon Glyph="{x:Bind StatusGlyph}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 <TextBlock
+                                    Grid.Column="1"
                                     Text="{x:Bind Detail}"
                                     TextTrimming="CharacterEllipsis"
+                                    ToolTipService.ToolTip="{x:Bind Detail}"
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                     Style="{StaticResource CaptionTextBlockStyle}" />
-                            </StackPanel>
+                            </Grid>
                         </StackPanel>
                         <TextBlock
                             Grid.Row="1"
