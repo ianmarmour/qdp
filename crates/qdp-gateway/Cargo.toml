@@ -12,14 +12,17 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+bytes.workspace = true
 ldap3.workspace = true
 qdp.workspace = true
 qdp-quic.workspace = true
+quinn.workspace = true
+ring.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

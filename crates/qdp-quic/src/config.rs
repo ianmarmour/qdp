@@ -47,6 +47,16 @@ const HOST_BIDIRECTIONAL_STREAMS: u32 = 2;
 /// `QDP_STREAM_CREATION_ERROR`.
 const CLIENT_BIDIRECTIONAL_STREAMS: u32 = 1;
 
+/// The UDP payload size a gateway connection starts with: enough for
+/// DATAGRAM frames with the 1200-byte payloads of a tunnelled connection, and
+/// what every IPv6 path carries (Section 13.2). Path MTU discovery raises it
+/// where the path allows.
+const GATEWAY_INITIAL_MTU: u16 = 1232;
+
+/// The number of bidirectional streams either end of a gateway connection
+/// lets the other open: the client's control stream (Section 13.3).
+const GATEWAY_BIDIRECTIONAL_STREAMS: u32 = 1;
+
 /// How the client verifies the host's certificate (Section 11.1).
 #[derive(Debug, Clone)]
 pub enum HostVerification {
@@ -87,6 +97,17 @@ fn transport_config(bidirectional_streams: u32) -> TransportConfig {
     config
 }
 
+/// Returns the transport parameters of a gateway connection (Section 13.2):
+/// QDP's, with only the control stream, and a first packet size that carries
+/// a tunnelled connection's packets.
+fn gateway_transport_config() -> TransportConfig {
+    let mut config = transport_config(GATEWAY_BIDIRECTIONAL_STREAMS);
+    config
+        .max_concurrent_uni_streams(VarInt::from_u32(0))
+        .initial_mtu(GATEWAY_INITIAL_MTU);
+    config
+}
+
 /// Returns the QUIC configuration of a host presenting `identity`.
 ///
 /// TLS 1.3 only, ALPN `qdp-draft-00`, no session tickets and no 0-RTT
@@ -94,19 +115,44 @@ fn transport_config(bidirectional_streams: u32) -> TransportConfig {
 /// may decline, so that it can authorize clients by their keys (Section
 /// 4.4.2).
 pub fn host_config(identity: TlsIdentity) -> Result<ServerConfig, TransportError> {
+    server_config(
+        identity,
+        qdp::ALPN,
+        transport_config(HOST_BIDIRECTIONAL_STREAMS),
+    )
+}
+
+/// Returns the QUIC configuration of a gateway presenting `identity`
+/// (Section 13.2): as a host's, with the gateway protocol's ALPN, asking
+/// clients for the certificate that identity assertions name.
+pub fn gateway_server_config(identity: TlsIdentity) -> Result<ServerConfig, TransportError> {
+    server_config(
+        identity,
+        qdp::gateway::GATEWAY_ALPN,
+        gateway_transport_config(),
+    )
+}
+
+/// Returns the configuration of a server presenting `identity`, speaking
+/// `alpn`, with `transport`.
+fn server_config(
+    identity: TlsIdentity,
+    alpn: &[u8],
+    transport: TransportConfig,
+) -> Result<ServerConfig, TransportError> {
     let provider = provider();
     let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(ClientKeyVerifier::new(provider)))
         .with_single_cert(identity.certificate_chain, identity.private_key)?;
-    tls.alpn_protocols = vec![qdp::ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     tls.max_early_data_size = 0;
     tls.send_tls13_tickets = 0;
     tls.session_storage = Arc::new(NoServerSessionStorage {});
     let crypto = QuicServerConfig::try_from(tls)
         .map_err(|_| TransportError::Config("no QUIC-compatible cipher suite"))?;
     let mut config = ServerConfig::with_crypto(Arc::new(crypto));
-    config.transport_config(Arc::new(transport_config(HOST_BIDIRECTIONAL_STREAMS)));
+    config.transport_config(Arc::new(transport));
     Ok(config)
 }
 
@@ -116,6 +162,44 @@ pub fn host_config(identity: TlsIdentity) -> Result<ServerConfig, TransportError
 pub fn client_config(
     verification: HostVerification,
     identity: Option<TlsIdentity>,
+) -> Result<ClientConfig, TransportError> {
+    connecting_config(
+        verification,
+        identity,
+        qdp::ALPN,
+        transport_config(CLIENT_BIDIRECTIONAL_STREAMS),
+    )
+}
+
+/// Returns the QUIC configuration of a client of a gateway, which verifies
+/// the gateway with `verification` and presents `identity`, if given, for
+/// identity assertions to name (Section 13.2). The gateway is sent the
+/// user's password, so `verification` must not be
+/// [`HostVerification::Pairing`].
+pub fn gateway_client_config(
+    verification: HostVerification,
+    identity: Option<TlsIdentity>,
+) -> Result<ClientConfig, TransportError> {
+    if matches!(verification, HostVerification::Pairing) {
+        return Err(TransportError::Config(
+            "a gateway must be verified by its pin or a certificate authority",
+        ));
+    }
+    connecting_config(
+        verification,
+        identity,
+        qdp::gateway::GATEWAY_ALPN,
+        gateway_transport_config(),
+    )
+}
+
+/// Returns the configuration of a client that verifies the server with
+/// `verification`, presents `identity`, speaks `alpn` and uses `transport`.
+fn connecting_config(
+    verification: HostVerification,
+    identity: Option<TlsIdentity>,
+    alpn: &[u8],
+    transport: TransportConfig,
 ) -> Result<ClientConfig, TransportError> {
     let provider = provider();
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -135,12 +219,12 @@ pub fn client_config(
         }
         None => builder.with_no_client_auth(),
     };
-    tls.alpn_protocols = vec![qdp::ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     tls.resumption = Resumption::disabled();
     tls.enable_early_data = false;
     let crypto = QuicClientConfig::try_from(tls)
         .map_err(|_| TransportError::Config("no QUIC-compatible cipher suite"))?;
     let mut config = ClientConfig::new(Arc::new(crypto));
-    config.transport_config(Arc::new(transport_config(CLIENT_BIDIRECTIONAL_STREAMS)));
+    config.transport_config(Arc::new(transport));
     Ok(config)
 }

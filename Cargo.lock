@@ -3083,9 +3083,12 @@ dependencies = [
 name = "qdp-gateway"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ldap3",
  "qdp",
  "qdp-quic",
+ "quinn",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "serde",

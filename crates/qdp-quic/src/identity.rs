@@ -45,6 +45,13 @@ impl IdentityFiles {
         private_key: "client-key.der",
         name: "qdp-client",
     };
+
+    /// A gateway's identity, which clients pin (Section 13.2).
+    pub const GATEWAY: Self = Self {
+        certificate: "gateway-certificate.der",
+        private_key: "gateway-key.der",
+        name: "qdp-gateway",
+    };
 }
 
 /// Where a kept identity came from.
