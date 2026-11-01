@@ -2,12 +2,15 @@
 //! frames that fills block maps.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use qdp::message::{
     BLOCK_SIZE, BlockGrid, BlockSet, CursorImage, FrameNumber, PointerMode, StreamId,
 };
 use qdp_codec::Yuv420Frame;
+
+use tokio::sync::Notify;
 
 use crate::RuntimeError;
 
@@ -294,6 +297,45 @@ pub trait FrameSource: Send {
     /// source knows.
     fn monitor_placement(&self) -> Option<MonitorPlacement> {
         None
+    }
+
+    /// Has the source tell `arrivals` each time a new frame arrives, if it
+    /// knows when frames do, and returns whether it will. The host then
+    /// captures frames as they arrive, at most at the stream's frame rate,
+    /// rather than on a timer that each frame waits for.
+    fn watch_frames(&mut self, _arrivals: Arc<FrameArrivals>) -> bool {
+        false
+    }
+}
+
+/// Counts the frames a source delivers and wakes the host for each, for
+/// sources that know when frames arrive.
+#[derive(Debug)]
+pub struct FrameArrivals {
+    /// The frames that arrived so far.
+    count: AtomicU64,
+    /// Wakes the host.
+    wake: Arc<Notify>,
+}
+
+impl FrameArrivals {
+    /// Returns arrivals that wake `wake`.
+    pub fn new(wake: Arc<Notify>) -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            wake,
+        }
+    }
+
+    /// Records that a new frame arrived, and wakes the host.
+    pub fn arrived(&self) {
+        self.count.fetch_add(1, Ordering::Release);
+        self.wake.notify_one();
+    }
+
+    /// Returns how many frames arrived so far.
+    pub fn count(&self) -> u64 {
+        self.count.load(Ordering::Acquire)
     }
 }
 

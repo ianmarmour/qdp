@@ -22,13 +22,14 @@ use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdenti
 use qdp_runtime::{
     ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
-    DesktopScale, DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameInfo, FrameSink,
-    FrameSource, GamepadFeedback, HostAudio, HostAuthenticator, HostDesktop, HostOptions,
-    InputAction, InputHandle, InputInjector, InputQueue, Microphone, NoInput, OpenedDesktop,
-    PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect, Playout,
-    PointerButton, PointerPosition, Presentation, PresentationTiming, RefreshMode, ResumptionSlot,
-    RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, TouchPhase, TouchPoint,
-    UserInput, WantedDisplay, WarpKind, input_channel, input_classes, run, serve,
+    DesktopScale, DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameArrivals,
+    FrameInfo, FrameSink, FrameSource, GamepadFeedback, HostAudio, HostAuthenticator, HostDesktop,
+    HostOptions, InputAction, InputHandle, InputInjector, InputQueue, Microphone, NoInput,
+    OpenedDesktop, PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect,
+    Playout, PointerButton, PointerPosition, Presentation, PresentationTiming, RefreshMode,
+    ResumptionSlot, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
+    TouchPhase, TouchPoint, UserInput, WantedDisplay, WarpKind, input_channel, input_classes, run,
+    serve,
 };
 
 /// The width of the streamed frames.
@@ -547,6 +548,85 @@ async fn stream_with_token() {
         .unwrap();
     assert!(summary.frames_sent >= FRAMES as u64);
     assert!(summary.key_frames_sent >= 1);
+}
+
+/// How often [`ArrivingPattern`]'s frames arrive: faster than the stream's 60
+/// frames per second, so that the host must pace them.
+const ARRIVAL_SPACING: Duration = Duration::from_millis(5);
+
+/// A test pattern that says when its frames arrive, as a screen capture does,
+/// from a thread of its own, until it is dropped.
+struct ArrivingPattern {
+    /// The frames.
+    pattern: TestPattern,
+    /// Whether the host watched for arrivals.
+    watched: Arc<AtomicBool>,
+    /// Stops the arrivals.
+    stop: Arc<AtomicBool>,
+}
+
+impl FrameSource for ArrivingPattern {
+    fn size(&self) -> (usize, usize) {
+        self.pattern.size()
+    }
+
+    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+        self.pattern.capture()
+    }
+
+    fn watch_frames(&mut self, arrivals: Arc<FrameArrivals>) -> bool {
+        self.watched.store(true, Ordering::Release);
+        let stop = Arc::clone(&self.stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                arrivals.arrived();
+                std::thread::sleep(ARRIVAL_SPACING);
+            }
+        });
+        true
+    }
+}
+
+impl Drop for ArrivingPattern {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// A source that says when its frames arrive is captured as they do, paced
+/// to the stream's frame rate, and streams as faithfully as one captured at
+/// frame times.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn frames_go_out_as_they_arrive() {
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.add_token(TOKEN.to_vec());
+    let watched = Arc::new(AtomicBool::new(false));
+    let source = ArrivingPattern {
+        pattern: TestPattern::new(WIDTH, HEIGHT),
+        watched: Arc::clone(&watched),
+        stop: Arc::new(AtomicBool::new(false)),
+    };
+    let (address, pin, host) = start_host(
+        authenticator,
+        Box::new(source),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    );
+    let collector = tokio::time::timeout(
+        TEST_TIMEOUT,
+        stream(address, pin, ClientCredentials::Token(TOKEN.to_vec()), None),
+    )
+    .await
+    .expect("streaming finishes in time")
+    .unwrap();
+    check_frames(&collector);
+    tokio::time::timeout(TEST_TIMEOUT, host)
+        .await
+        .expect("the host finishes in time")
+        .unwrap()
+        .unwrap();
+    assert!(watched.load(Ordering::Acquire));
 }
 
 /// How long the slow client takes to present each frame: longer than a frame

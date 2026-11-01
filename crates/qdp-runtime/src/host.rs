@@ -20,6 +20,7 @@ use qdp::video::{FrameKind, VideoSender};
 use qdp::wire::VarInt;
 use qdp_codec::{CodecPreference, KeyFrameRequest};
 use qdp_quic::{DriverInput, HostDriver, QdpConnection, StreamPolicy, TransportError};
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::admission::AdmissionTicket;
@@ -31,6 +32,7 @@ use crate::clipboard::{
 };
 use crate::decoder_lag::DecoderLag;
 use crate::encode_thread::{EncodeJob, EncodedOutput, EncoderThread};
+use crate::frame_pacing::FramePacer;
 use crate::host_cursor::{CursorUpdate, HostCursor};
 use crate::host_display::{HostDisplay, StreamChange, VideoLimits, wanted_display};
 use crate::host_input::{InputAction, InputInjector, Positions, StandardInput};
@@ -39,7 +41,7 @@ use crate::host_passthrough::{
     self, FeatureRequest, PassthroughDevice, PassthroughLink, PassthroughPolicy,
 };
 use crate::layout::VideoLayout;
-use crate::media::{CursorState, DesktopScale, FrameSource, MonitorPlacement};
+use crate::media::{CursorState, DesktopScale, FrameArrivals, FrameSource, MonitorPlacement};
 use crate::rate_control::{QueueDetector, RateControl};
 use crate::send_stats::{SendStats, decode_window, queue_delay};
 use crate::stream_ids::StreamIds;
@@ -229,6 +231,11 @@ struct ActiveHost {
     audio: HostAudioStreams,
     /// The pointer mode the client was last told.
     pointer_mode: PointerKind,
+    /// Counts the source's new frames, if it tells when they arrive, so that
+    /// frames go out as they arrive rather than on a timer.
+    arrivals: Option<Arc<FrameArrivals>>,
+    /// Paces frames that go out as they arrive.
+    pacer: FramePacer,
     /// The confinement the client was last told, in absolute mode.
     confinement: Option<DesktopRect>,
     /// When the last `INPUT` datagram arrived.
@@ -508,8 +515,18 @@ async fn serve_session(
     );
 
     let settings = plan.encoder_settings(&options.encoder);
+    // The encoder's results and the source's new frames wake the session
+    // alike.
+    let wake = Arc::new(Notify::new());
+    let arrivals = Arc::new(FrameArrivals::new(Arc::clone(&wake)));
+    let arrivals = source
+        .watch_frames(Arc::clone(&arrivals))
+        .then_some(arrivals);
+    if arrivals.is_some() {
+        info!("capturing frames as they arrive");
+    }
     let (encoder, description) =
-        EncoderThread::spawn(source, matched, settings, options.encoder.preference).await?;
+        EncoderThread::spawn(source, matched, settings, options.encoder.preference, wake).await?;
     info!(encoder = description, "encoding");
     let stats = SendStats::new(Instant::now(), driver.connection().path_stats());
     let mut active = ActiveHost {
@@ -538,6 +555,8 @@ async fn serve_session(
         clipboard,
         audio,
         pointer_mode: PointerKind::Absolute,
+        arrivals,
+        pacer: FramePacer::new(Instant::now()),
         confinement: None,
         last_input_at: Instant::now(),
         passthrough_policy: options.passthrough,
@@ -717,12 +736,18 @@ impl ActiveHost {
                 .rate
                 .frame_interval(self.display.plan().frame_interval());
             let smoothed_rtt = self.driver.connection().smoothed_rtt();
+            // Frames go out as they arrive, if the source tells when they
+            // do, or else at frame times.
+            let frame_due_at = match &self.arrivals {
+                Some(arrivals) => self.pacer.next_due(frame_interval, arrivals.count()),
+                None => next_frame_at,
+            };
             let deadline = [
                 // While a recovery frame is held back, no frame is sent
                 // before it.
                 self.pending_since
                     .is_none()
-                    .then(|| self.sender.recovery_wait().unwrap_or(next_frame_at)),
+                    .then(|| self.sender.recovery_wait().unwrap_or(frame_due_at)),
                 self.sender.poll_timeout(smoothed_rtt),
                 self.input.poll_timeout(smoothed_rtt),
                 Some(self.stats.next_log_at()),
@@ -791,7 +816,12 @@ impl ActiveHost {
             // frame goes out, since the client could not decode it.
             let recovery = self.sender.recovery_needed(now).is_some();
             let held = self.sender.recovery_wait().is_some_and(|due| now < due);
-            if self.pending_since.is_none() && ((now >= next_frame_at && !held) || recovery) {
+            let arrived = self.arrivals.as_ref().map(|arrivals| arrivals.count());
+            let due = match arrived {
+                Some(count) => self.pacer.due(now, frame_interval, count),
+                None => now >= next_frame_at,
+            };
+            if self.pending_since.is_none() && ((due && !held) || recovery) {
                 self.follow_pointer_mode()?;
                 self.update_outputs(now)?;
                 if recovery {
@@ -803,6 +833,9 @@ impl ActiveHost {
                     self.stats.decoder_waited();
                 } else {
                     self.request_frame(now)?;
+                }
+                if let Some(count) = arrived {
+                    self.pacer.taken(now, count);
                 }
                 next_frame_at = if now >= next_frame_at {
                     next_frame_at + frame_interval

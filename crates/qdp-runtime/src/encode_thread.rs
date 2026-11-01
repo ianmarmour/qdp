@@ -87,8 +87,8 @@ pub(crate) struct EncoderThread {
 
 impl EncoderThread {
     /// Starts the thread with a source, and an encoder opened as `preference`
-    /// asks with `settings`. Returns the thread and the encoder's
-    /// description.
+    /// asks with `settings`, notifying `ready` whenever a result is ready.
+    /// Returns the thread and the encoder's description.
     ///
     /// Encoders are opened on the thread itself, because hardware encoders
     /// hold driver state that must stay on the thread that created it.
@@ -97,11 +97,11 @@ impl EncoderThread {
         matched: Option<WantedDisplay>,
         settings: EncoderSettings,
         preference: CodecPreference,
+        ready: Arc<Notify>,
     ) -> Result<(Self, String), RuntimeError> {
         let (job_sender, jobs) = mpsc::channel();
         let (result_sender, results) = mpsc::channel();
         let (opened_sender, opened) = oneshot::channel();
-        let ready = Arc::new(Notify::new());
         let notify = Arc::clone(&ready);
         let handle = std::thread::Builder::new()
             .name(THREAD_NAME.to_owned())
@@ -397,6 +397,7 @@ mod tests {
             None,
             settings,
             CodecPreference::Software,
+            Arc::new(Notify::new()),
         )
         .await
         .unwrap();
