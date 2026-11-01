@@ -9,6 +9,20 @@ use crate::frame_parser::{FrameParser, FrameType};
 use crate::sequence::{ColorDescription, SequenceHeader};
 use crate::tile_count;
 
+/// The most tile columns hardware encoders divide frames into; more tiles
+/// go in rows.
+const MAX_TILE_COLUMNS: u32 = 4;
+
+/// Returns how hardware encoders divide frames of `width × height` into
+/// tiles, as columns and rows: at least the tiles of Section 6.4.4, in at
+/// most [`MAX_TILE_COLUMNS`] columns, all counts powers of 2, as encoders
+/// divide frames uniformly.
+pub(crate) fn tile_grid(width: usize, height: usize) -> (u32, u32) {
+    let tiles = tile_count(width, height) as u32;
+    let columns = tiles.min(MAX_TILE_COLUMNS);
+    (columns, tiles / columns)
+}
+
 /// The colour description clients expect, which the encoders write: BT.709
 /// primaries and matrix, and the sRGB transfer.
 pub(crate) const COLOR_DESCRIPTION: ColorDescription = ColorDescription {
@@ -88,6 +102,15 @@ mod tests {
         let unit = encoded.into_iter().next().unwrap().temporal_unit;
         let level = SequenceHeader::find(&unit).unwrap().unwrap().level;
         (unit, level)
+    }
+
+    /// Frames are divided into at least Section 6.4.4's tiles, in columns
+    /// first.
+    #[test]
+    fn divides_frames_into_tiles() {
+        assert_eq!(tile_grid(1920, 1080), (2, 1));
+        assert_eq!(tile_grid(2560, 1440), (4, 1));
+        assert_eq!(tile_grid(3840, 2160), (4, 2));
     }
 
     /// The software encoder's key frames suit clients, as they must.

@@ -239,11 +239,21 @@ fn open_hardware_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncod
     Ok(Box::new(crate::VaapiEncoder::new(settings)?))
 }
 
-/// Opens the platform's hardware encoder: NVENC on Windows, on NVIDIA GPUs
-/// that encode AV1.
+/// Opens the platform's hardware encoder: on Windows, NVENC on NVIDIA GPUs
+/// that encode AV1, and otherwise the AV1 encoder a GPU's driver registers
+/// with Media Foundation, as AMD's and Intel's do.
 #[cfg(windows)]
 fn open_hardware_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>, CodecError> {
-    Ok(Box::new(crate::nvenc::NvencEncoder::new(settings)?))
+    let nvenc = match crate::nvenc::NvencEncoder::new(settings) {
+        Ok(encoder) => return Ok(Box::new(encoder)),
+        Err(error) => error,
+    };
+    match crate::mediafoundation::MediaFoundationEncoder::new(settings) {
+        Ok(encoder) => Ok(Box::new(encoder)),
+        Err(error) => Err(CodecError::HardwareUnavailable(format!(
+            "NVENC: {nvenc}; Media Foundation: {error}"
+        ))),
+    }
 }
 
 /// Opens the platform's hardware encoder; this platform has none yet.

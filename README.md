@@ -149,9 +149,12 @@ times larger, on Mesa 24.3 or later and Intel's driver; the host's stats count
 these as `recoveries`.
 
 On Windows the host encodes on NVIDIA GPUs that encode AV1 (GeForce RTX 40 or
-newer) with NVENC, through the NVIDIA driver (version 522 or later), and
-otherwise in software; the log names the GPU NVENC encodes on. NVENC recovers
-from losses with a key frame.
+newer) with NVENC, through the NVIDIA driver (version 522 or later); on AMD
+(Radeon RX 7000 or newer) and Intel (Arc or newer) GPUs with the AV1 encoder
+their driver registers with Media Foundation; and otherwise in software. Each
+hardware encoder is used only once its first frame is checked to suit clients,
+and the log names the one used. Hardware encoders on Windows recover from
+losses with a key frame.
 
 With hardware encoding on Linux, the screen stays in GPU memory from the compositor to
 the encoder: the desktop shares it as DMA-BUFs, and the GPU's video processor
