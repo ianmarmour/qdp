@@ -18,7 +18,7 @@ use qdp_codec::DecodedPicture;
 use qdp_desktop::{DeviceSelector, Microphone, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
     CursorWarp, DisplaySize, DisplayTiming, Focus, FrameInfo, FrameSink, InputHandle, PenInput,
-    PointerButton, Presentation, PresentationTiming, SinkControl, TouchPhase, UserInput, WarpKind,
+    Presentation, PresentationTiming, SinkControl, TouchPhase, UserInput, WarpKind,
 };
 use softbuffer::{Context, Surface};
 use tokio::sync::{Notify, oneshot};
@@ -37,24 +37,15 @@ use crate::args::TouchpadMode;
 use crate::color::{Placement, RgbFrame, scale_into, yuv420_to_rgb};
 use crate::sink::CliSink;
 use qdp_app::cursor::ScaledCursor;
-use qdp_app::keymap::{HidKey, hid_key};
+use qdp_app::placement::confined;
+use qdp_app::window_input::{Scroller, button_input, display_size, key_input, touch_phase};
 
 /// The window's initial size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(1280.0, 720.0);
 
-/// Scroll units, 1/120 of a detent, per line of scrolling (Section 8.4.2).
-const UNITS_PER_LINE: f64 = 120.0;
-
-/// Scroll units per logical pixel of precise scrolling, as from a touchpad
-/// (Section 8.4.2).
-const UNITS_PER_PIXEL: f64 = 3.0;
-
 /// The shortest time between two warps of the user's pointer: at most 60 a
 /// second (Section 9.4).
 const MIN_WARP_INTERVAL: Duration = Duration::from_micros(16_667);
-
-/// Positions in pixels (Section 1.5.6).
-const POSITION_UNITS: f64 = 256.0;
 
 /// The interface scale, in percent, of an image drawn for no scaling.
 const DEFAULT_IMAGE_SCALE: f64 = 100.0;
@@ -350,7 +341,7 @@ pub struct WindowApp {
     #[cfg_attr(not(windows), allow(dead_code))]
     proxy: EventLoopProxy<WindowMessage>,
     /// Scrolling not yet sent, below one unit.
-    scroll_remainder: (f64, f64),
+    scroller: Scroller,
     /// The host's cursor image, or `None` while the host hides it.
     cursor: Option<Arc<CursorImage>>,
     /// The cursor at the size it is drawn, with the scale it was made for.
@@ -500,7 +491,7 @@ impl WindowApp {
             picture: None,
             close,
             error: None,
-            scroll_remainder: (0.0, 0.0),
+            scroller: Scroller::default(),
             cursor: None,
             scaled_cursor: None,
             cursor_stale: false,
@@ -817,19 +808,9 @@ impl WindowApp {
 
     /// Sends a key press or release; key repeats are the host's to generate.
     fn key(&self, event: &KeyEvent) {
-        if event.repeat {
-            return;
+        if let Some(input) = key_input(event) {
+            self.input.send(input);
         }
-        let PhysicalKey::Code(code) = event.physical_key else {
-            return;
-        };
-        let pressed = event.state == ElementState::Pressed;
-        let input = match hid_key(code) {
-            Some(HidKey::Keyboard(usage)) => UserInput::Key { usage, pressed },
-            Some(HidKey::Consumer(usage)) => UserInput::ConsumerKey { usage, pressed },
-            None => return,
-        };
-        self.input.send(input);
     }
 
     /// Sends the pointer's position on the monitor, if it is over the
@@ -866,12 +847,7 @@ impl WindowApp {
     /// Sends a finger touching, moving or lifting. While fingers touch, the
     /// pointer events some platforms make from them are not sent.
     fn touch(&mut self, touch: Touch) {
-        let phase = match touch.phase {
-            winit::event::TouchPhase::Started => TouchPhase::Down,
-            winit::event::TouchPhase::Moved => TouchPhase::Move,
-            winit::event::TouchPhase::Ended => TouchPhase::Up,
-            winit::event::TouchPhase::Cancelled => TouchPhase::Cancel,
-        };
+        let phase = touch_phase(touch.phase);
         match phase {
             TouchPhase::Down => {
                 self.fingers.insert(touch.id);
@@ -900,50 +876,19 @@ impl WindowApp {
             ElementState::Pressed => self.held_buttons.insert(button),
             ElementState::Released => self.held_buttons.remove(&button),
         };
-        let button = match button {
-            MouseButton::Left => PointerButton::Left,
-            MouseButton::Right => PointerButton::Right,
-            MouseButton::Middle => PointerButton::Middle,
-            MouseButton::Back => PointerButton::Back,
-            MouseButton::Forward => PointerButton::Forward,
-            MouseButton::Other(_) => return,
-        };
-        self.input.send(UserInput::Button {
-            button,
-            pressed: state == ElementState::Pressed,
-        });
+        if let Some(input) = button_input(button, state) {
+            self.input.send(input);
+        }
     }
 
-    /// Sends scrolling, in 1/120 of a detent. The window system's deltas
-    /// already follow the user's scrolling direction preference.
+    /// Sends scrolling, in 1/120 of a detent.
     fn scroll(&mut self, delta: MouseScrollDelta) {
-        let (horizontal, vertical) = match delta {
-            // Positive deltas move the content right and down: scrolling left
-            // and up, away from the user.
-            MouseScrollDelta::LineDelta(x, y) => (
-                -f64::from(x) * UNITS_PER_LINE,
-                f64::from(y) * UNITS_PER_LINE,
-            ),
-            MouseScrollDelta::PixelDelta(position) => {
-                let scale = self
-                    .display
-                    .as_ref()
-                    .map_or(1.0, |display| display.window.scale_factor());
-                (
-                    -position.x / scale * UNITS_PER_PIXEL,
-                    position.y / scale * UNITS_PER_PIXEL,
-                )
-            }
-        };
-        let horizontal = self.scroll_remainder.0 + horizontal;
-        let vertical = self.scroll_remainder.1 + vertical;
-        let (whole_horizontal, whole_vertical) = (horizontal.trunc(), vertical.trunc());
-        self.scroll_remainder = (horizontal - whole_horizontal, vertical - whole_vertical);
-        if whole_horizontal != 0.0 || whole_vertical != 0.0 {
-            self.input.send(UserInput::Scroll {
-                vertical: whole_vertical as i32,
-                horizontal: whole_horizontal as i32,
-            });
+        let scale = self
+            .display
+            .as_ref()
+            .map_or(1.0, |display| display.window.scale_factor());
+        if let Some(input) = self.scroller.scroll(delta, scale) {
+            self.input.send(input);
         }
     }
 
@@ -1436,94 +1381,10 @@ fn attach_pen(
     .ok()
 }
 
-/// Returns a point of the host's monitor, in pixels, moved into `area`, in
-/// positions: 1/256 pixel (Section 1.5.6).
-fn confined(area: DesktopRect, x: f64, y: f64) -> (f64, f64) {
-    let pixels = |position: f64| position / POSITION_UNITS;
-    let left = pixels(area.x.into_inner() as f64);
-    let top = pixels(area.y.into_inner() as f64);
-    // The last position inside, a 1/256 pixel short of the far edges.
-    let right = pixels((area.x.into_inner() + area.width.into_inner() as i64 - 1) as f64);
-    let bottom = pixels((area.y.into_inner() + area.height.into_inner() as i64 - 1) as f64);
-    (
-        x.clamp(left, right.max(left)),
-        y.clamp(top, bottom.max(top)),
-    )
-}
-
-/// Returns the display the session is shown on: the window's content area,
-/// or the `resolution` the user chose instead, at the refresh rate of the
-/// monitor it is on (Section 6.2).
-fn display_size(window: &Window, resolution: Option<(u32, u32)>) -> DisplaySize {
-    let monitor = window
-        .current_monitor()
-        .or_else(|| window.primary_monitor());
-    let size = window.inner_size();
-    let window_scale = (window.scale_factor() * f64::from(DisplaySize::UNSCALED)).round() as u32;
-    let (width, height, scale_percent) = match resolution {
-        Some((width, height)) => (
-            width,
-            height,
-            stretched_scale(window_scale, (size.width, size.height), (width, height)),
-        ),
-        None => (size.width, size.height, window_scale),
-    };
-    DisplaySize {
-        width,
-        height,
-        refresh_millihertz: monitor
-            .and_then(|monitor| monitor.refresh_rate_millihertz())
-            .unwrap_or(0),
-        scale_percent,
-    }
-}
-
-/// The step chosen scales are rounded to, in percent, as desktops offer.
-const SCALE_STEP: f64 = 25.0;
-
-/// The scales a chosen resolution may ask for, in percent.
-const SCALE_RANGE: (f64, f64) = (100.0, 400.0);
-
-/// Returns the interface scale to ask the host for when the picture of
-/// `resolution` is stretched to fill a `window`-sized window at
-/// `window_scale` percent: smaller by as much as the picture is stretched,
-/// so that the host's text shows at the size the window's would, rounded to
-/// the scales desktops offer (Section 6.2).
-fn stretched_scale(window_scale: u32, window: (u32, u32), resolution: (u32, u32)) -> u32 {
-    let stretch = (f64::from(window.0) / f64::from(resolution.0.max(1)))
-        .min(f64::from(window.1) / f64::from(resolution.1.max(1)));
-    if stretch <= 0.0 {
-        return window_scale;
-    }
-    let scale = f64::from(window_scale) / stretch;
-    ((scale / SCALE_STEP).round() * SCALE_STEP).clamp(SCALE_RANGE.0, SCALE_RANGE.1) as u32
-}
-
 /// Creates the event loop the window runs on. It must be created on the main
 /// thread.
 pub fn event_loop() -> Result<EventLoop<WindowMessage>, String> {
     EventLoop::with_user_event()
         .build()
         .map_err(|error| format!("cannot start the window system: {error}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A chosen resolution stretched over the window asks for a scale as
-    /// much smaller, in steps of 25 %, and never below 100 %.
-    #[test]
-    fn scales_chosen_resolutions() {
-        // 2560 wide in a 3024-pixel window at 200 %: about 169 %.
-        assert_eq!(stretched_scale(200, (3024, 1964), (2560, 1080)), 175);
-        // The window's own size keeps its scale.
-        assert_eq!(stretched_scale(200, (2560, 1080), (2560, 1080)), 200);
-        // Stretched a lot, the scale stays at 100 %.
-        assert_eq!(stretched_scale(100, (3840, 2160), (1280, 720)), 100);
-        // Shrunk, larger.
-        assert_eq!(stretched_scale(100, (1920, 1080), (3840, 2160)), 200);
-        // An empty window keeps the window's scale.
-        assert_eq!(stretched_scale(200, (0, 0), (2560, 1080)), 200);
-    }
 }

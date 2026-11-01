@@ -8,13 +8,12 @@ use std::time::{Duration, Instant};
 
 use qdp::message::{FrameNumber, ImageSerial, StreamId};
 use qdp_app::cursor::ScaledCursor;
+use qdp_app::placement::{Rect, fit};
 use qdp_app::sink::{Presenter, SharedCursor};
 use qdp_codec::DecodedPicture;
 use qdp_desktop::{Fate, Overlay, PixelRect, Scene, Submitter};
 use qdp_runtime::{FrameInfo, Presentation, PresentationTiming};
 use tracing::info;
-
-use crate::placement::fit;
 
 /// An interface scale of one, in percent.
 const UNSCALED_PERCENT: f64 = 100.0;
@@ -166,7 +165,7 @@ impl Stage {
     /// Returns the host's cursor at the pointer, scaled as the picture is
     /// (Section 9.2), with the picture at `rect` in the layer showing a
     /// `video` picture.
-    fn overlay(&mut self, rect: crate::placement::Rect, video: (usize, usize)) -> Option<Overlay> {
+    fn overlay(&mut self, rect: Rect, video: (usize, usize)) -> Option<Overlay> {
         let picture = rect.width / video.0.max(1) as f64;
         {
             // The image is scaled again only when it or the picture's scale
