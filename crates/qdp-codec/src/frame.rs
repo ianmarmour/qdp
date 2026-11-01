@@ -50,7 +50,7 @@ const PARALLEL_PIXELS: usize = 1 << 20;
 const MAX_WORKERS: usize = 8;
 
 /// Returns how many threads should share work on `pixels` pixels.
-fn workers(pixels: usize) -> usize {
+pub(crate) fn workers(pixels: usize) -> usize {
     if pixels < PARALLEL_PIXELS {
         return 1;
     }

@@ -18,6 +18,7 @@ use std::ffi::{CStr, c_int, c_void};
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use tracing::debug;
 
@@ -25,6 +26,7 @@ use self::ffi::{
     ConfigAttrib, Image, ImageFormat, LibVa, PackedHeaderParameters, PictureParameters,
     SequenceParameters, TileGroupParameters, VaDisplay, VaId, VaStatus, Zeroed,
 };
+use crate::frame::workers;
 use crate::headers::{
     ALL_REFERENCE_SLOTS, CDEF_DAMPING_MINUS_3, FrameHeader, FrameKind, INTERPOLATION_EIGHTTAP,
     ORDER_HINT_BITS, PREVIOUS_FRAME_SLOT, PRIMARY_REF_LAST, PRIMARY_REF_NONE, REFS_PER_FRAME,
@@ -72,6 +74,9 @@ const MIN_CODED_BUFFER_SIZE: usize = 1 << 20;
 /// `transfer_characteristics` and the other colour fields are fixed, so the
 /// only `VA_RT_FORMAT` the encoder uses is 8-bit 4:2:0.
 const RT_FORMAT: u32 = ffi::RT_FORMAT_YUV420;
+
+/// How often the encoder logs how long its stages take.
+const TIMING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// An initialized VA display on one GPU.
 struct Display {
@@ -306,6 +311,147 @@ pub struct VaapiEncoder {
     frames: u64,
     /// The driver and device, for messages.
     description: String,
+    /// The image frames are written into and then copied to the input
+    /// surface, for drivers whose surfaces cannot be written directly. It is
+    /// made once and kept, since making one for each frame allocates and
+    /// faults in a frame's memory every time.
+    staging: Option<Image>,
+    /// How long the encoder's stages took lately.
+    timing: StageTiming,
+}
+
+/// How long an encoder's stages took over an interval, logged when it ends.
+#[derive(Debug, Clone, Copy)]
+struct StageTiming {
+    /// When the interval started.
+    started: Instant,
+    /// The frames encoded in it.
+    frames: u32,
+    /// Writing frames to the GPU.
+    upload: Duration,
+    /// Encoding them, until the GPU finished.
+    encode: Duration,
+    /// Reading the encoded frames back.
+    read: Duration,
+}
+
+impl StageTiming {
+    /// Starts an interval at `now`.
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            frames: 0,
+            upload: Duration::ZERO,
+            encode: Duration::ZERO,
+            read: Duration::ZERO,
+        }
+    }
+
+    /// Counts a frame whose stages took `upload`, `encode` and `read`, and
+    /// logs the interval's averages once it has ended at `now`.
+    fn record(&mut self, upload: Duration, encode: Duration, read: Duration, now: Instant) {
+        self.frames += 1;
+        self.upload += upload;
+        self.encode += encode;
+        self.read += read;
+        if now.saturating_duration_since(self.started) < TIMING_INTERVAL {
+            return;
+        }
+        let milliseconds =
+            |total: Duration| format!("{:.2}", (total / self.frames).as_secs_f64() * 1000.0);
+        debug!(
+            frames = self.frames,
+            upload_ms = milliseconds(self.upload),
+            encode_ms = milliseconds(self.encode),
+            read_ms = milliseconds(self.read),
+            "VA-API encoder stages"
+        );
+        *self = Self::new(now);
+    }
+}
+
+/// Where an NV12 image's planes lie in its buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Nv12Layout {
+    /// Where the luma plane starts.
+    luma_offset: usize,
+    /// The bytes from one luma row to the next.
+    luma_pitch: usize,
+    /// Where the interleaved chroma plane starts.
+    chroma_offset: usize,
+    /// The bytes from one chroma row to the next.
+    chroma_pitch: usize,
+}
+
+impl Nv12Layout {
+    /// Returns the layout of `image`.
+    fn of(image: &Image) -> Self {
+        Self {
+            luma_offset: image.offsets[0] as usize,
+            luma_pitch: image.pitches[0] as usize,
+            chroma_offset: image.offsets[1] as usize,
+            chroma_pitch: image.pitches[1] as usize,
+        }
+    }
+}
+
+/// Writes `frame` into `data`, an NV12 buffer laid out as `layout`, its
+/// chroma interleaved, in bands of rows on several threads.
+fn write_nv12(frame: &Yuv420Frame, data: &mut [u8], layout: Nv12Layout) -> Result<(), CodecError> {
+    let (width, height) = (frame.width(), frame.height());
+    let (chroma_width, chroma_height) = (frame.chroma_width(), frame.chroma_height());
+    let luma_end = layout.luma_offset + layout.luma_pitch * (height - 1) + width;
+    let chroma_end =
+        layout.chroma_offset + layout.chroma_pitch * (chroma_height - 1) + 2 * chroma_width;
+    if layout.luma_pitch < width
+        || layout.chroma_pitch < 2 * chroma_width
+        || luma_end > layout.chroma_offset
+        || chroma_end > data.len()
+    {
+        return Err(encoder_error("the driver's NV12 image is too small"));
+    }
+    let (luma, chroma) = data.split_at_mut(layout.chroma_offset);
+    let luma = &mut luma[layout.luma_offset..];
+    let bands = workers(width * height);
+    let luma_rows = height.div_ceil(bands);
+    let chroma_rows = chroma_height.div_ceil(bands);
+    std::thread::scope(|scope| {
+        for (band, destination) in luma.chunks_mut(luma_rows * layout.luma_pitch).enumerate() {
+            let first = band * luma_rows;
+            let rows = luma_rows.min(height.saturating_sub(first));
+            scope.spawn(move || {
+                for row in 0..rows {
+                    let source = &frame.y()[(first + row) * width..][..width];
+                    destination[row * layout.luma_pitch..][..width].copy_from_slice(source);
+                }
+            });
+        }
+        for (band, destination) in chroma
+            .chunks_mut(chroma_rows * layout.chroma_pitch)
+            .enumerate()
+        {
+            let first = band * chroma_rows;
+            let rows = chroma_rows.min(chroma_height.saturating_sub(first));
+            scope.spawn(move || {
+                // Each row is interleaved in memory first and then copied
+                // whole, since the mapped buffer may be uncached memory that
+                // is slow to write a byte at a time.
+                let mut interleaved = vec![0_u8; 2 * chroma_width];
+                for row in 0..rows {
+                    let start = (first + row) * chroma_width;
+                    let u = &frame.u()[start..][..chroma_width];
+                    let v = &frame.v()[start..][..chroma_width];
+                    for ((pair, &u), &v) in interleaved.chunks_exact_mut(2).zip(u).zip(v) {
+                        pair[0] = u;
+                        pair[1] = v;
+                    }
+                    destination[row * layout.chroma_pitch..][..2 * chroma_width]
+                        .copy_from_slice(&interleaved);
+                }
+            });
+        }
+    });
+    Ok(())
 }
 
 impl std::fmt::Debug for VaapiEncoder {
@@ -406,6 +552,8 @@ impl VaapiEncoder {
             previous: None,
             frames: 0,
             description,
+            staging: None,
+            timing: StageTiming::new(Instant::now()),
         };
         encoder.create_resources(settings)?;
         debug!(
@@ -544,81 +692,82 @@ impl VaapiEncoder {
         Ok(())
     }
 
-    /// Copies `frame` into the input surface, converting it to NV12.
-    fn upload(&self, frame: &Yuv420Frame) -> Result<(), CodecError> {
+    /// Copies `frame` into the input surface, converting it to NV12:
+    /// directly into the surface's memory where the driver lets it be
+    /// derived, or else through the staging image.
+    fn upload(&mut self, frame: &Yuv420Frame) -> Result<(), CodecError> {
         let va = self.display.va;
         let display = self.display.handle;
-        let mut image = Image::zeroed();
-        // SAFETY: the input surface belongs to this display.
-        let derived =
-            unsafe { (va.derive_image)(display, self.input, &mut image) } == ffi::VA_STATUS_SUCCESS;
-        let derived = if derived && image.format.fourcc != ffi::FOURCC_NV12 {
-            // SAFETY: the image was just derived.
-            unsafe { (va.destroy_image)(display, image.image_id) };
-            false
-        } else {
-            derived
-        };
-        if !derived {
-            let mut format = ImageFormat {
-                fourcc: ffi::FOURCC_NV12,
-                byte_order: ffi::LSB_FIRST,
-                bits_per_pixel: ffi::NV12_BITS_PER_PIXEL,
-                ..ImageFormat::zeroed()
-            };
-            // SAFETY: `format` and `image` are valid for writing.
-            let status = unsafe {
-                (va.create_image)(
-                    display,
-                    &mut format,
-                    self.format.width as c_int,
-                    self.format.height as c_int,
-                    &mut image,
-                )
-            };
-            self.display.check(status, "vaCreateImage")?;
-        }
-        let result = self.fill_image(&image, frame).and_then(|()| {
-            if derived {
-                return Ok(());
+        if self.staging.is_none() {
+            let mut image = Image::zeroed();
+            // SAFETY: the input surface belongs to this display.
+            let derived = unsafe { (va.derive_image)(display, self.input, &mut image) }
+                == ffi::VA_STATUS_SUCCESS;
+            if derived && image.format.fourcc == ffi::FOURCC_NV12 {
+                // The surface's own memory: written each frame and released
+                // before the surface is encoded.
+                let result = self.fill_image(&image, frame);
+                // SAFETY: the image was just derived and is no longer used.
+                unsafe { (va.destroy_image)(display, image.image_id) };
+                return result;
             }
-            let (width, height) = (self.format.width, self.format.height);
-            // SAFETY: the image and surface belong to this display and have
-            // the same size.
-            let status = unsafe {
-                (va.put_image)(
-                    display,
-                    self.input,
-                    image.image_id,
-                    0,
-                    0,
-                    width,
-                    height,
-                    0,
-                    0,
-                    width,
-                    height,
-                )
-            };
-            self.display.check(status, "vaPutImage")
-        });
-        // SAFETY: the image is no longer used.
-        unsafe { (va.destroy_image)(display, image.image_id) };
-        result
+            if derived {
+                // SAFETY: the image was just derived.
+                unsafe { (va.destroy_image)(display, image.image_id) };
+            }
+            self.staging = Some(self.create_staging()?);
+        }
+        let Some(staging) = self.staging else {
+            return Err(encoder_error("no staging image"));
+        };
+        self.fill_image(&staging, frame)?;
+        let (width, height) = (self.format.width, self.format.height);
+        // SAFETY: the image and surface belong to this display and have the
+        // same size. The copy has finished by the time the next frame writes
+        // the image, since each frame waits for its surface.
+        let status = unsafe {
+            (va.put_image)(
+                display,
+                self.input,
+                staging.image_id,
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+            )
+        };
+        self.display.check(status, "vaPutImage")
+    }
+
+    /// Makes the NV12 image frames are staged in.
+    fn create_staging(&self) -> Result<Image, CodecError> {
+        let mut image = Image::zeroed();
+        let mut format = ImageFormat {
+            fourcc: ffi::FOURCC_NV12,
+            byte_order: ffi::LSB_FIRST,
+            bits_per_pixel: ffi::NV12_BITS_PER_PIXEL,
+            ..ImageFormat::zeroed()
+        };
+        // SAFETY: `format` and `image` are valid for writing.
+        let status = unsafe {
+            (self.display.va.create_image)(
+                self.display.handle,
+                &mut format,
+                self.format.width as c_int,
+                self.format.height as c_int,
+                &mut image,
+            )
+        };
+        self.display.check(status, "vaCreateImage")?;
+        Ok(image)
     }
 
     /// Writes `frame` into an NV12 image's buffer.
     fn fill_image(&self, image: &Image, frame: &Yuv420Frame) -> Result<(), CodecError> {
-        let (width, height) = (frame.width(), frame.height());
-        let chroma_width = frame.chroma_width();
-        let pitch = |plane: usize| image.pitches[plane] as usize;
-        let offset = |plane: usize| image.offsets[plane] as usize;
-        let luma_end = offset(0) + pitch(0) * (height - 1) + width;
-        let chroma_end = offset(1) + pitch(1) * (frame.chroma_height() - 1) + 2 * chroma_width;
-        let size = image.data_size as usize;
-        if pitch(0) < width || pitch(1) < 2 * chroma_width || luma_end > size || chroma_end > size {
-            return Err(encoder_error("the driver's NV12 image is too small"));
-        }
         let mut mapped: *mut c_void = std::ptr::null_mut();
         // SAFETY: the image's buffer belongs to this display.
         let status =
@@ -626,29 +775,13 @@ impl VaapiEncoder {
         self.display.check(status, "vaMapBuffer")?;
         // SAFETY: a mapped image buffer holds `data_size` writable bytes until
         // it is unmapped below.
-        let data = unsafe { std::slice::from_raw_parts_mut(mapped.cast::<u8>(), size) };
-        for (row, source) in frame.y().chunks_exact(width).enumerate() {
-            let start = offset(0) + row * pitch(0);
-            data[start..start + width].copy_from_slice(source);
-        }
-        // Each row is interleaved in memory first and then copied whole,
-        // since the mapped buffer may be uncached memory that is slow to
-        // write a byte at a time.
-        let mut interleaved = vec![0_u8; 2 * chroma_width];
-        let chroma_rows = frame
-            .u()
-            .chunks_exact(chroma_width)
-            .zip(frame.v().chunks_exact(chroma_width));
-        for (row, (u, v)) in chroma_rows.enumerate() {
-            for ((pair, &u), &v) in interleaved.chunks_exact_mut(2).zip(u).zip(v) {
-                pair[0] = u;
-                pair[1] = v;
-            }
-            let start = offset(1) + row * pitch(1);
-            data[start..start + 2 * chroma_width].copy_from_slice(&interleaved);
-        }
+        let data = unsafe {
+            std::slice::from_raw_parts_mut(mapped.cast::<u8>(), image.data_size as usize)
+        };
+        let written = write_nv12(frame, data, Nv12Layout::of(image));
         // SAFETY: the buffer was mapped above and `data` is no longer used.
         let status = unsafe { (self.display.va.unmap_buffer)(self.display.handle, image.buf) };
+        written?;
         self.display.check(status, "vaUnmapBuffer")
     }
 
@@ -843,11 +976,17 @@ impl VideoEncoder for VaapiEncoder {
             tiles: self.tiles,
             tile_size_bytes: self.support.tile_size_bytes,
         };
+        let started = Instant::now();
         self.upload(frame)?;
+        let uploaded = Instant::now();
         // A failed frame leaves no usable reference, so the next is a key frame.
         self.previous = None;
         self.submit(&header, current)?;
+        let encoded = Instant::now();
         let bytes = self.read_coded()?;
+        let read = Instant::now();
+        self.timing
+            .record(uploaded - started, encoded - uploaded, read - encoded, read);
         self.previous = Some(current);
         let is_key_frame = kind == FrameKind::Key;
         let temporal_unit = to_qdp_temporal_unit(&bytes, is_key_frame, &self.sequence_header)?;
@@ -877,6 +1016,9 @@ impl Drop for VaapiEncoder {
         // SAFETY: every object belongs to this display and is no longer used;
         // invalid identifiers, for objects never created, are ignored.
         unsafe {
+            if let Some(staging) = self.staging {
+                (va.destroy_image)(display, staging.image_id);
+            }
             if self.coded != ffi::VA_INVALID_ID {
                 (va.destroy_buffer)(display, self.coded);
             }
@@ -889,5 +1031,68 @@ impl Drop for VaapiEncoder {
             }
             (va.destroy_config)(display, self.config);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writing in bands puts each plane where the layout says, padding left
+    /// alone, for sizes large enough to split and odd enough not to split
+    /// evenly.
+    #[test]
+    fn writes_nv12_in_bands() {
+        let (width, height): (usize, usize) = (1282, 1081);
+        let mut seed = 3_u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (seed >> 16) as u8
+        };
+        let (chroma_width, chroma_height) = (width.div_ceil(2), height.div_ceil(2));
+        let frame = Yuv420Frame::from_planes(
+            width,
+            height,
+            (0..width * height).map(|_| next()).collect(),
+            (0..chroma_width * chroma_height).map(|_| next()).collect(),
+            (0..chroma_width * chroma_height).map(|_| next()).collect(),
+        )
+        .unwrap();
+        // Padded rows, and a gap between the planes, as drivers lay them out.
+        let layout = Nv12Layout {
+            luma_offset: 64,
+            luma_pitch: 1344,
+            chroma_offset: 64 + 1344 * 1088,
+            chroma_pitch: 1344,
+        };
+        const PADDING: u8 = 0xee;
+        let mut data = vec![PADDING; layout.chroma_offset + layout.chroma_pitch * chroma_height];
+        write_nv12(&frame, &mut data, layout).unwrap();
+        for row in 0..height {
+            let start = layout.luma_offset + row * layout.luma_pitch;
+            assert_eq!(
+                &data[start..start + width],
+                &frame.y()[row * width..][..width]
+            );
+            assert!(
+                data[start + width..start + layout.luma_pitch]
+                    .iter()
+                    .all(|&byte| byte == PADDING)
+            );
+        }
+        for row in 0..chroma_height {
+            let start = layout.chroma_offset + row * layout.chroma_pitch;
+            for column in 0..chroma_width {
+                let index = row * chroma_width + column;
+                assert_eq!(data[start + 2 * column], frame.u()[index]);
+                assert_eq!(data[start + 2 * column + 1], frame.v()[index]);
+            }
+        }
+        // A layout whose planes overlap is refused.
+        let overlapping = Nv12Layout {
+            chroma_offset: 1344 * 100,
+            ..layout
+        };
+        assert!(write_nv12(&frame, &mut data, overlapping).is_err());
     }
 }
