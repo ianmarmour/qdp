@@ -27,9 +27,10 @@ Usage:
                                Forget a paired client, by its name or the
                                start of its key pin
   qdp service install [serve options]
-                               Run the host as a system service from boot,
-                               streaming the console, the login screen
-                               included (Linux, as root)
+                               Run the host as a service: on Linux a system
+                               service from boot, streaming the console, the
+                               login screen included (as root); on macOS a
+                               LaunchAgent from login
   qdp service uninstall        Stop and remove the service
   qdp service status           Show whether the service runs
   qdp help                     Show this help
