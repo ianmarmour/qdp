@@ -311,11 +311,15 @@ returning connects again.
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
-every change merged into `main` on Linux: formatting, clippy and the tests.
-Pull requests are not checked, so that merging never waits for it, and a run
-can be started on any branch from the Actions tab. It also builds the `qdp` command for Linux and the Android app, which
-each run keeps as downloadable artifacts. Pushing a version tag publishes both
-as a GitHub release:
+every change merged into `main` on Linux, Windows and macOS: formatting,
+clippy and the tests. Pull requests are not checked, so that merging never
+waits for it, and a run can be started on any branch from the Actions tab. It
+builds the `qdp` command for each system and the Android app, and once every
+build passed it publishes them together as a GitHub release, numbered by the
+run (the ten newest are kept). The newest build's files are always at
+`https://github.com/ianmarmour/qdp/releases/latest/download/FILE`, such as
+`qdp-android-arm64.apk`. Pushing a version tag publishes a release of that
+version, which is kept:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
@@ -335,8 +339,9 @@ keytool -genkeypair -keystore qdp-release.keystore -alias qdp -keyalg RSA -keysi
 base64 -i qdp-release.keystore | pbcopy
 ```
 
-Without the secrets, builds are signed with a throwaway key, and installing
-one over another needs the app uninstalled first. Local builds take the same
+Without the secrets, builds are signed with a debug key that CI keeps in its
+cache between runs; if the cache loses it, the next build has a new key, and
+installing it over an older one needs the app uninstalled first. Local builds take the same
 key from `QDP_KEYSTORE`, `QDP_KEYSTORE_PASSWORD`, `QDP_KEY_ALIAS` and
 `QDP_KEY_PASSWORD`.
 
