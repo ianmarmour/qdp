@@ -308,6 +308,30 @@ both bumpers together, opens the menu, which also shows the on-screen keyboard
 and statistics and disconnects. Leaving the app ends the session, and
 returning connects again.
 
+## Mac app
+
+The app in [`apple`](apple) streams from a host to Macs with Apple silicon
+running macOS 26 or later. It is a SwiftUI app around the Rust core
+[`qdp-apple`](crates/qdp-apple), which decodes AV1 with VideoToolbox on Macs
+with an AV1 decoder (M3 and later) and in software otherwise, and draws with
+Metal on a thread of its own, as `qdp connect` does. Building it needs Xcode 26,
+XcodeGen and Rust's Apple targets:
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
+```
+
+```bash
+cd apple && ./build-core.sh && xcodegen generate && open QDP.xcodeproj
+```
+
+The app lists the hosts on the local network and those it paired with;
+choosing a new host pairs with it by the code the host shows, and choosing a
+paired one streams at once. Each stream opens in a window of its own, which can
+go full screen; clicking into it sends the keyboard and mouse, controllers are
+sent as gamepads, and while the host's pointer is relative the mouse is
+captured, until Control, Option, Shift and Z are pressed together.
+
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
