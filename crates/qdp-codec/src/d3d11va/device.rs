@@ -1,15 +1,28 @@
 //! The Direct3D 11 device decoders and windows share, so that a window draws
 //! a picture where its decoder left it, without a copy.
+//!
+//! The device is made on the GPU that decodes AV1: the default adapter if it
+//! does, as it drives the main display, and otherwise the first other GPU
+//! that does, as on laptops whose integrated GPU predates AV1 but whose
+//! discrete one decodes it. A window on a display the other GPU drives
+//! still shows its pictures, which Windows copies across.
 
 use std::sync::{Mutex, PoisonError};
 
+use tracing::info;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL,
+    D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11VideoDevice,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter, IDXGIFactory1,
 };
 use windows::core::Interface;
 
@@ -31,8 +44,8 @@ unsafe impl Send for SharedDevice {}
 static SHARED: Mutex<Option<SharedDevice>> = Mutex::new(None);
 
 /// Returns the Direct3D 11 device that hardware decoders decode with, which
-/// a window must draw their pictures with: made on the default adapter the
-/// first time, and again if the adapter was reset or removed since.
+/// a window must draw their pictures with: made on the GPU that decodes
+/// AV1 the first time, and again if that GPU was reset or removed since.
 ///
 /// Its immediate context may be used from any thread: Direct3D serializes
 /// the calls.
@@ -49,20 +62,103 @@ pub fn video_device() -> Result<ID3D11Device, CodecError> {
     Ok(device)
 }
 
-/// Makes a device on the default adapter that decodes video, with a thread
-/// safe immediate context.
+/// Returns whether `device`'s GPU decodes 8-bit AV1 into NV12 textures.
+pub(super) fn decodes_av1(device: &ID3D11Device) -> bool {
+    let Ok(video_device) = device.cast::<ID3D11VideoDevice>() else {
+        return false;
+    };
+    // SAFETY: the device is valid; the calls have no other contract.
+    let profiles = unsafe { video_device.GetVideoDecoderProfileCount() };
+    let has_av1 = (0..profiles).any(|index| {
+        // SAFETY: the index is below the count.
+        unsafe { video_device.GetVideoDecoderProfile(index) }
+            .is_ok_and(|profile| profile == D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0)
+    });
+    // SAFETY: the profile is a valid GUID.
+    let nv12 = unsafe {
+        video_device
+            .CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, DXGI_FORMAT_NV12)
+    }
+    .is_ok_and(|supported| supported.as_bool());
+    has_av1 && nv12
+}
+
+/// Makes the device on the default adapter if it decodes AV1, else on the
+/// first other hardware adapter that does, else on the default adapter.
 fn create() -> Result<ID3D11Device, CodecError> {
+    let default = create_on(None)?;
+    if decodes_av1(&default) {
+        return Ok(default);
+    }
+    // The default adapter is the first.
+    let decoding = hardware_adapters()
+        .into_iter()
+        .filter(|(index, _, _)| *index != 0)
+        .filter_map(|(_, adapter, name)| Some((create_on(Some(&adapter)).ok()?, name)))
+        .find(|(device, _)| decodes_av1(device));
+    match decoding {
+        Some((device, name)) => {
+            info!(gpu = name, "decoding on the GPU that decodes AV1");
+            Ok(device)
+        }
+        None => Ok(default),
+    }
+}
+
+/// Returns the hardware adapters, with their indices, the default's 0, and
+/// their names.
+fn hardware_adapters() -> Vec<(u32, IDXGIAdapter, String)> {
+    // SAFETY: the call has no contract.
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+        return Vec::new();
+    };
+    let mut adapters = Vec::new();
+    for index in 0.. {
+        // SAFETY: indices from 0 up to the first that fails name adapters.
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+            break;
+        };
+        // SAFETY: the adapter is valid.
+        let Ok(description) = (unsafe { adapter.GetDesc1() }) else {
+            continue;
+        };
+        if description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+            continue;
+        }
+        let length = description
+            .Description
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(description.Description.len());
+        if let Ok(adapter) = adapter.cast::<IDXGIAdapter>() {
+            let name = String::from_utf16_lossy(&description.Description[..length]);
+            adapters.push((index, adapter, name));
+        }
+    }
+    adapters
+}
+
+/// Makes a device that decodes video, with a thread safe immediate context,
+/// on `adapter`, or on the default one.
+fn create_on(adapter: Option<&IDXGIAdapter>) -> Result<ID3D11Device, CodecError> {
     let unavailable = |what: &str, error: windows::core::Error| {
         CodecError::HardwareUnavailable(format!("{what}: {error}"))
+    };
+    // A device on a given adapter names no driver type; the default one is
+    // the hardware's.
+    let driver: D3D_DRIVER_TYPE = if adapter.is_some() {
+        D3D_DRIVER_TYPE_UNKNOWN
+    } else {
+        D3D_DRIVER_TYPE_HARDWARE
     };
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
     // SAFETY: the outputs are valid to write and written before the call
-    // returns; no adapter means the default one.
+    // returns; the adapter, if any, is valid.
     unsafe {
         D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            adapter,
+            driver,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             Some(&FEATURE_LEVELS),

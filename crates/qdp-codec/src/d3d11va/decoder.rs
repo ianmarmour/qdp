@@ -128,20 +128,7 @@ impl D3d11Decoder {
         let video_device: ID3D11VideoDevice = device
             .cast()
             .map_err(failed("the device does not decode video"))?;
-        // SAFETY: the device is valid; the calls have no other contract.
-        let profiles = unsafe { video_device.GetVideoDecoderProfileCount() };
-        let has_av1 = (0..profiles).any(|index| {
-            // SAFETY: the index is below the count.
-            unsafe { video_device.GetVideoDecoderProfile(index) }
-                .is_ok_and(|profile| profile == D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0)
-        });
-        // SAFETY: the profile is a valid GUID.
-        let nv12 = unsafe {
-            video_device
-                .CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, DXGI_FORMAT_NV12)
-        }
-        .is_ok_and(|supported| supported.as_bool());
-        if !has_av1 || !nv12 {
+        if !super::device::decodes_av1(&device) {
             return Err(CodecError::HardwareUnavailable(
                 "this PC's GPU has no AV1 decoder".to_owned(),
             ));
