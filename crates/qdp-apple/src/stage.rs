@@ -167,23 +167,24 @@ impl Stage {
     /// (Section 9.2), with the picture at `rect` in the layer showing a
     /// `video` picture.
     fn overlay(&mut self, rect: crate::placement::Rect, video: (usize, usize)) -> Option<Overlay> {
-        let image = self
-            .cursor
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()?;
         let picture = rect.width / video.0.max(1) as f64;
-        let factor = picture * UNSCALED_PERCENT / (image.scale.into_inner().max(1) as f64);
-        let key = CursorKey {
-            serial: image.image_serial,
-            factor,
-        };
-        if self
-            .scaled
-            .as_ref()
-            .is_none_or(|(scaled, _)| *scaled != key)
         {
-            self.scaled = Some((key, ScaledCursor::new(&image, factor)));
+            // The image is scaled again only when it or the picture's scale
+            // changed, not for every frame.
+            let image = self.cursor.lock().unwrap_or_else(PoisonError::into_inner);
+            let image = image.as_ref()?;
+            let factor = picture * UNSCALED_PERCENT / (image.scale.into_inner().max(1) as f64);
+            let key = CursorKey {
+                serial: image.image_serial,
+                factor,
+            };
+            if self
+                .scaled
+                .as_ref()
+                .is_none_or(|(scaled, _)| *scaled != key)
+            {
+                self.scaled = Some((key, ScaledCursor::new(image, factor)));
+            }
         }
         let (_, cursor) = self.scaled.as_ref()?;
         let (x, y) = self.pointer;
