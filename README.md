@@ -283,6 +283,37 @@ both bumpers together, opens the menu, which also shows the on-screen keyboard
 and statistics and disconnects. Leaving the app ends the session, and
 returning connects again.
 
+## Builds and releases
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
+every pull request and push to `main` on Linux: formatting, clippy and the
+tests. It also builds the `qdp` command for Linux and the Android app, which
+each run keeps as downloadable artifacts. Pushing a version tag publishes both
+as a GitHub release:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+So that each Android build installs over the last, sign them all with one key.
+Create it once, keep it safe, and give it to the repository as the secrets
+`ANDROID_KEYSTORE_BASE64` (the keystore, base64-encoded),
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (`qdp` below) and
+`ANDROID_KEY_PASSWORD`, under Settings, Secrets and variables, Actions:
+
+```bash
+keytool -genkeypair -keystore qdp-release.keystore -alias qdp -keyalg RSA -keysize 4096 -validity 10000
+```
+
+```bash
+base64 -i qdp-release.keystore | pbcopy
+```
+
+Without the secrets, builds are signed with a throwaway key, and installing
+one over another needs the app uninstalled first. Local builds take the same
+key from `QDP_KEYSTORE`, `QDP_KEYSTORE_PASSWORD`, `QDP_KEY_ALIAS` and
+`QDP_KEY_PASSWORD`.
+
 ## Crates
 
 | Crate | Contents |

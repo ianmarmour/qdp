@@ -5,6 +5,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// A keystore named in the environment, as CI's secrets give it, signs
+// release builds, so that each one installs over the last; without one they
+// are signed with this machine's debug key.
+val releaseKeystore = System.getenv("QDP_KEYSTORE")?.takeIf { it.isNotEmpty() }?.let(::file)
+
 android {
     namespace = "io.github.ianmarmour.qdp"
     compileSdk = 35
@@ -15,19 +20,29 @@ android {
         // decoder, and AAudio plays with low latency.
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI numbers its builds, so that each installs over the one before.
+        versionCode = System.getenv("QDP_VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("QDP_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: "0.1.0"
         ndk {
             abiFilters += "arm64-v8a"
+        }
+    }
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("QDP_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("QDP_KEY_ALIAS")
+                keyPassword = System.getenv("QDP_KEY_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so that a release build installs
-            // without a keystore of its own; sign it properly to publish.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (releaseKeystore != null) "release" else "debug")
         }
     }
 
