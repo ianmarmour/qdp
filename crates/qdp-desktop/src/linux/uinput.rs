@@ -379,6 +379,29 @@ impl Translator {
         )
     }
 
+    /// Returns touch points on the captured monitor, in 1/256 pixel, as
+    /// positions of the touchscreen, which covers the desktop as the
+    /// absolute pointer does, and is placed the same way: by where they fall
+    /// in the desktop now, so that they land where the client touched even
+    /// when the capture's size has changed since the touchscreen was made, as
+    /// when the monitor was set to the client's display.
+    fn touch_in_desktop(&self, points: &[TouchPoint]) -> Vec<TouchPoint> {
+        points
+            .iter()
+            .map(|point| {
+                let (x, y) = self.desktop_position(point.x, point.y);
+                TouchPoint { x, y, ..*point }
+            })
+            .collect()
+    }
+
+    /// Returns a pen report on the captured monitor with its position in the
+    /// pen tablet's, which is placed as the touchscreen's is.
+    fn pen_in_desktop(&self, report: &PenReport) -> PenReport {
+        let (x, y) = self.desktop_position(report.x, report.y);
+        PenReport { x, y, ..*report }
+    }
+
     /// Returns the whole counts of the desktop's units a move of `dx` and
     /// `dy`, in 1/256 pixel, makes, keeping the fractions for the next.
     fn desktop_counts(&mut self, dx: i32, dy: i32) -> (i32, i32) {
@@ -781,10 +804,12 @@ impl InputInjector for UinputInjector {
                 return Ok(());
             }
             InputAction::Touch(points) => {
-                return self.touch(points).map_err(|error| error.to_string());
+                let points = self.translator.touch_in_desktop(points);
+                return self.touch(&points).map_err(|error| error.to_string());
             }
             InputAction::Pen(report) => {
-                return self.set_pen(report).map_err(|error| error.to_string());
+                let report = self.translator.pen_in_desktop(report);
+                return self.set_pen(&report).map_err(|error| error.to_string());
             }
             InputAction::Touchpad {
                 device_id,
@@ -1060,6 +1085,44 @@ mod tests {
                 .1,
             position(20 * pixel, 10 * pixel)
         );
+    }
+
+    /// Touches are placed as the pointer is: by their share of the capture,
+    /// so that a touchscreen made for a 4K monitor still lands where the
+    /// client touched once the monitor is 1920 × 1080.
+    #[test]
+    fn places_touches_as_the_pointer() {
+        use qdp_runtime::{LayoutRect, TouchPhase};
+        let mut translator = Translator {
+            axis_max: (3840 * SUBUNITS - 1, 2160 * SUBUNITS - 1),
+            ..Translator::default()
+        };
+        let monitor = LayoutRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        translator.placement = Some((
+            MonitorPlacement {
+                monitor,
+                desktop: monitor,
+            },
+            (1920, 1080),
+        ));
+        let touched = translator.touch_in_desktop(&[TouchPoint {
+            id: 1,
+            phase: TouchPhase::Down,
+            x: 1440 * SUBUNITS,
+            y: 540 * SUBUNITS,
+            pressure: 0,
+        }]);
+        // Three quarters across and half down the touchscreen's range.
+        assert_eq!(
+            (touched[0].x, touched[0].y),
+            (2880 * SUBUNITS, 1080 * SUBUNITS)
+        );
+        assert_eq!((touched[0].id, touched[0].phase), (1, TouchPhase::Down));
     }
 
     /// With the captured monitor's place known, positions on it are placed
