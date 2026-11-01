@@ -25,13 +25,12 @@ use qdp_runtime::{
 use tokio::sync::{Notify, oneshot};
 use tracing::{info, warn};
 
-use crate::cursor::CursorBitmap;
+use qdp::message::CursorImage;
+
 use crate::events::{CodeRequest, Ending, Event};
 use crate::settings::{SERVER_NAME, resolve_address};
-use crate::sink::{AndroidSink, SharedCursor};
+use crate::sink::{AppSink, Presenter, SharedCursor};
 
-/// The product name the client sends in `CLIENT_HELLO`.
-const CLIENT_NAME: &str = concat!("qdp-android/", env!("CARGO_PKG_VERSION"));
 
 /// The wait before reconnecting the first time after a connection is lost.
 const FIRST_RECONNECT_DELAY: Duration = Duration::from_millis(500);
@@ -98,6 +97,9 @@ impl fmt::Debug for Authentication {
 /// What a session connects with.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The product name the client sends in `CLIENT_HELLO`, such as
+    /// `qdp-android/0.1.0`.
+    pub client_name: String,
     /// The host's address or name, with or without a port.
     pub host: String,
     /// How the session authenticates.
@@ -110,6 +112,9 @@ pub struct Config {
     pub decoder: CodecPreference,
     /// Whether the microphone starts on.
     pub microphone: Microphone,
+    /// Opens the device's speakers and microphone, the microphone capturing
+    /// only while the state given says it is on.
+    pub client_audio: fn(Microphone) -> ClientAudio,
 }
 
 /// A running session.
@@ -134,8 +139,13 @@ pub struct Session {
 type CodeSlot = Arc<Mutex<Option<oneshot::Sender<Option<String>>>>>;
 
 impl Session {
-    /// Starts a session with `config` on a new thread.
-    pub fn start(config: Config) -> std::io::Result<Self> {
+    /// Starts a session with `config` on a new thread, showing its video
+    /// with the presenter `presenter` makes there.
+    pub fn start<P, F>(config: Config, presenter: F) -> std::io::Result<Self>
+    where
+        P: Presenter,
+        F: FnOnce() -> P + Send + 'static,
+    {
         let (input, queue) = input_channel();
         let (sender, receiver) = mpsc::channel();
         let cursor = SharedCursor::default();
@@ -147,7 +157,7 @@ impl Session {
                 let cursor = Arc::clone(&cursor);
                 let stop = Arc::clone(&stop);
                 let code = Arc::clone(&code);
-                move || run_thread(&config, queue, sender, cursor, &stop, code)
+                move || run_thread(&config, presenter, queue, sender, cursor, &stop, code)
             })?;
         Ok(Self {
             events: EventReader {
@@ -187,7 +197,7 @@ impl Session {
     }
 
     /// Returns the host's cursor image, or `None` while it is hidden.
-    pub fn cursor(&self) -> Option<CursorBitmap> {
+    pub fn cursor(&self) -> Option<CursorImage> {
         self.cursor
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -258,8 +268,9 @@ impl EventReader {
 
 /// Runs a session with `config` on the session's thread, telling the app
 /// through `events` how it went, until it ends or `stop` is notified.
-fn run_thread(
+fn run_thread<P: Presenter>(
     config: &Config,
+    presenter: impl FnOnce() -> P,
     input: InputQueue,
     events: Sender<Event>,
     cursor: SharedCursor,
@@ -272,7 +283,7 @@ fn run_thread(
         .build();
     let ending = match runtime {
         Ok(runtime) => {
-            let mut sink = AndroidSink::new(events.clone(), cursor);
+            let mut sink = AppSink::new(presenter(), events.clone(), cursor);
             runtime.block_on(receive(
                 config,
                 &mut sink,
@@ -294,9 +305,9 @@ fn run_thread(
 /// Connects to the host and shows its stream in `sink`, sending the user's
 /// input from `input`, until the host closes, the session fails, or `stop`
 /// completes. A pairing code the app is asked for comes through `code`.
-async fn receive(
+async fn receive<P: Presenter>(
     config: &Config,
-    sink: &mut AndroidSink,
+    sink: &mut AppSink<P>,
     stop: impl Future<Output = ()>,
     mut input: InputQueue,
     events: &Sender<Event>,
@@ -362,7 +373,7 @@ async fn receive(
             let pairs = matches!(credentials, ClientCredentials::Pairing { .. });
             pairing.asked.store(false, Ordering::Relaxed);
             let options = ClientOptions {
-                client_name: CLIENT_NAME.to_owned(),
+                client_name: config.client_name.clone(),
                 credentials: credentials.clone(),
                 display: config.display,
                 decoder_threads: 0,
@@ -375,7 +386,7 @@ async fn receive(
             let attempt = connect_once(
                 address,
                 &verification,
-                config.microphone,
+                (config.client_audio)(config.microphone),
                 &endpoint,
                 &options,
                 sink,
@@ -522,13 +533,13 @@ enum Failure {
 /// Connects to the host once, verifying its key as `verification` says,
 /// and runs a session with `options` until it ends.
 #[allow(clippy::too_many_arguments)]
-async fn connect_once(
+async fn connect_once<P: Presenter>(
     address: SocketAddr,
     verification: &HostVerification,
-    microphone: Microphone,
+    audio: ClientAudio,
     endpoint: &ClientEndpoint,
     options: &ClientOptions,
-    sink: &mut AndroidSink,
+    sink: &mut AppSink<P>,
     input: &mut InputQueue,
     events: &Sender<Event>,
 ) -> Result<(), Failure> {
@@ -545,7 +556,7 @@ async fn connect_once(
         sink,
         Some(input),
         None,
-        client_audio(microphone),
+        audio,
     )
     .await
     .map_err(|error| {
@@ -563,17 +574,4 @@ async fn connect_once(
         "disconnected"
     );
     Ok(())
-}
-
-/// Returns the device's speakers and microphone.
-#[cfg(target_os = "android")]
-fn client_audio(microphone: Microphone) -> ClientAudio {
-    qdp_desktop::client_audio(microphone)
-}
-
-/// Returns no audio devices: only Android's are used.
-#[cfg(not(target_os = "android"))]
-fn client_audio(microphone: Microphone) -> ClientAudio {
-    let _ = microphone;
-    ClientAudio::default()
 }

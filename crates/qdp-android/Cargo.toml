@@ -17,6 +17,7 @@ publish = false
 
 [dependencies]
 qdp.workspace = true
+qdp-app.workspace = true
 qdp-codec.workspace = true
 qdp-quic.workspace = true
 qdp-runtime.workspace = true

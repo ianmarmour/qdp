@@ -1,11 +1,12 @@
-//! Gamepads as the app reads them, from Android's key and motion events,
+//! Gamepads as the app reads them, from the platform's controller events,
 //! converted to QDP's reports.
 //!
 //! The app sends a gamepad's whole state on each change: its held buttons as
 //! a mask of Standard Gamepad button indices, which a handheld's built-in
 //! controls and a Bluetooth controller both map to, its sticks from -1 to 1,
-//! negative left and up as Android reports them, and its triggers from 0 to
-//! 1.
+//! negative left and up as Android reports them (Apple's Game Controller
+//! framework reports up as positive, which the app negates), and its
+//! triggers from 0 to 1.
 
 use qdp::message::{GamepadButtons, GamepadReport};
 

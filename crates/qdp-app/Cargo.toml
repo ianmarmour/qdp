@@ -1,0 +1,23 @@
+[package]
+name = "qdp-app"
+description = "The core QDP's app clients share: sessions with a host, with reconnection and pairing, the events the app is told, and the sink that hands the video to the platform"
+readme = "../../README.md"
+keywords = ["remote-desktop", "streaming"]
+categories = ["network-programming"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+qdp.workspace = true
+qdp-codec.workspace = true
+qdp-quic.workspace = true
+qdp-runtime.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+
+[lints]
+workspace = true
