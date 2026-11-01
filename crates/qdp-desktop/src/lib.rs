@@ -100,6 +100,28 @@ pub enum DisplayMatching {
     On,
 }
 
+/// Where captured frames are delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FrameMemory {
+    /// In memory, where every encoder reads them.
+    #[default]
+    System,
+    /// Left in the GPU's memory, where the desktop shares them so, for a
+    /// hardware encoder that reads them there; in memory otherwise. Frames
+    /// come in memory instead from the moment the encoder cannot read one
+    /// (see [`FrameSource::use_memory_frames`]).
+    Gpu,
+}
+
+/// How a session captures the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ScreenOptions {
+    /// Whether the captured monitor takes the client's display.
+    pub matching: DisplayMatching,
+    /// Where captured frames are delivered.
+    pub frames: FrameMemory,
+}
+
 /// Puts back the monitor settings that an earlier host, which stopped
 /// without putting them back, saved in `state_directory`.
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
@@ -115,24 +137,24 @@ pub fn restore_monitor_settings(_state_directory: &Path) {}
 /// Starts capturing the screen, keeping in `state_directory` what lets later
 /// sessions start without asking the user again. Blocks until the first
 /// frame arrives, which may wait for the user to choose a monitor. With
-/// `matching` on, the monitor takes the client's display for the session.
+/// matching on, the monitor takes the client's display for the session.
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 pub fn open_screen(
     state_directory: &Path,
-    matching: DisplayMatching,
+    options: ScreenOptions,
 ) -> Result<Box<dyn FrameSource>, String> {
     let token_path = state_directory.join(RESTORE_TOKEN_FILE);
     let token = std::fs::read_to_string(&token_path)
         .ok()
         .map(|token| token.trim().to_owned())
         .filter(|token| !token.is_empty());
-    let mut capture = ScreenCapture::open(token)?;
+    let mut capture = ScreenCapture::open(token, options.frames)?;
     if let Some(token) = capture.restore_token() {
         if let Err(error) = std::fs::write(&token_path, token) {
             warn!(%error, path = %token_path.display(), "cannot keep the screen sharing choice");
         }
     }
-    if matching == DisplayMatching::On {
+    if options.matching == DisplayMatching::On {
         let saved_path = state_directory.join(MONITOR_SETTINGS_FILE);
         if let Err(error) = capture.match_displays(saved_path) {
             warn!(%error, "the monitor keeps its own display; the host scales its frames");
@@ -142,24 +164,26 @@ pub fn open_screen(
 }
 
 /// Starts capturing the main display. Blocks until the first frame arrives.
-/// The display keeps its own mode on this platform.
+/// The display keeps its own mode on this platform, and frames come in
+/// memory.
 #[cfg(target_os = "macos")]
 pub fn open_screen(
     _state_directory: &Path,
-    matching: DisplayMatching,
+    options: ScreenOptions,
 ) -> Result<Box<dyn FrameSource>, String> {
-    warn_unmatched(matching);
+    warn_unmatched(options.matching);
     Ok(Box::new(MacScreenCapture::open()?))
 }
 
 /// Starts capturing the primary monitor. Blocks until the first image
-/// arrives. The monitor keeps its own mode on this platform.
+/// arrives. The monitor keeps its own mode on this platform, and frames come
+/// in memory.
 #[cfg(windows)]
 pub fn open_screen(
     _state_directory: &Path,
-    matching: DisplayMatching,
+    options: ScreenOptions,
 ) -> Result<Box<dyn FrameSource>, String> {
-    warn_unmatched(matching);
+    warn_unmatched(options.matching);
     Ok(Box::new(DesktopDuplication::open()?))
 }
 
@@ -180,7 +204,7 @@ fn warn_unmatched(matching: DisplayMatching) {
 )))]
 pub fn open_screen(
     _state_directory: &Path,
-    _matching: DisplayMatching,
+    _options: ScreenOptions,
 ) -> Result<Box<dyn FrameSource>, String> {
     Err("screen capture is not supported on this platform yet".to_owned())
 }

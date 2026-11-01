@@ -12,9 +12,17 @@
 //!
 //! When the host is asked to, the captured monitor takes the client's
 //! display: its mode and interface scale change for the session.
+//!
+//! When the encoder reads frames the GPU holds, the stream asks first for
+//! DMA-BUFs in the linear layout every GPU reads, and the frames stay where
+//! the compositor drew them; a desktop that cannot share them so sends
+//! frames in memory instead. If the encoder later cannot read them, the
+//! stream asks for frames in memory from then on, and the last DMA-BUF frame
+//! is read into memory to stand in until the first one arrives.
 
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -27,7 +35,7 @@ use ashpd::desktop::screencast::{
 use pipewire as pw;
 use pw::spa;
 use pw::spa::buffer::meta::MetaCursor;
-use qdp_codec::{Rgb32Order, Yuv420Frame};
+use qdp_codec::{DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout, Rgb32Order, Yuv420Frame};
 use qdp_runtime::{
     CapturedFrame, CursorShape, CursorState, DesktopScale, FrameArrivals, FrameSource, LayoutRect,
     MonitorPlacement, PointerPosition, RuntimeError, WantedDisplay,
@@ -37,6 +45,7 @@ use tracing::{debug, info, warn};
 
 use super::desktop_layout;
 use super::monitor_matching::MonitorMatching;
+use crate::FrameMemory;
 use crate::latest_frame::LatestFrame;
 
 /// The name of the thread that holds the portal session.
@@ -66,6 +75,16 @@ const MAX_FRAME_RATE: u32 = 360;
 
 /// The bytes of one 32-bit pixel.
 const PIXEL_BYTES: u32 = 4;
+
+/// `DMA_BUF_IOCTL_SYNC`: `_IOW('b', 0, struct dma_buf_sync)`, which brackets
+/// the processor's access to a mapped DMA-BUF.
+const DMA_BUF_IOCTL_SYNC: u64 = 0x4008_6200;
+
+/// `DMA_BUF_SYNC_READ`, with `DMA_BUF_SYNC_START`, which is 0.
+const DMA_BUF_SYNC_READ: u64 = 1;
+
+/// `DMA_BUF_SYNC_END`.
+const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
 /// The pointer image size offered for cursor metadata, in pixels: the
 /// preferred, smallest and largest side.
@@ -152,6 +171,10 @@ pub struct ScreenCapture {
     monitor_name: Option<String>,
     /// Brings the monitor to the client's display, if the host was asked to.
     matching: Option<MonitorMatching>,
+    /// Where the stream's frames are delivered.
+    frames: FrameMemory,
+    /// Has the PipeWire thread ask for frames in memory.
+    to_memory: Option<pw::channel::Sender<()>>,
 }
 
 impl std::fmt::Debug for ScreenCapture {
@@ -165,11 +188,11 @@ impl std::fmt::Debug for ScreenCapture {
 
 impl ScreenCapture {
     /// Starts capturing a monitor, asking the user which one unless
-    /// `restore_token` restores an earlier choice. Blocks until the first
-    /// frame arrives.
-    pub fn open(restore_token: Option<String>) -> Result<Self, String> {
+    /// `restore_token` restores an earlier choice, with frames delivered as
+    /// `frames` asks. Blocks until the first frame arrives.
+    pub fn open(restore_token: Option<String>, frames: FrameMemory) -> Result<Self, String> {
         let (stream, stop_portal, portal) = start_portal(restore_token)?;
-        let mut capture = Self::start(Some(stream.remote), stream.node_id)?;
+        let mut capture = Self::start(Some(stream.remote), stream.node_id, frames)?;
         capture.stop_portal = Some(stop_portal);
         capture.portal = Some(portal);
         capture.restore_token = stream.restore_token;
@@ -195,30 +218,38 @@ impl ScreenCapture {
 
     /// Starts capturing a PipeWire video source of the user's PipeWire
     /// daemon directly, without the portal, such as a virtual display's
-    /// stream. Blocks until the first frame arrives.
-    pub fn from_pipewire_node(node_id: u32) -> Result<Self, String> {
-        let mut capture = Self::start(None, node_id)?;
+    /// stream, with frames delivered as `frames` asks. Blocks until the
+    /// first frame arrives.
+    pub fn from_pipewire_node(node_id: u32, frames: FrameMemory) -> Result<Self, String> {
+        let mut capture = Self::start(None, node_id, frames)?;
         capture.wait_for_first_frame()?;
         Ok(capture)
     }
 
     /// Starts the PipeWire thread reading `node_id`, through the portal's
-    /// `remote` if given, or the user's PipeWire daemon otherwise.
-    fn start(remote: Option<OwnedFd>, node_id: u32) -> Result<Self, String> {
+    /// `remote` if given, or the user's PipeWire daemon otherwise, with
+    /// frames delivered as `frames` asks.
+    fn start(remote: Option<OwnedFd>, node_id: u32, frames: FrameMemory) -> Result<Self, String> {
         let shared = Arc::new(LatestFrame::default());
         let cursor = SharedCursor::default();
         let (stop_pipewire, stop_receiver) = pw::channel::channel();
+        let (to_memory, to_memory_receiver) = pw::channel::channel();
         let thread_shared = Arc::clone(&shared);
         let thread_cursor = Arc::clone(&cursor);
         let pipewire = std::thread::Builder::new()
             .name(PIPEWIRE_THREAD.to_owned())
             .spawn(move || {
+                let channels = PipeWireChannels {
+                    stop: stop_receiver,
+                    to_memory: to_memory_receiver,
+                };
                 let result = run_pipewire(
                     remote,
                     node_id,
+                    frames,
                     &thread_shared,
                     thread_cursor,
-                    stop_receiver,
+                    channels,
                 );
                 if let Err(error) = result {
                     thread_shared.fail(error);
@@ -238,6 +269,8 @@ impl ScreenCapture {
             placement: None,
             monitor_name: None,
             matching: None,
+            frames,
+            to_memory: Some(to_memory),
         })
     }
 
@@ -355,6 +388,30 @@ impl FrameSource for ScreenCapture {
 
     /// PipeWire delivers a frame each time the compositor draws the
     /// monitor, so each is told as it arrives.
+    fn use_memory_frames(&mut self) {
+        if self.frames == FrameMemory::System {
+            return;
+        }
+        self.frames = FrameMemory::System;
+        info!("asking the desktop for the screen in memory instead of in GPU buffers");
+        if let Some(to_memory) = &self.to_memory {
+            let _ = to_memory.send(());
+        }
+        // The desktop sends a frame in memory only once the screen changes,
+        // so the last frame stands in, read out of its buffer.
+        let stand_in = self
+            .shared
+            .refuse_gpu_frames()
+            .and_then(|frame| match frame {
+                CapturedFrame::DmaBuf(frame) => read_linear(&frame),
+                CapturedFrame::Memory(_) => None,
+            });
+        match stand_in {
+            Some(frame) => self.shared.fill(frame.into()),
+            None => debug!("the last GPU frame cannot be read; waiting for one in memory"),
+        }
+    }
+
     fn watch_frames(&mut self, arrivals: Arc<FrameArrivals>) -> bool {
         self.shared.watch(arrivals)
     }
@@ -566,6 +623,9 @@ struct StreamFormat {
     height: u32,
     /// The byte order of the pixels, once a supported format is negotiated.
     order: Option<Rgb32Order>,
+    /// The DMA-BUFs' format modifier, if frames come in DMA-BUFs rather
+    /// than in memory.
+    modifier: Option<u64>,
 }
 
 /// The byte order of a cursor bitmap's pixels.
@@ -750,14 +810,24 @@ fn cursor_meta_param() -> Option<Vec<u8>> {
     .map(|(bytes, _)| bytes.into_inner())
 }
 
-/// Runs a PipeWire stream reading `node_id` until `stop` receives, through
-/// `remote` if given, or the user's PipeWire daemon otherwise.
+/// The channels by which the capture tells the PipeWire thread what to do.
+struct PipeWireChannels {
+    /// Stops the thread.
+    stop: pw::channel::Receiver<()>,
+    /// Asks for frames in memory from then on.
+    to_memory: pw::channel::Receiver<()>,
+}
+
+/// Runs a PipeWire stream reading `node_id` until told to stop, through
+/// `remote` if given, or the user's PipeWire daemon otherwise, asking for
+/// frames as `frames` says.
 fn run_pipewire(
     remote: Option<OwnedFd>,
     node_id: u32,
+    frames: FrameMemory,
     shared: &Arc<LatestFrame>,
     cursor: SharedCursor,
-    stop: pw::channel::Receiver<()>,
+    channels: PipeWireChannels,
 ) -> Result<(), String> {
     pw::init();
     let main_loop = pw::main_loop::MainLoopRc::new(None).map_err(|error| error.to_string())?;
@@ -768,8 +838,8 @@ fn run_pipewire(
         None => context.connect_rc(None),
     }
     .map_err(|error| format!("cannot connect to PipeWire: {error}"))?;
-    let stream = pw::stream::StreamBox::new(
-        &core,
+    let stream = pw::stream::StreamRc::new(
+        core,
         "qdp-screen",
         pw::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Video",
@@ -780,9 +850,13 @@ fn run_pipewire(
     .map_err(|error| error.to_string())?;
 
     let frame_shared = Arc::clone(shared);
+    // Whether the stream's buffers are DMA-BUFs, for the request for frames
+    // in memory, which changes nothing otherwise.
+    let in_dma_bufs = Arc::new(AtomicBool::new(false));
+    let format_in_dma_bufs = Arc::clone(&in_dma_bufs);
     let _listener = stream
         .add_local_listener_with_user_data(StreamFormat::default())
-        .param_changed(|stream, format, id, param| {
+        .param_changed(move |stream, format, id, param| {
             let Some(param) = param else {
                 return;
             };
@@ -805,22 +879,40 @@ fn run_pipewire(
                     None
                 }
             };
+            // A format with a modifier was negotiated for DMA-BUFs.
+            let dma_buf = param.as_object().is_ok_and(|object| {
+                object
+                    .find_prop(spa::utils::Id(spa::sys::SPA_FORMAT_VIDEO_modifier))
+                    .is_some()
+            });
             *format = StreamFormat {
                 width: info.size().width,
                 height: info.size().height,
                 order,
+                modifier: dma_buf.then(|| info.modifier()),
             };
-            debug!(?format, "screen stream format");
-            // Ask for the pointer as metadata, which sources that draw it into
-            // their frames ignore.
-            let meta = cursor_meta_param();
-            match meta.as_deref().and_then(spa::pod::Pod::from_bytes) {
-                Some(pod) => {
-                    if let Err(error) = stream.update_params(&mut [pod]) {
-                        debug!(%error, "cannot ask for cursor metadata");
-                    }
-                }
-                None => debug!("cannot describe the cursor metadata"),
+            format_in_dma_bufs.store(dma_buf, Ordering::Release);
+            match format.modifier {
+                Some(modifier) => info!(
+                    width = format.width,
+                    height = format.height,
+                    modifier = format_args!("{modifier:#x}"),
+                    "the desktop shares the screen in GPU buffers"
+                ),
+                None => debug!(?format, "screen stream format"),
+            }
+            // Ask for buffers of the negotiated kind, and for the pointer as
+            // metadata, which sources that draw it into their frames ignore.
+            let params: Vec<Vec<u8>> = [buffers_param(dma_buf), cursor_meta_param()]
+                .into_iter()
+                .flatten()
+                .collect();
+            let mut pods: Vec<&spa::pod::Pod> = params
+                .iter()
+                .filter_map(|bytes| spa::pod::Pod::from_bytes(bytes))
+                .collect();
+            if let Err(error) = stream.update_params(&mut pods) {
+                debug!(%error, "cannot ask for buffers and cursor metadata");
             }
         })
         .process(move |stream, format| {
@@ -838,6 +930,18 @@ fn run_pipewire(
                 return;
             };
             let chunk = data.chunk();
+            // Buffers that only move the pointer are marked corrupted, or
+            // left empty: their contents are not a frame.
+            if chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED) || chunk.size() == 0 {
+                return;
+            }
+            if data.type_() == spa::buffer::DataType::DmaBuf {
+                match dma_buf_frame(data, format) {
+                    Some(frame) => frame_shared.store(CapturedFrame::DmaBuf(Arc::new(frame))),
+                    None => debug!("unusable screen DMA-BUF skipped"),
+                }
+                return;
+            }
             let offset = chunk.offset() as usize;
             let size = chunk.size() as usize;
             let stride = match chunk.stride() {
@@ -864,7 +968,76 @@ fn run_pipewire(
         .register()
         .map_err(|error| error.to_string())?;
 
-    let format = spa::pod::object!(
+    let formats = match frames {
+        FrameMemory::Gpu => vec![
+            video_format(BufferKind::DmaBuf)?,
+            video_format(BufferKind::Memory)?,
+        ],
+        FrameMemory::System => vec![video_format(BufferKind::Memory)?],
+    };
+    let mut pods = formats
+        .iter()
+        .map(|bytes| {
+            spa::pod::Pod::from_bytes(bytes)
+                .ok_or_else(|| "cannot describe the stream format".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    stream
+        .connect(
+            spa::utils::Direction::Input,
+            Some(node_id),
+            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+            &mut pods,
+        )
+        .map_err(|error| format!("cannot connect to the screen stream: {error}"))?;
+
+    let quit_loop = main_loop.clone();
+    let _stop = channels
+        .stop
+        .attach(main_loop.loop_(), move |()| quit_loop.quit());
+    let weak_stream = stream.downgrade();
+    let _to_memory = channels.to_memory.attach(main_loop.loop_(), move |()| {
+        let Some(stream) = weak_stream.upgrade() else {
+            return;
+        };
+        if !in_dma_bufs.load(Ordering::Acquire) {
+            // The desktop shares the screen in memory already, and would do
+            // so again whenever it renegotiates, as it could not otherwise.
+            return;
+        }
+        // Offering only formats in memory has the desktop renegotiate.
+        let format = match video_format(BufferKind::Memory) {
+            Ok(format) => format,
+            Err(error) => {
+                warn!(%error, "cannot ask for the screen in memory");
+                return;
+            }
+        };
+        let Some(pod) = spa::pod::Pod::from_bytes(&format) else {
+            return;
+        };
+        if let Err(error) = stream.update_params(&mut [pod]) {
+            warn!(%error, "cannot ask for the screen in memory");
+        }
+    });
+    main_loop.run();
+    Ok(())
+}
+
+/// The kind of buffers a stream format is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BufferKind {
+    /// DMA-BUFs in the linear layout.
+    DmaBuf,
+    /// Memory the processor reads.
+    Memory,
+}
+
+/// Returns the stream format offered for `kind` of buffers: 32-bit RGB of
+/// any size and rate, and for DMA-BUFs the linear layout, which every GPU
+/// can read. Compositors choose the size and modifier themselves.
+fn video_format(kind: BufferKind) -> Result<Vec<u8>, String> {
+    let mut format = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
         spa::param::ParamType::EnumFormat,
         spa::pod::property!(
@@ -922,28 +1095,141 @@ fn run_pipewire(
             }
         ),
     );
-    let bytes = spa::pod::serialize::PodSerializer::serialize(
+    if kind == BufferKind::DmaBuf {
+        // The allocating compositor chooses among the modifiers, so the
+        // property is not fixated here (PipeWire's DMA-BUF negotiation).
+        let linear = DRM_FORMAT_MOD_LINEAR as i64;
+        format.properties.push(spa::pod::Property {
+            key: spa::sys::SPA_FORMAT_VIDEO_modifier,
+            flags: spa::pod::PropertyFlags::MANDATORY | spa::pod::PropertyFlags::DONT_FIXATE,
+            value: spa::pod::Value::Choice(spa::pod::ChoiceValue::Long(spa::utils::Choice(
+                spa::utils::ChoiceFlags::empty(),
+                spa::utils::ChoiceEnum::Enum {
+                    default: linear,
+                    alternatives: vec![linear],
+                },
+            ))),
+        });
+    }
+    spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(format),
     )
-    .map_err(|error| format!("cannot describe the stream format: {error:?}"))?
-    .0
-    .into_inner();
-    let pod = spa::pod::Pod::from_bytes(&bytes)
-        .ok_or_else(|| "cannot describe the stream format".to_owned())?;
-    stream
-        .connect(
-            spa::utils::Direction::Input,
-            Some(node_id),
-            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
-            &mut [pod],
-        )
-        .map_err(|error| format!("cannot connect to the screen stream: {error}"))?;
+    .map(|(bytes, _)| bytes.into_inner())
+    .map_err(|error| format!("cannot describe the stream format: {error:?}"))
+}
 
-    let quit_loop = main_loop.clone();
-    let _stop = stop.attach(main_loop.loop_(), move |()| quit_loop.quit());
-    main_loop.run();
-    Ok(())
+/// Returns the parameter asking for buffers of the kind a format was
+/// negotiated for: DMA-BUFs if `dma_buf`, memory otherwise.
+fn buffers_param(dma_buf: bool) -> Option<Vec<u8>> {
+    let data_types = if dma_buf {
+        1 << spa::sys::SPA_DATA_DmaBuf
+    } else {
+        (1 << spa::sys::SPA_DATA_MemFd) | (1 << spa::sys::SPA_DATA_MemPtr)
+    };
+    let object = spa::pod::Object {
+        type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
+        id: spa::param::ParamType::Buffers.as_raw(),
+        properties: vec![spa::pod::Property {
+            key: spa::sys::SPA_PARAM_BUFFERS_dataType,
+            flags: spa::pod::PropertyFlags::empty(),
+            value: spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+                spa::utils::ChoiceFlags::empty(),
+                spa::utils::ChoiceEnum::Flags {
+                    default: data_types,
+                    flags: Vec::new(),
+                },
+            ))),
+        }],
+    };
+    spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(object),
+    )
+    .ok()
+    .map(|(bytes, _)| bytes.into_inner())
+}
+
+/// Returns the frame a dequeued DMA-BUF buffer holds, with a descriptor of
+/// its own, or `None` if the buffer is unusable.
+fn dma_buf_frame(data: &spa::buffer::Data, format: &StreamFormat) -> Option<DmaBufFrame> {
+    let order = format.order?;
+    let modifier = format.modifier?;
+    let chunk = data.chunk();
+    let pitch = u32::try_from(chunk.stride())
+        .ok()
+        .filter(|&stride| stride > 0)
+        .unwrap_or(format.width * PIXEL_BYTES);
+    let descriptor = data.fd();
+    if descriptor < 0 {
+        return None;
+    }
+    // SAFETY: a dequeued buffer's DMA-BUF descriptor stays open until the
+    // buffer is queued again, after this call; it is only duplicated here.
+    let descriptor = unsafe { BorrowedFd::borrow_raw(descriptor) }
+        .try_clone_to_owned()
+        .ok()?;
+    let layout = DmaBufLayout {
+        width: format.width as usize,
+        height: format.height as usize,
+        order,
+        modifier,
+        offset: chunk.offset(),
+        pitch,
+    };
+    DmaBufFrame::new(descriptor, layout).ok()
+}
+
+/// Reads a frame in a linear DMA-BUF into memory, or returns `None` if it is
+/// not linear or cannot be mapped. Reading GPU memory is slow, so this is
+/// for the one frame that stands in when frames move to memory.
+fn read_linear(frame: &DmaBufFrame) -> Option<Yuv420Frame> {
+    let layout = frame.layout();
+    if layout.modifier != DRM_FORMAT_MOD_LINEAR {
+        return None;
+    }
+    let size = usize::try_from(frame.size()).ok()?;
+    let start = layout.offset as usize;
+    let pitch = layout.pitch as usize;
+    let end = start + pitch * (layout.height - 1) + layout.width * PIXEL_BYTES as usize;
+    if end > size {
+        return None;
+    }
+    let descriptor = frame.descriptor().as_raw_fd();
+    // SAFETY: maps `size` bytes of the buffer read-only and shared; the
+    // mapping is undone below and nothing refers to it after.
+    let address = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            descriptor,
+            0,
+        )
+    };
+    if address == libc::MAP_FAILED {
+        return None;
+    }
+    let sync = |flags: u64| {
+        let mut sync = flags;
+        // SAFETY: `DMA_BUF_IOCTL_SYNC` reads one `u64` of flags.
+        unsafe { libc::ioctl(descriptor, DMA_BUF_IOCTL_SYNC as _, &mut sync) };
+    };
+    sync(DMA_BUF_SYNC_READ);
+    // SAFETY: the mapping holds `size` readable bytes until it is undone.
+    let bytes = unsafe { std::slice::from_raw_parts(address.cast::<u8>(), size) };
+    let converted = Yuv420Frame::from_rgb32(
+        layout.width,
+        layout.height,
+        pitch,
+        layout.order,
+        &bytes[start..],
+    );
+    sync(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END);
+    // SAFETY: the mapping was made above and `bytes` is no longer used.
+    unsafe { libc::munmap(address, size) };
+    converted
 }
 
 #[cfg(test)]
