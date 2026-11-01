@@ -196,7 +196,7 @@ Host Entry {
 ```
 
 - **Host ID**: the gateway's identifier of the host, at most 255 bytes, which
-  `OPEN` names.
+  `OPEN` can name.
 - **Name**: the host's name for users, at most 64 bytes.
 - **Description**: more about it, such as its location, at most 255 bytes; empty
   if there is none.
@@ -205,11 +205,11 @@ The client opens a host with:
 
 ```
 OPEN Payload {
-  Host ID (String),
+  Target (String),
 }
 
 OPENED Payload {
-  Host Pin (256),
+  Host Pin (Octets),
   Server Name (String),
   Assertion (Octets),
 }
@@ -220,30 +220,49 @@ OPEN_FAILED Payload {
 }
 ```
 
-The gateway checks that the user may reach the host, finds its address, and opens
-the tunnel ([Section 13.6](#136-tunnel)). It answers `OPENED` with:
+**Target** names the host, in at most 255 bytes, in one of two ways:
 
-- **Host Pin**: the 32-byte key pin of the host's certificate, from the gateway's
-  configuration. The client MUST verify the inner connection's host certificate
-  against it, as a pinned key
-  ([Section 11.1](11-security.md#111-host-authentication)). A client that already
-  pins another key for the same host, for example from pairing, MUST refuse to
-  connect and tell its user.
+- a Host ID from `HOSTS`, for a client that lets its user choose from the
+  gateway's list; or
+- the host's name or address as a client would reach it inside the private
+  network, such as `build-01.corp.example.com` or `10.0.4.20`, with an optional
+  `:PORT`, 4433 if absent, and an IPv6 address in brackets. A client configured to
+  reach hosts through a gateway sends the name its user gave, so that the same
+  names work inside the network and through the gateway.
+
+The gateway looks Target up among its Host IDs first. Otherwise it resolves the
+name with the private network's DNS and checks that its policy lets the user
+reach both the name and every address it resolves to, on that port, so that a
+name resolving to an address the user may not reach is refused. A gateway MUST
+NOT open a target its policy does not allow. It then opens the tunnel to the
+host's address ([Section 13.6](#136-tunnel)) and answers `OPENED` with:
+
+- **Host Pin**: the 32-byte key pin of the host's certificate, if the gateway knows
+  it from its configuration, or empty. When present, the client MUST verify the
+  inner connection's host certificate against it, as a pinned key
+  ([Section 11.1](11-security.md#111-host-authentication)), and a client that
+  already pins another key for the same host, for example from pairing, MUST
+  refuse to connect and tell its user. When empty, the client verifies the host
+  as it would without a gateway: by a key it pinned for that host, by public key
+  infrastructure, or by pairing through the tunnel
+  ([Section 4.4.9](04-session.md#449-pairing-0x06)).
 - **Server Name**: the name the client sends in the inner TLS handshake, at most
   255 bytes.
 - **Assertion**: an identity assertion for this host
-  ([Section 13.7](#137-identity-assertions)), or empty.
+  ([Section 13.7](#137-identity-assertions)), or empty. An assertion names the
+  host's key, so a gateway issues one only with a Host Pin.
 
 or `OPEN_FAILED`, after which the client may open another host:
 
 | Code | Name | Meaning |
 |---|---|---|
-| 0x01 | `UNKNOWN_HOST` | The gateway knows no host by that ID, or the user may not reach it. |
+| 0x01 | `UNKNOWN_HOST` | The gateway knows no such host, or the user may not reach it. |
 | 0x02 | `UNREACHABLE` | The gateway cannot reach the host. |
 | 0x03 | `BUSY` | The gateway has reached a limit, such as of tunnels. |
 
-The gateway answers `UNKNOWN_HOST` both for a host it does not know and for one the
-user may not reach, so that users cannot discover hosts they may not reach. An outer
+The gateway answers `UNKNOWN_HOST` for a host it does not know, a name that does
+not resolve, and a host the user may not reach alike, so that users cannot
+discover hosts they may not reach. An outer
 connection carries one tunnel: after `OPENED`, a client that sends `OPEN` again
 commits a `GATEWAY_PROTOCOL_VIOLATION`. A client opens other hosts on other outer
 connections, authenticated with its session token.

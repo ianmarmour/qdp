@@ -164,15 +164,17 @@ pub struct HostEntry {
 /// An `OPEN` message (Section 13.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Open {
-    /// The host to open, as `HOSTS` named it.
-    pub host_id: String,
+    /// The host to open: a Host ID from `HOSTS`, or the host's name or
+    /// address inside the private network, with an optional port.
+    pub target: String,
 }
 
 /// An `OPENED` message (Section 13.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
-    /// The key pin the client verifies the host's certificate against.
-    pub host_pin: [u8; PIN_LENGTH],
+    /// The key pin the client verifies the host's certificate against, if the
+    /// gateway knows it; otherwise the client verifies the host itself.
+    pub host_pin: Option<[u8; PIN_LENGTH]>,
     /// The name the client sends in the inner TLS handshake.
     pub server_name: String,
     /// An identity assertion for the host, or empty (Section 13.7).
@@ -293,13 +295,16 @@ impl GatewayMessage {
                 Self::Hosts(hosts)
             }
             GatewayMessageType::OPEN => Self::Open(Open {
-                host_id: read_string(reader, "Host ID", MAX_FIELD_LENGTH)?,
+                target: read_string(reader, "Target", MAX_FIELD_LENGTH)?,
             }),
             GatewayMessageType::OPENED => Self::Opened(Opened {
-                host_pin: reader
-                    .read_bytes(PIN_LENGTH)?
-                    .try_into()
-                    .map_err(|_| WireError::UnexpectedEnd)?,
+                host_pin: match reader.read_octets_at_most("Host Pin", PIN_LENGTH)? {
+                    [] => None,
+                    pin => Some(
+                        pin.try_into()
+                            .map_err(|_| WireError::InvalidValue { field: "Host Pin" })?,
+                    ),
+                },
                 server_name: read_string(reader, "Server Name", MAX_FIELD_LENGTH)?,
                 assertion: reader
                     .read_octets_at_most("Assertion", assertion::MAX_ASSERTION_LENGTH)?
@@ -358,11 +363,11 @@ impl GatewayMessage {
                 GatewayMessageType::HOSTS
             }
             Self::Open(open) => {
-                writer.write_string_at_most(&open.host_id, MAX_FIELD_LENGTH);
+                writer.write_string_at_most(&open.target, MAX_FIELD_LENGTH);
                 GatewayMessageType::OPEN
             }
             Self::Opened(opened) => {
-                writer.write_bytes(&opened.host_pin);
+                writer.write_octets(opened.host_pin.as_ref().map_or(&[][..], |pin| &pin[..]));
                 writer.write_string_at_most(&opened.server_name, MAX_FIELD_LENGTH);
                 writer.write_octets(&opened.assertion);
                 GatewayMessageType::OPENED
@@ -468,12 +473,20 @@ mod tests {
                 },
             ]),
             GatewayMessage::Open(Open {
-                host_id: "build-01".to_owned(),
+                target: "build-01".to_owned(),
+            }),
+            GatewayMessage::Open(Open {
+                target: "build-02.corp.example.com:4433".to_owned(),
             }),
             GatewayMessage::Opened(Opened {
-                host_pin: [0xab; PIN_LENGTH],
+                host_pin: Some([0xab; PIN_LENGTH]),
                 server_name: "qdp-host".to_owned(),
                 assertion: vec![9; 300],
+            }),
+            GatewayMessage::Opened(Opened {
+                host_pin: None,
+                server_name: "build-02.corp.example.com".to_owned(),
+                assertion: Vec::new(),
             }),
             GatewayMessage::OpenFailed(OpenFailed {
                 code: OpenFailure::UNKNOWN_HOST,
@@ -514,6 +527,22 @@ mod tests {
             GatewayMessage::Unknown(GatewayMessageType(VarInt::ZERO))
                 .to_frame()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_a_partial_host_pin() {
+        let mut writer = Writer::new();
+        writer.write_octets(&[0xab; 16]);
+        writer.write_string("qdp-host");
+        writer.write_octets(&[]);
+        let frame = ControlMessageFrame::new(
+            MessageType(GatewayMessageType::OPENED.0),
+            writer.into_bytes(),
+        );
+        assert_eq!(
+            GatewayMessage::decode(&frame),
+            Err(WireError::InvalidValue { field: "Host Pin" })
         );
     }
 
