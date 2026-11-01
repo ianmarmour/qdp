@@ -219,8 +219,14 @@ fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
     Ok(Box::new(crate::MediaCodecDecoder::new()?))
 }
 
+/// Opens the platform's hardware decoder: D3D11 video on Windows.
+#[cfg(windows)]
+fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
+    Ok(Box::new(crate::D3d11Decoder::new()?))
+}
+
 /// Opens the platform's hardware decoder; this platform has none yet.
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android", windows)))]
 fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
     Err(CodecError::HardwareUnavailable(
         "hardware decoding is not supported on this platform yet".to_owned(),

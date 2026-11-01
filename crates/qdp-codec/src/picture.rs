@@ -16,6 +16,10 @@ pub enum DecodedPicture {
     /// when shown.
     #[cfg(target_os = "android")]
     Surface(crate::SurfacePicture),
+    /// A picture in the texture array a D3D11 video decoder decoded into,
+    /// which Direct3D draws from directly.
+    #[cfg(windows)]
+    D3d11(crate::D3d11Picture),
 }
 
 impl DecodedPicture {
@@ -27,6 +31,8 @@ impl DecodedPicture {
             Self::PixelBuffer(picture) => picture.visible_size(),
             #[cfg(target_os = "android")]
             Self::Surface(picture) => picture.visible_size(),
+            #[cfg(windows)]
+            Self::D3d11(picture) => picture.visible_size(),
         }
     }
 
@@ -39,6 +45,8 @@ impl DecodedPicture {
             Self::PixelBuffer(picture) => Self::PixelBuffer(picture.cropped(width, height)),
             #[cfg(target_os = "android")]
             Self::Surface(picture) => Self::Surface(picture.cropped(width, height)),
+            #[cfg(windows)]
+            Self::D3d11(picture) => Self::D3d11(picture.cropped(width, height)),
         }
     }
 
@@ -50,6 +58,8 @@ impl DecodedPicture {
             Self::PixelBuffer(_) => None,
             #[cfg(target_os = "android")]
             Self::Surface(_) => None,
+            #[cfg(windows)]
+            Self::D3d11(_) => None,
         }
     }
 
@@ -65,6 +75,8 @@ impl DecodedPicture {
             Self::PixelBuffer(picture) => Ok(use_frame(&picture.to_memory()?)),
             #[cfg(target_os = "android")]
             Self::Surface(_) => Err(surface_unreadable()),
+            #[cfg(windows)]
+            Self::D3d11(picture) => Ok(use_frame(&picture.to_memory()?)),
         }
     }
 
@@ -76,6 +88,8 @@ impl DecodedPicture {
             Self::PixelBuffer(picture) => picture.to_memory(),
             #[cfg(target_os = "android")]
             Self::Surface(_) => Err(surface_unreadable()),
+            #[cfg(windows)]
+            Self::D3d11(picture) => picture.to_memory(),
         }
     }
 }

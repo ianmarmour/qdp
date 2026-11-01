@@ -74,7 +74,7 @@ impl<'a> BitReader<'a> {
 }
 
 // The frame header parser reads these too.
-#[cfg(test)]
+#[cfg(any(windows, test))]
 impl BitReader<'_> {
     /// Returns the number of bits read: AV1's `get_position()`.
     pub(crate) fn position(&self) -> usize {

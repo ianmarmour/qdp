@@ -125,7 +125,13 @@ impl FrameParser {
         Self::default()
     }
 
+    /// Returns the stream's sequence header, once one arrived.
+    pub(crate) fn sequence(&self) -> Option<&SequenceHeader> {
+        self.sequence.as_ref()
+    }
+
     /// Returns the reference slots, as the frames read so far left them.
+    #[cfg(test)]
     pub(crate) fn refs(&self) -> &[ReferenceSlot; NUM_REF_FRAMES] {
         &self.refs
     }

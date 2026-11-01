@@ -7,7 +7,8 @@
 //! - [`Av1Encoder`], the software encoder every platform can fall back on,
 //!   built on rav1e in low-latency mode.
 //! - [`open_decoder`], which opens the platform's hardware decoder when it has
-//!   one (VideoToolbox on macOS) and falls back to software otherwise.
+//!   one (VideoToolbox on macOS, MediaCodec on Android, D3D11 video on
+//!   Windows) and falls back to software otherwise.
 //! - [`Av1Decoder`], which decodes with rav1d, returning one picture per
 //!   temporal unit.
 //! - [`ProcessDecoder`], which decodes in a separate process running
@@ -23,14 +24,16 @@
 mod audio;
 mod backend;
 mod bits;
+// The DXVA structures' tests run everywhere; the decoder is Windows'.
+#[cfg(any(windows, test))]
+mod d3d11va;
 mod decoder;
 #[cfg(target_os = "linux")]
 mod dma_buf;
 mod encoder;
 mod frame;
-// Hardware decoders that are given frame headers parsed, as DXVA's are, will
-// use this; for now only its tests do.
-#[cfg(test)]
+// The DXVA decoder is given frame headers parsed.
+#[cfg(any(windows, test))]
 mod frame_parser;
 #[cfg(target_os = "linux")]
 mod headers;
@@ -55,6 +58,8 @@ pub use audio::{
 #[cfg(target_os = "linux")]
 pub use backend::encoder_takes_dma_bufs;
 pub use backend::{CodecPreference, VideoDecoder, VideoEncoder, open_decoder, open_encoder};
+#[cfg(windows)]
+pub use d3d11va::{D3d11Decoder, D3d11Picture, video_device};
 pub use decoder::Av1Decoder;
 #[cfg(target_os = "linux")]
 pub use dma_buf::{BufferIdentity, DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout};

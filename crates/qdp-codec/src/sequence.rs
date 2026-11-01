@@ -56,7 +56,7 @@ pub struct SequenceHeader {
     /// Whether frames may carry film grain (`film_grain_params_present`).
     pub film_grain: bool,
     /// The coding tools frames may use, which their headers depend on.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub(crate) coding: SequenceCoding,
     /// The whole sequence header OBU.
     obu: Vec<u8>,
