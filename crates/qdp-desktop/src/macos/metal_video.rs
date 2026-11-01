@@ -11,10 +11,12 @@
 //! wants, since a ProMotion display otherwise may not refresh faster than
 //! 60 Hz for it.
 //!
-//! At most one drawing waits to reach the screen. A picture that arrives
-//! while one waits is drawn once it is shown, rather than waiting for a free
-//! drawable on the main thread, which also reads the user's input: drawing
-//! it at once would show it no sooner.
+//! At most two drawings wait to reach the screen, which with the one shown
+//! are all the drawables a layer has. A picture that arrives while two wait
+//! is drawn once one is shown, rather than waiting for a free drawable on the
+//! main thread, which also reads the user's input. With only one waiting,
+//! a frame arriving a little early each refresh waited a refresh for the
+//! next, and a display at 120 Hz showed as few as 40 a second.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -147,8 +149,9 @@ const PLANE_SETS: usize = 3;
 /// drawings a layer has in flight.
 const PIXEL_BUFFER_PICTURES: usize = PLANE_SETS + 1;
 
-/// The drawings that may wait to reach the screen at once.
-const WAITING_DRAWINGS: usize = 1;
+/// The drawings that may wait to reach the screen at once: a layer's three
+/// drawables but the one shown.
+const WAITING_DRAWINGS: usize = 2;
 
 /// How long a drawing may wait to reach the screen before the next is drawn
 /// regardless, should macOS never say that it was shown.
