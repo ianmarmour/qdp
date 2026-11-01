@@ -41,6 +41,10 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Test the app's logic
+        shell: pwsh
+        run: dotnet test windows/QDP.Tests/QDP.Tests.csproj -c Release
+
       - name: Build the app
         shell: pwsh
         run: ./windows/build.ps1

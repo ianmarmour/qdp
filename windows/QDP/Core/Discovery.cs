@@ -6,18 +6,6 @@ using Windows.Devices.Enumeration;
 namespace Qdp.Core;
 
 /// <summary>
-/// A host on the local network: its service name, its address and port once
-/// resolved, the key pin it claims and whether it offers pairing. Nothing
-/// here is authenticated: the pin only recognizes a host already paired
-/// with, which the connection then verifies (Section 3.13).
-/// </summary>
-/// <param name="Name">Its DNS-SD instance name.</param>
-/// <param name="Address">Its address and port, once resolved.</param>
-/// <param name="Pin">The key pin it claims, if any.</param>
-/// <param name="Pairing">Whether it offers pairing.</param>
-internal sealed record DiscoveredHost(string Name, string? Address, string? Pin, bool Pairing);
-
-/// <summary>
 /// Finds QDP hosts on the local network through Windows' DNS-SD browser,
 /// telling of them on the UI thread.
 /// </summary>
