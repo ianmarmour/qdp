@@ -1111,19 +1111,22 @@ impl ActiveClient<'_> {
     }
 
     /// Presents the frames the decoders finished, and passes each stream's
-    /// next decodable frame to its decoder.
+    /// next decodable frame to its decoder. The next frame goes to the
+    /// decoder before the finished ones are presented, so that it decodes
+    /// while this thread presents rather than after.
     fn decode_ready(&mut self) -> Result<SinkControl, RuntimeError> {
         let mut keyframe_requests = Vec::new();
+        let mut finished = Vec::new();
         for (&stream_id, stream) in &mut self.streams {
             while let Some(decoded) = stream.decoder.try_result()? {
                 let frame_number = decoded.frame.frame_number;
                 match decoded.picture {
                     Ok(picture) => {
-                        // A hardware encoder may have padded the frame.
-                        let picture = picture.cropped(stream.size.0, stream.size.1);
                         stream
                             .receiver
                             .frame_decoded(frame_number, decoded.decoded_at);
+                        // A hardware encoder may have padded the frame.
+                        let picture = picture.cropped(stream.size.0, stream.size.1);
                         let latency = self
                             .sync
                             .peer_to_local(decoded.frame.header.capture_timestamp)
@@ -1135,17 +1138,7 @@ impl ActiveClient<'_> {
                             decoded_at: decoded.decoded_at,
                             decode_time: decoded.decode_time,
                         };
-                        self.summary.frames_presented += 1;
-                        let control = self.sink.present(&picture, info);
-                        self.input.set_display_config(stream.config_id);
-                        if self.sink.presentation_timing() == PresentationTiming::Immediate {
-                            stream
-                                .receiver
-                                .frame_presented(frame_number, Some(Instant::now()));
-                        }
-                        if control == SinkControl::Stop {
-                            return Ok(SinkControl::Stop);
-                        }
+                        finished.push((picture, info, stream.config_id));
                     }
                     Err(error) => {
                         warn!(%error, "decoding failed");
@@ -1170,6 +1163,22 @@ impl ActiveClient<'_> {
                 .send(&ControlMessage::KeyframeRequest(KeyframeRequest {
                     stream_id,
                 }))?;
+        }
+        for (picture, info, config_id) in finished {
+            self.summary.frames_presented += 1;
+            let (stream_id, frame_number) = (info.stream_id, info.frame_number);
+            let control = self.sink.present(picture, info);
+            self.input.set_display_config(config_id);
+            if self.sink.presentation_timing() == PresentationTiming::Immediate {
+                if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    stream
+                        .receiver
+                        .frame_presented(frame_number, Some(Instant::now()));
+                }
+            }
+            if control == SinkControl::Stop {
+                return Ok(SinkControl::Stop);
+            }
         }
         Ok(SinkControl::Continue)
     }

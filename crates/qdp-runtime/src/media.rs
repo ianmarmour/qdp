@@ -615,8 +615,10 @@ pub struct CursorWarp {
 
 /// Receives the frames a client decodes, such as a window that shows them.
 pub trait FrameSink {
-    /// Shows a decoded frame and says whether to keep streaming.
-    fn present(&mut self, frame: &Yuv420Frame, info: FrameInfo) -> SinkControl;
+    /// Shows a decoded frame and says whether to keep streaming. The sink
+    /// takes the frame, so that one that keeps it to draw later need not
+    /// copy it.
+    fn present(&mut self, frame: Yuv420Frame, info: FrameInfo) -> SinkControl;
 
     /// Returns when the sink shows the frames it is given.
     fn presentation_timing(&self) -> PresentationTiming {

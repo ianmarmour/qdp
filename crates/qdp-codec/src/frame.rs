@@ -266,6 +266,65 @@ impl Yuv420Frame {
         )
     }
 
+    /// Copies an NV12 picture, a luma plane of `luma_stride` bytes per row
+    /// and a plane of interleaved Cb and Cr of `chroma_stride` bytes per row,
+    /// as hardware decoders produce it, into a frame. Returns `None` if the
+    /// planes are too short for `width × height` pixels. Large pictures are
+    /// copied in bands of rows on several threads.
+    pub fn from_nv12(
+        width: usize,
+        height: usize,
+        (luma, luma_stride): (&[u8], usize),
+        (chroma, chroma_stride): (&[u8], usize),
+    ) -> Option<Self> {
+        let (chroma_width, chroma_height) = chroma_size(width, height);
+        if width == 0 || height == 0 || luma_stride < width || chroma_stride < 2 * chroma_width {
+            return None;
+        }
+        if luma.len() < luma_stride * (height - 1) + width
+            || chroma.len() < chroma_stride * (chroma_height - 1) + 2 * chroma_width
+        {
+            return None;
+        }
+        let mut frame = Self {
+            width,
+            height,
+            y: vec![0; width * height],
+            u: vec![0; chroma_width * chroma_height],
+            v: vec![0; chroma_width * chroma_height],
+        };
+        let chroma_rows_per_band = chroma_height.div_ceil(workers(width * height));
+        std::thread::scope(|scope| {
+            let bands = frame
+                .y
+                .chunks_mut(2 * chroma_rows_per_band * width)
+                .zip(frame.u.chunks_mut(chroma_rows_per_band * chroma_width))
+                .zip(frame.v.chunks_mut(chroma_rows_per_band * chroma_width));
+            for (index, ((y, u), v)) in bands.enumerate() {
+                let first_chroma_row = index * chroma_rows_per_band;
+                let luma = &luma[2 * first_chroma_row * luma_stride..];
+                let chroma = &chroma[first_chroma_row * chroma_stride..];
+                scope.spawn(move || {
+                    for (target, source) in y.chunks_mut(width).zip(luma.chunks(luma_stride)) {
+                        target.copy_from_slice(&source[..width]);
+                    }
+                    let rows = u
+                        .chunks_mut(chroma_width)
+                        .zip(v.chunks_mut(chroma_width))
+                        .zip(chroma.chunks(chroma_stride));
+                    for ((u, v), source) in rows {
+                        let pairs = source[..2 * chroma_width].chunks_exact(2);
+                        for ((u, v), pair) in u.iter_mut().zip(v.iter_mut()).zip(pairs) {
+                            *u = pair[0];
+                            *v = pair[1];
+                        }
+                    }
+                });
+            }
+        });
+        Some(frame)
+    }
+
     /// Converts a 32-bit RGB image, `stride` bytes per row, to a BT.709
     /// limited-range frame, as standard dynamic range QDP streams use. Chroma
     /// is the average of each 2 × 2 block. Returns `None` if `data` is too
@@ -440,6 +499,51 @@ fn chroma_size(width: usize, height: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An NV12 picture is copied plane by plane, padding left out and
+    /// chroma split, for sizes large enough to copy in bands and odd enough
+    /// not to split evenly.
+    #[test]
+    fn copies_nv12_in_bands() {
+        let (width, height) = (1283, 1081);
+        let (chroma_width, chroma_height) = chroma_size(width, height);
+        let (luma_stride, chroma_stride) = (1344, 1344);
+        let luma: Vec<u8> = (0..luma_stride * height)
+            .map(|index| (index % luma_stride % 251) as u8)
+            .collect();
+        let chroma: Vec<u8> = (0..chroma_stride * chroma_height)
+            .map(|index| (index / chroma_stride + index % chroma_stride) as u8)
+            .collect();
+        let frame = Yuv420Frame::from_nv12(
+            width,
+            height,
+            (&luma, luma_stride),
+            (&chroma, chroma_stride),
+        )
+        .unwrap();
+        for row in 0..height {
+            assert_eq!(
+                &frame.y()[row * width..(row + 1) * width],
+                &luma[row * luma_stride..row * luma_stride + width]
+            );
+        }
+        for row in 0..chroma_height {
+            for column in 0..chroma_width {
+                let pair = row * chroma_stride + 2 * column;
+                let sample = row * chroma_width + column;
+                assert_eq!(frame.u()[sample], chroma[pair], "Cb at {row}, {column}");
+                assert_eq!(frame.v()[sample], chroma[pair + 1], "Cr at {row}, {column}");
+            }
+        }
+        // Planes too short for the size are refused.
+        assert!(
+            Yuv420Frame::from_nv12(width, height, (&luma[..1000], luma_stride), (&chroma, 1344))
+                .is_none()
+        );
+        assert!(
+            Yuv420Frame::from_nv12(width, height, (&luma, width - 1), (&chroma, 1344)).is_none()
+        );
+    }
 
     /// Returns `length` bytes of varied content.
     fn noise(length: usize) -> Vec<u8> {

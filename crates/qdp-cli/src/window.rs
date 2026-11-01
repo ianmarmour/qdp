@@ -251,12 +251,12 @@ impl WindowSink {
 }
 
 impl FrameSink for WindowSink {
-    fn present(&mut self, frame: &Yuv420Frame, info: FrameInfo) -> SinkControl {
+    fn present(&mut self, frame: Yuv420Frame, info: FrameInfo) -> SinkControl {
         if self.close.is_closed() {
             return SinkControl::Stop;
         }
-        let control = self.inner.present(frame, info);
-        self.slot.put(frame.clone(), &info);
+        let control = self.inner.record(&frame, info);
+        self.slot.put(frame, &info);
         if self.proxy.send_event(WindowMessage::Frame).is_err() {
             // The event loop has ended, so the window is gone.
             return SinkControl::Stop;
