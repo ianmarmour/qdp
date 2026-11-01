@@ -657,6 +657,17 @@ impl WindowApp {
             display.window.set_cursor_visible(false);
             return;
         };
+        // On macOS, winit sizes a cursor's image in points, as many as its
+        // pixels, which a Retina display doubles: the window's pointer gets
+        // an image that much smaller, while the one drawn into the picture
+        // keeps its pixels.
+        #[cfg(target_os = "macos")]
+        let points = self
+            .cursor
+            .as_ref()
+            .map(|image| ScaledCursor::new(image, factor / display.window.scale_factor()));
+        #[cfg(target_os = "macos")]
+        let scaled = points.as_ref().unwrap_or(scaled);
         let narrow = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
         match CustomCursor::from_rgba(
             scaled.rgba.to_vec(),

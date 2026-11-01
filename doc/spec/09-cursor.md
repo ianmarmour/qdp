@@ -47,9 +47,12 @@ CURSOR_IMAGE Stream {
   extra bytes aborts reading it with STOP_SENDING carrying `QDP_PROTOCOL_VIOLATION`
   and ignores the image.
 
-The image is drawn so that it keeps its size relative to the session content: its
-displayed size is its pixel size × (the client display's scale ÷ the image's Scale)
-× (the width of the client's display area ÷ the host monitor's Width).
+The image is drawn so that it keeps its size relative to the session content, the
+size it has on the host's monitor: its displayed size is its pixel size × (the
+host monitor's Scale in the latest `DISPLAY_CONFIG` ÷ the image's Scale) × (the
+width of the client's display area ÷ the host monitor's Width). A cursor captured
+with the screen is drawn at the monitor's scale, so the host gives it the
+monitor's Scale.
 
 A client can receive a cursor image before it has processed `SESSION_START`,
 because QUIC does not order streams with the control stream. It buffers such

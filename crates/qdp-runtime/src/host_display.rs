@@ -170,6 +170,11 @@ impl HostDisplay {
         self.replan(self.plan.layout.capture, DisplayRequestId::NONE, stream_ids)
     }
 
+    /// Returns the captured monitor's interface scale.
+    pub(crate) fn scale(&self) -> DesktopScale {
+        self.scale
+    }
+
     /// Takes the captured monitor's new interface scale, which the next
     /// configuration carries.
     pub(crate) fn set_scale(&mut self, scale: DesktopScale) {
