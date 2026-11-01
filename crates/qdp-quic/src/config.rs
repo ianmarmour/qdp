@@ -3,12 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use quinn::congestion::BbrConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, IdleTimeout, ServerConfig, TransportConfig, VarInt};
 use rustls::client::Resumption;
 use rustls::crypto::CryptoProvider;
 use rustls::server::NoServerSessionStorage;
+
+use crate::congestion::FlooredBbrConfig;
 
 use crate::verify::ClientKeyVerifier;
 use crate::{KeyPin, PinnedKeyVerifier, TlsIdentity, TransportError};
@@ -76,8 +77,9 @@ fn transport_config(bidirectional_streams: u32) -> TransportConfig {
     // window is full, which a video stream rarely fills: on Wi-Fi, with random
     // loss, its window ratchets down to a few packets and large frames then
     // take many round trips. BBR also keeps queues short, as Section 5.5.1
-    // recommends.
-    config.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    // recommends. On a short path its window has a floor, which lets a large
+    // frame leave at once after the stream sent little.
+    config.congestion_controller_factory(Arc::new(FlooredBbrConfig::default()));
     config
 }
 
