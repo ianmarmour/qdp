@@ -207,11 +207,14 @@ impl AudioOutput for CpalOutput {
             sample_rate: SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Default,
         };
+        let stopped = playout.clone();
         let stream = device
             .build_output_stream(
                 config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| playout.pull(data),
-                |error: cpal::Error| warn!(%error, "audio playback failed"),
+                // A stream whose device went away, or stopped being the
+                // default, plays no more: the player starts another.
+                move |error: cpal::Error| stopped.stopped(error.to_string()),
                 None,
             )
             .map_err(|error| message("cannot play audio", error))?;
