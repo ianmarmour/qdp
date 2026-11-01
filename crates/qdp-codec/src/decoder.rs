@@ -87,6 +87,31 @@ impl Av1Decoder {
 
     /// Decodes one temporal unit and returns its picture.
     pub fn decode(&mut self, temporal_unit: &[u8]) -> Result<Yuv420Frame, CodecError> {
+        self.decode_with(temporal_unit, copy_picture)
+    }
+
+    /// Decodes one temporal unit and returns the header of the frame it
+    /// shows, as rav1d read it.
+    #[cfg(test)]
+    pub(crate) fn decode_frame_header(
+        &mut self,
+        temporal_unit: &[u8],
+    ) -> Result<rav1d::include::dav1d::headers::Dav1dFrameHeader, CodecError> {
+        self.decode_with(temporal_unit, |picture| {
+            let header = picture.frame_hdr.ok_or(CodecError::NoPicture)?;
+            // SAFETY: a picture's frame header is valid until the picture is
+            // released, which happens after this copy.
+            Ok(unsafe { header.as_ref() }.clone())
+        })
+    }
+
+    /// Decodes one temporal unit and returns what `read` makes of its
+    /// picture.
+    fn decode_with<T>(
+        &mut self,
+        temporal_unit: &[u8],
+        read: impl FnOnce(&Dav1dPicture) -> Result<T, CodecError>,
+    ) -> Result<T, CodecError> {
         if temporal_unit.is_empty() {
             return Err(CodecError::MalformedBitstream("empty temporal unit"));
         }
@@ -127,11 +152,11 @@ impl Av1Decoder {
         if !check(received.0, "get picture")? {
             return Err(CodecError::NoPicture);
         }
-        let frame = copy_picture(&picture);
+        let result = read(&picture);
         // SAFETY: `picture` was filled by `dav1d_get_picture` and is released
         // once, here.
         unsafe { dav1d_picture_unref(Some(NonNull::from(&mut picture))) };
-        frame
+        result
     }
 }
 
