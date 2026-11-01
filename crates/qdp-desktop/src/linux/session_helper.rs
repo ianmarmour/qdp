@@ -3,7 +3,9 @@
 //! session's notification service and its compositor's clipboard serve only
 //! the session's own user, so the host starts `qdp session-helper` as that
 //! user, in the session's environment, and asks it over a pipe: to show and
-//! take away notifications, and to read and replace the clipboard's text.
+//! take away notifications, to read and replace the clipboard's text, and to
+//! bring a monitor to the client's display through the compositor's display
+//! settings, and back.
 //!
 //! The host follows the session shown on `seat0`, starting a helper for its
 //! user when one is needed, and another when someone else logs in.
@@ -15,9 +17,9 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use qdp_runtime::Clipboard;
+use qdp_runtime::{Clipboard, WantedDisplay};
 use tracing::{debug, info};
 
 use super::seat::{SeatSession, seat_session};
@@ -46,6 +48,19 @@ const LOG_VARIABLE: &str = "QDP_LOG";
 /// What separates a message's fields.
 const FIELD_SEPARATOR: u8 = 0;
 
+/// How long a helper has to finish, putting back a monitor it changed,
+/// once its input closes, before it is ended.
+const HELPER_FINISH: Duration = Duration::from_secs(3);
+
+/// How often an ending helper is looked at.
+const HELPER_FINISH_POLL: Duration = Duration::from_millis(50);
+
+/// The file in the session's runtime directory where a monitor's own
+/// settings are kept while the helper changes them, so that a helper that
+/// ended without putting them back has the next one put them back.
+#[cfg(feature = "screen-capture")]
+const MONITOR_SETTINGS_FILE: &str = "qdp-monitor-settings";
+
 /// What a message asks or answers: its first byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
@@ -58,6 +73,12 @@ enum Kind {
     GetText,
     /// Replace the clipboard's text with the text given.
     SetText,
+    /// Bring a monitor to a display: its name, width, height, refresh rate
+    /// in millihertz and scale in percent, apart; done with the width and
+    /// height it took.
+    MatchDisplay,
+    /// Put back the monitor's own settings.
+    RestoreDisplay,
     /// Done, with the clipboard's text when it was read.
     Done,
     /// The clipboard holds no text.
@@ -68,11 +89,13 @@ enum Kind {
 
 impl Kind {
     /// Every kind with its byte.
-    const BYTES: [(Self, u8); 7] = [
+    const BYTES: [(Self, u8); 9] = [
         (Self::Notify, b'n'),
         (Self::Close, b'c'),
         (Self::GetText, b'g'),
         (Self::SetText, b's'),
+        (Self::MatchDisplay, b'm'),
+        (Self::RestoreDisplay, b'r'),
         (Self::Done, b'd'),
         (Self::Empty, b'e'),
         (Self::Failed, b'f'),
@@ -181,10 +204,60 @@ impl NotificationRequest {
     }
 }
 
+/// A monitor to bring to a display, as a message carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchRequest {
+    /// The monitor's name, such as `DP-3`.
+    monitor: String,
+    /// The display to bring it to.
+    wanted: WantedDisplay,
+}
+
+impl MatchRequest {
+    /// Returns the message's payload. The name's separators are dropped.
+    fn encode(&self) -> Vec<u8> {
+        let fields = [
+            self.monitor.replace(char::from(FIELD_SEPARATOR), ""),
+            self.wanted.width.to_string(),
+            self.wanted.height.to_string(),
+            self.wanted.refresh_millihertz.to_string(),
+            self.wanted.scale_percent.to_string(),
+        ];
+        fields.join("\0").into_bytes()
+    }
+
+    /// Reads a message's payload.
+    fn decode(payload: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(payload).ok()?;
+        let mut fields = text.split(char::from(FIELD_SEPARATOR));
+        let monitor = fields.next()?.to_owned();
+        let mut number = || fields.next()?.parse::<u32>().ok();
+        let wanted = WantedDisplay {
+            width: number()?,
+            height: number()?,
+            refresh_millihertz: number()?,
+            scale_percent: number()?,
+        };
+        Some(Self { monitor, wanted })
+    }
+}
+
+/// Returns a size's payload: its width and height, apart.
+fn encode_size((width, height): (u32, u32)) -> Vec<u8> {
+    format!("{width}\0{height}").into_bytes()
+}
+
+/// Reads a size's payload.
+fn decode_size(payload: &[u8]) -> Option<(u32, u32)> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let (width, height) = text.split_once(char::from(FIELD_SEPARATOR))?;
+    Some((width.parse().ok()?, height.parse().ok()?))
+}
+
 /// The helper's pipe: requests go in, answers come out, one at a time.
 struct Pipe {
-    /// Requests.
-    input: ChildStdin,
+    /// Requests, until the helper is asked to finish.
+    input: Option<ChildStdin>,
     /// Answers.
     output: BufReader<ChildStdout>,
     /// Whether it broke, as when the helper ended.
@@ -243,7 +316,7 @@ impl SessionHelper {
             uid: session.uid,
             process: Mutex::new(child),
             pipe: Mutex::new(Pipe {
-                input,
+                input: Some(input),
                 output: BufReader::new(output),
                 broken: false,
             }),
@@ -259,11 +332,12 @@ impl SessionHelper {
     /// Asks the helper `kind` with `payload`, and returns its answer.
     fn request(&self, kind: Kind, payload: &[u8]) -> Result<(Kind, Vec<u8>), String> {
         let mut pipe = lock(&self.pipe);
-        if pipe.broken {
+        let pipe = &mut *pipe;
+        let Some(input) = pipe.input.as_mut().filter(|_| !pipe.broken) else {
             return Err("the session's helper ended".to_owned());
-        }
-        let answer = write_message(&mut pipe.input, kind, payload)
-            .and_then(|()| read_message(&mut pipe.output));
+        };
+        let answer =
+            write_message(input, kind, payload).and_then(|()| read_message(&mut pipe.output));
         answer.map_err(|error| {
             pipe.broken = true;
             format!("the session's helper did not answer: {error}")
@@ -300,16 +374,46 @@ impl SessionHelper {
             number,
         })
     }
+
+    /// Brings the session's monitor named `monitor` as close to `wanted`
+    /// as its modes allow, and returns the size it took.
+    pub(crate) fn match_display(
+        &self,
+        monitor: &str,
+        wanted: &WantedDisplay,
+    ) -> Result<(u32, u32), String> {
+        let request = MatchRequest {
+            monitor: monitor.to_owned(),
+            wanted: *wanted,
+        };
+        let size = self.request_done(Kind::MatchDisplay, &request.encode())?;
+        decode_size(&size).ok_or_else(|| "the helper answered no size".to_owned())
+    }
+
+    /// Puts back the own settings of the monitor `match_display` changed.
+    pub(crate) fn restore_display(&self) {
+        if let Err(error) = self.request_done(Kind::RestoreDisplay, &[]) {
+            debug!(%error, "cannot put the monitor's own settings back");
+        }
+    }
 }
 
 impl Drop for SessionHelper {
     fn drop(&mut self) {
-        // The helper ends once its input closes; one that does not answer
-        // is ended.
+        // The helper finishes once its input closes, putting back a monitor
+        // it changed; one that does not finish in time is ended.
+        drop(lock(&self.pipe).input.take());
         let process = self
             .process
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner);
+        let deadline = Instant::now() + HELPER_FINISH;
+        while Instant::now() < deadline {
+            if !matches!(process.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(HELPER_FINISH_POLL);
+        }
         let _ = process.kill();
         let _ = process.wait();
     }
@@ -447,6 +551,7 @@ pub fn run_session_helper() -> Result<(), String> {
     let mut output = BufWriter::new(io::stdout().lock());
     let mut shown: HashMap<u64, crate::Notification> = HashMap::new();
     let mut clipboard: Option<SystemClipboard> = None;
+    let mut displays = Displays::new();
     loop {
         let (kind, payload) = match read_message(&mut input) {
             Ok(message) => message,
@@ -495,6 +600,17 @@ pub fn run_session_helper() -> Result<(), String> {
                     Err(error) => (Kind::Failed, error.into_bytes()),
                 }
             }
+            Kind::MatchDisplay => match MatchRequest::decode(&payload) {
+                Some(request) => match displays.match_display(&request) {
+                    Ok(size) => (Kind::Done, encode_size(size)),
+                    Err(error) => (Kind::Failed, error.into_bytes()),
+                },
+                None => (Kind::Failed, b"a malformed display".to_vec()),
+            },
+            Kind::RestoreDisplay => {
+                displays.restore();
+                (Kind::Done, Vec::new())
+            }
             Kind::Done | Kind::Empty | Kind::Failed => (
                 Kind::Failed,
                 b"the helper answers, it does not ask".to_vec(),
@@ -506,7 +622,71 @@ pub fn run_session_helper() -> Result<(), String> {
     for (_, notification) in shown.drain() {
         runtime.block_on(notification.close());
     }
+    displays.restore();
     Ok(())
+}
+
+/// The session's monitor the helper brings to the client's display, and
+/// puts back.
+struct Displays {
+    /// The monitor being changed.
+    #[cfg(feature = "screen-capture")]
+    matching: Option<super::monitor_matching::MonitorMatching>,
+}
+
+impl Displays {
+    /// Puts back the settings a helper that ended without putting them back
+    /// left changed, and returns no monitor changed yet.
+    fn new() -> Self {
+        #[cfg(feature = "screen-capture")]
+        if let Some(path) = monitor_settings_path() {
+            super::monitor_matching::restore_saved(&path);
+        }
+        Self {
+            #[cfg(feature = "screen-capture")]
+            matching: None,
+        }
+    }
+
+    /// Brings the monitor `request` names to its display, and returns the
+    /// size it took.
+    #[cfg(feature = "screen-capture")]
+    fn match_display(&mut self, request: &MatchRequest) -> Result<(u32, u32), String> {
+        if self.matching.is_none() {
+            let path = monitor_settings_path()
+                .ok_or("the session has no runtime directory to keep the monitor's settings in")?;
+            self.matching = Some(super::monitor_matching::MonitorMatching::new(
+                request.monitor.clone(),
+                path,
+            )?);
+        }
+        let matching = self
+            .matching
+            .as_mut()
+            .ok_or("the monitor cannot be changed")?;
+        let settings = matching.apply(&request.wanted)?;
+        Ok((settings.mode.width, settings.mode.height))
+    }
+
+    /// Fails: this build cannot change monitors.
+    #[cfg(not(feature = "screen-capture"))]
+    fn match_display(&mut self, _request: &MatchRequest) -> Result<(u32, u32), String> {
+        Err("this build cannot change monitors".to_owned())
+    }
+
+    /// Puts back the monitor's own settings, if they were changed.
+    fn restore(&mut self) {
+        #[cfg(feature = "screen-capture")]
+        drop(self.matching.take());
+    }
+}
+
+/// Returns where the monitor's own settings are kept while they are
+/// changed, in the session's runtime directory.
+#[cfg(feature = "screen-capture")]
+fn monitor_settings_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|directory| std::path::PathBuf::from(directory).join(MONITOR_SETTINGS_FILE))
 }
 
 /// Returns the session's clipboard, opening it the first time.
@@ -567,6 +747,24 @@ mod tests {
         assert_eq!(decoded.body, "Type 1234\non the phone.");
         assert!(NotificationRequest::decode(b"7\x00loud\x00100\x00a\x00b").is_none());
         assert!(NotificationRequest::decode(b"7\x00normal\x00100\x00a").is_none());
+    }
+
+    /// Display requests and sizes read back as written.
+    #[test]
+    fn encodes_display_requests() {
+        let request = MatchRequest {
+            monitor: "DP-3".to_owned(),
+            wanted: WantedDisplay {
+                width: 2560,
+                height: 1600,
+                refresh_millihertz: 120_000,
+                scale_percent: 200,
+            },
+        };
+        assert_eq!(MatchRequest::decode(&request.encode()), Some(request));
+        assert_eq!(MatchRequest::decode(b"DP-3\x002560\x001600"), None);
+        assert_eq!(decode_size(&encode_size((2560, 1600))), Some((2560, 1600)));
+        assert_eq!(decode_size(b"2560"), None);
     }
 
     /// Every kind reads back from its byte.

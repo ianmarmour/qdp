@@ -311,8 +311,11 @@ whoever's session it is, since driving the console is what the host is for. The
 frames stay in GPU memory for the hardware encoder, which the console needs
 unless its buffers are linear, including the 10-bit colour KDE and others scan
 out, which the GPU's video processor converts, and the pointer is read from the
-card's cursor plane. A display must be connected and on, a dummy plug standing
-in for one on a machine without a monitor. With several monitors, only the first
+card's cursor plane. With `--match-display on`, the display takes the client's
+mode and interface scale as it does when the host runs in the session: the
+session helper asks the compositor, and the display gets its own back when the
+session ends; at the login screen it keeps its own. A display must be connected
+and on, a dummy plug standing in for one on a machine without a monitor. With several monitors, only the first
 is streamed and the pointer assumes it is the whole desktop. A console stream
 plays the sound of the desktop session shown when it starts, through that
 user's PipeWire, and presents the client's microphone there; one that starts at

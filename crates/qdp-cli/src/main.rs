@@ -676,10 +676,7 @@ async fn open_source(
         return Ok(test_pattern());
     }
     if kind == SourceKind::Console {
-        if screen.matching == DisplayMatching::On {
-            warn!("the console keeps its display's mode; the host scales its frames");
-        }
-        let console = tokio::task::spawn_blocking(move || qdp_desktop::open_console(screen.frames))
+        let console = tokio::task::spawn_blocking(move || qdp_desktop::open_console(screen))
             .await
             .map_err(|error| error.to_string())??;
         return Ok((console, Streamed::Screen));
