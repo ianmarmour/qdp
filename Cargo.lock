@@ -2433,10 +2433,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "qdp-apple"
+version = "0.1.0"
+dependencies = [
+ "qdp",
+ "qdp-app",
+ "qdp-codec",
+ "qdp-desktop",
+ "qdp-quic",
+ "qdp-runtime",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "qdp-cli"
 version = "0.1.0"
 dependencies = [
  "qdp",
+ "qdp-app",
  "qdp-codec",
  "qdp-desktop",
  "qdp-quic",

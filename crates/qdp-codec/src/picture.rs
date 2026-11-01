@@ -10,7 +10,7 @@ pub enum DecodedPicture {
     Memory(Yuv420Frame),
     /// A picture in the pixel buffer VideoToolbox decoded into, which Metal
     /// draws from directly.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     PixelBuffer(crate::PixelBufferPicture),
     /// A picture MediaCodec decoded, rendered into the app's video surface
     /// when shown.
@@ -23,7 +23,7 @@ impl DecodedPicture {
     pub fn size(&self) -> (usize, usize) {
         match self {
             Self::Memory(frame) => (frame.width(), frame.height()),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             Self::PixelBuffer(picture) => picture.visible_size(),
             #[cfg(target_os = "android")]
             Self::Surface(picture) => picture.visible_size(),
@@ -35,7 +35,7 @@ impl DecodedPicture {
     pub fn cropped(self, width: usize, height: usize) -> Self {
         match self {
             Self::Memory(frame) => Self::Memory(frame.cropped(width, height)),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             Self::PixelBuffer(picture) => Self::PixelBuffer(picture.cropped(width, height)),
             #[cfg(target_os = "android")]
             Self::Surface(picture) => Self::Surface(picture.cropped(width, height)),
@@ -46,7 +46,7 @@ impl DecodedPicture {
     pub fn in_memory(&self) -> Option<&Yuv420Frame> {
         match self {
             Self::Memory(frame) => Some(frame),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             Self::PixelBuffer(_) => None,
             #[cfg(target_os = "android")]
             Self::Surface(_) => None,
@@ -61,7 +61,7 @@ impl DecodedPicture {
     ) -> Result<T, CodecError> {
         match self {
             Self::Memory(frame) => Ok(use_frame(frame)),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             Self::PixelBuffer(picture) => Ok(use_frame(&picture.to_memory()?)),
             #[cfg(target_os = "android")]
             Self::Surface(_) => Err(surface_unreadable()),
@@ -72,7 +72,7 @@ impl DecodedPicture {
     pub fn into_memory(self) -> Result<Yuv420Frame, CodecError> {
         match self {
             Self::Memory(frame) => Ok(frame),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             Self::PixelBuffer(picture) => picture.to_memory(),
             #[cfg(target_os = "android")]
             Self::Surface(_) => Err(surface_unreadable()),
