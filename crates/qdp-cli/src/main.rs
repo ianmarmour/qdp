@@ -10,8 +10,6 @@ mod args;
 mod color;
 #[cfg(feature = "window")]
 mod identity;
-#[cfg(feature = "window")]
-mod keymap;
 mod paired;
 mod sink;
 #[cfg(feature = "window")]
