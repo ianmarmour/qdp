@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Tells the hosts screen whether the device is on Wi-Fi to look for computers on. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Keeps Wi-Fi in its low-latency mode while streaming. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Gamepad rumble on the device's own motor. -->

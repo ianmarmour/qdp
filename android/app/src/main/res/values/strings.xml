@@ -9,11 +9,100 @@ verbs; errors give one cause and one next step. The UI says "computer";
 
     <!-- Shared actions. -->
     <string name="action_cancel">Cancel</string>
+    <string name="action_close">Close</string>
     <string name="action_back">Back</string>
+    <string name="action_connect">Connect</string>
+    <string name="action_pair">Pair</string>
     <string name="action_copy">Copy</string>
 
     <!-- Hosts screen. -->
+    <string name="home_title">Computers</string>
+    <string name="action_add_by_address">Add by address</string>
     <string name="action_settings">Settings</string>
+    <string name="action_setup_help">Setup help</string>
+    <string name="action_wifi_settings">Wi-Fi settings</string>
+    <string name="action_options">Options</string>
+    <string name="searching_inline">Looking for more computers on your Wi-Fi…</string>
+
+    <!-- A computer's status, on its card and read aloud. -->
+    <string name="status_ready">Ready</string>
+    <string name="status_ready_spoken">ready, paired</string>
+    <string name="status_not_seen">Not on this network</string>
+    <string name="status_not_seen_spoken">paired, not on this network</string>
+    <string name="status_new">New</string>
+    <string name="status_new_spoken">new, ready to pair</string>
+    <string name="status_pairing_off">Pairing is off</string>
+    <string name="status_pairing_off_spoken">new, pairing is off</string>
+    <string name="status_key_mismatch">Not the computer you paired with</string>
+    <string name="status_key_mismatch_spoken">warning, not the computer you paired with</string>
+    <string name="card_spoken">%1$s, %2$s</string>
+
+    <!-- What tapping a computer does. -->
+    <string name="action_try_anyway">Try anyway</string>
+    <string name="action_how_to_pair">How to pair</string>
+    <string name="action_learn_more">Learn more</string>
+    <string name="action_forget">Forget</string>
+    <string name="action_details">Details</string>
+
+    <!-- Searching, and nothing found. -->
+    <string name="searching_title">Looking for computers on your Wi-Fi…</string>
+    <string name="searching_body">Start QDP on your computer and it\'ll show up here.</string>
+    <string name="quiet_title">No computers found yet</string>
+    <string name="quiet_body">A few things to check:</string>
+    <string name="check_same_wifi">This device and your computer are on the same Wi-Fi</string>
+    <string name="check_qdp_running">QDP is running on your computer</string>
+    <string name="check_firewall">Your computer\'s firewall lets QDP through</string>
+    <string name="no_wifi_title">You\'re not on Wi-Fi</string>
+    <string name="no_wifi_body">Connect to the same Wi-Fi as your computer to find it here.</string>
+
+    <!-- Setup help. -->
+    <string name="setup_help_title">Set up your computer</string>
+    <string name="setup_help_step_install">Install QDP on your computer.</string>
+    <string name="setup_help_step_start">Start it there by running qdp serve.</string>
+    <string name="setup_help_step_wifi">Keep this device on the same Wi-Fi.</string>
+    <string name="setup_help_step_pair">Your computer shows up here. Tap it and enter the code it shows.</string>
+
+    <!-- A computer with pairing off. -->
+    <string name="pairing_off_title">Pairing is off on %1$s</string>
+    <string name="pairing_off_body">Pairing is off on %1$s. Turn it on there to pair.</string>
+    <string name="pairing_off_advanced" tools:ignore="TypographyDashes">Advanced: QDP pairs unless the host was started with --pairing off. You can also connect with its key pin and a token under Add by address.</string>
+
+    <!-- A computer that has a paired computer's name but another key. -->
+    <string name="mismatch_title">Not the %1$s you paired with</string>
+    <string name="mismatch_body">This isn\'t the %1$s you paired with, so QDP won\'t connect automatically.</string>
+    <string name="mismatch_pair_hint">If you trust it, you can pair with it as a new computer.</string>
+    <string name="action_pair_as_new">Pair as new</string>
+
+    <!-- Forgetting a computer. -->
+    <string name="forget_title">Forget %1$s?</string>
+    <string name="forget_body">To connect again, you\'ll pair with a new code.</string>
+
+    <!-- A computer's details. -->
+    <string name="details_address">Address</string>
+    <string name="details_status">Status</string>
+    <string name="details_key_pin">Key pin</string>
+    <string name="details_none">None advertised</string>
+
+    <!-- Adding a computer by its address. -->
+    <string name="add_body">Enter your computer\'s address to pair with it.</string>
+    <string name="add_address_label">Address</string>
+    <string name="add_address_hint">192.168.1.20 or desk.local</string>
+    <string name="add_address_error">Enter an address like 192.168.1.20 or desk.local</string>
+    <string name="add_advanced">Advanced</string>
+    <string name="add_advanced_body">Connect with the host\'s key pin, from qdp pin, and a token it accepts.</string>
+    <string name="add_pin_label">Key pin</string>
+    <string name="add_pin_error">A key pin is 64 hex digits, as qdp pin prints</string>
+    <string name="add_token_label">Token</string>
+    <string name="add_token_error">Enter the token the host accepts</string>
+    <string name="action_connect_with_token">Connect with token</string>
+
+    <!-- Gamepad hints. -->
+    <string name="hint_select">Select</string>
+    <string name="hint_add">Add</string>
+    <string name="button_a">A</string>
+    <string name="button_x">X</string>
+    <string name="button_y">Y</string>
+    <string name="button_start">Start</string>
 
     <!-- Settings. -->
     <string name="settings_stream">Stream</string>
