@@ -18,8 +18,9 @@
 //! [`PassthroughCapture`] passes the devices the user chose through,
 //! [`TouchpadCapture`] sends the touchpad's raw contacts, and
 //! [`lock_desktop`] locks the desktop when a session ends unexpectedly,
-//! [`advertise`] advertises the host on the local network, and [`notify`]
-//! shows the host's user a notification.
+//! [`host_privacy`] covers its displays and holds back its own input during
+//! one, [`advertise`] advertises the host on the local network, and
+//! [`notify`] shows the host's user a notification.
 
 mod advertise;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -32,6 +33,7 @@ mod cpal_audio;
 mod desktop_lock;
 #[cfg(feature = "gamepad")]
 mod gamepad;
+mod host_privacy;
 mod keyboard_layout;
 #[cfg(any(
     all(target_os = "linux", feature = "screen-capture"),
@@ -72,6 +74,7 @@ pub use clipboard::adopt_wayland_display;
 pub use desktop_lock::lock_desktop;
 #[cfg(feature = "gamepad")]
 pub use gamepad::GamepadCapture;
+pub use host_privacy::{HAS_PRIVACY, HostPrivacy, host_privacy};
 pub use keyboard_layout::keyboard_info;
 pub use lock_keys::lock_keys;
 pub use notification::{Notification, Urgency, notify};

@@ -7,6 +7,8 @@
 #![allow(unsafe_code)]
 
 use qdp::message::KeyboardLeds;
+use std::time::Duration;
+
 use qdp_desktop::{DesktopDuplication, SendInputInjector};
 use qdp_runtime::{FrameSource, InputAction, InputInjector, PointerButton};
 use windows::Win32::Foundation::POINT;
@@ -108,4 +110,51 @@ fn captures_the_screen() {
         let frame = capture.capture().unwrap();
         assert_eq!(frame.size(), (width, height));
     }
+}
+
+/// The luma at or below which a pixel counts as black, in limited range.
+const NEAR_BLACK: u8 = 24;
+
+/// How much more of a frame may be black with privacy's covers up than
+/// without, as the desktop changes meanwhile.
+const BLACK_TOLERANCE: f64 = 0.05;
+
+/// The share of a frame black enough that it could be a cover.
+const COVER_BLACK: f64 = 0.95;
+
+/// How long the desktop has to show privacy's covers.
+const COVERS_SHOWN: Duration = Duration::from_secs(1);
+
+/// Returns the share of `capture`'s next frame that is near black.
+fn black_share(capture: &mut DesktopDuplication) -> f64 {
+    let frame = capture.capture().unwrap();
+    let luma = frame
+        .in_memory()
+        .expect("Desktop Duplication captures to memory")
+        .y();
+    let black = luma.iter().filter(|&&value| value <= NEAR_BLACK).count();
+    black as f64 / luma.len() as f64
+}
+
+/// Privacy's covers hide the desktop from whoever is at it, but not from the
+/// stream: captures leave them out.
+#[test]
+#[ignore = "needs a desktop session on a graphics adapter"]
+fn privacy_stays_out_of_captures() {
+    let mut capture = DesktopDuplication::open().unwrap();
+    let uncovered = black_share(&mut capture);
+    assert!(
+        uncovered < COVER_BLACK,
+        "the desktop is too black ({uncovered:.2}) to tell a cover from it"
+    );
+    let privacy = qdp_desktop::host_privacy().unwrap();
+    std::thread::sleep(COVERS_SHOWN);
+    for _ in 0..3 {
+        let covered = black_share(&mut capture);
+        assert!(
+            covered <= uncovered + BLACK_TOLERANCE,
+            "the stream shows the covers: {covered:.2} black, from {uncovered:.2}"
+        );
+    }
+    drop(privacy);
 }

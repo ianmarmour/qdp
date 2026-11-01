@@ -21,28 +21,25 @@ use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW,
-    CreateSolidBrush, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK,
-    DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_WEIGHT, FW_NORMAL, FW_SEMIBOLD,
-    FillRect, GetMonitorInfoW, HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-    MonitorFromPoint, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT,
+    BeginPaint, CreateCompatibleDC, CreateSolidBrush, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_NOPREFIX,
+    DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FW_NORMAL, FW_SEMIBOLD, FillRect,
+    GetMonitorInfoW, HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+    PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
     SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    LWA_ALPHA, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNOACTIVATE,
-    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes,
-    SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage,
-    WDA_EXCLUDEFROMCAPTURE, WM_CLOSE, WM_DESTROY, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, LWA_ALPHA, PostMessageW,
+    PostQuitMessage, RegisterClassW, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetTimer, SetWindowDisplayAffinity,
+    SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WM_CLOSE, WM_DESTROY, WM_PAINT, WM_TIMER,
+    WNDCLASSW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
+use super::overlay::{self, BASE_DPI, OVERLAY_STYLES, scaled};
 use crate::notification::Urgency;
 
 /// A notice's width, in pixels at 100 % scale.
@@ -63,12 +60,6 @@ const SUMMARY_POINTS: i32 = 11;
 
 /// The body's size, in points.
 const BODY_POINTS: i32 = 10;
-
-/// The points in an inch, which fonts are sized in.
-const POINTS_PER_INCH: i32 = 72;
-
-/// The dots per inch of 100 % scale.
-const BASE_DPI: i32 = 96;
 
 /// A notice's opacity, of 255.
 const OPACITY: u8 = 240;
@@ -180,7 +171,7 @@ impl Notice {
                     }
                 };
                 let _ = created.send(Ok(window.0 as isize));
-                pump();
+                overlay::pump(|_| {});
                 CONTENT.with_borrow_mut(Option::take);
             })
             .map_err(|error| format!("cannot start the notice's thread: {error}"))?;
@@ -209,14 +200,11 @@ impl Notice {
     }
 }
 
-/// Registers the notices' window class once, returning this module's
+/// Registers the notices' window class once, returning this program's
 /// instance.
 fn register() -> Result<HINSTANCE, String> {
     static REGISTER: Once = Once::new();
-    // SAFETY: the call has no contract.
-    let module = unsafe { GetModuleHandleW(None) }
-        .map_err(|error| format!("cannot find this program's module: {error}"))?;
-    let instance = HINSTANCE(module.0);
+    let instance = overlay::instance()?;
     REGISTER.call_once(|| {
         let class = WNDCLASSW {
             lpfnWndProc: Some(procedure),
@@ -245,34 +233,6 @@ fn primary_work_area() -> (RECT, i32) {
         let (mut dpi, mut vertical_dpi) = (BASE_DPI as u32, BASE_DPI as u32);
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut vertical_dpi);
         (information.rcWork, dpi as i32)
-    }
-}
-
-/// Returns `pixels` at 100 % scale at `dpi`.
-fn scaled(pixels: i32, dpi: i32) -> i32 {
-    pixels * dpi / BASE_DPI
-}
-
-/// Makes Segoe UI of `points` and `weight` at `dpi`.
-fn font(points: i32, weight: FONT_WEIGHT, dpi: i32) -> HFONT {
-    // SAFETY: the arguments are valid; the call has no other contract.
-    unsafe {
-        CreateFontW(
-            -(points * dpi / POINTS_PER_INCH),
-            0,
-            0,
-            0,
-            weight.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            u32::from(FF_SWISS.0),
-            w!("Segoe UI"),
-        )
     }
 }
 
@@ -321,8 +281,8 @@ fn open(
     let width = scaled(WIDTH, dpi);
     let text_left = scaled(BAR_WIDTH + PADDING, dpi);
     let text_width = width - text_left - scaled(PADDING, dpi);
-    let summary_font = font(SUMMARY_POINTS, FW_SEMIBOLD, dpi);
-    let body_font = font(BODY_POINTS, FW_NORMAL, dpi);
+    let summary_font = overlay::font(SUMMARY_POINTS, FW_SEMIBOLD, dpi);
+    let body_font = overlay::font(BODY_POINTS, FW_NORMAL, dpi);
     // SAFETY: a memory device context for measuring, deleted below.
     let dc = unsafe { CreateCompatibleDC(None) };
     let summary_height = text_height(dc, summary_font, &mut summary, text_width);
@@ -363,7 +323,7 @@ fn open(
     // SAFETY: the class is registered, and the arguments are valid.
     let window = unsafe {
         CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+            OVERLAY_STYLES,
             CLASS,
             w!("QDP"),
             WS_POPUP,
@@ -404,20 +364,6 @@ fn open(
     // SAFETY: the window was made on this thread.
     let _ = unsafe { ShowWindow(window, SW_SHOWNOACTIVATE) };
     Ok(window)
-}
-
-/// Pumps this thread's messages until its notice is destroyed.
-fn pump() {
-    let mut message = MSG::default();
-    // SAFETY: the message is written before each call returns; GetMessageW
-    // returns 0 on WM_QUIT and -1 on failure, either of which ends the loop.
-    while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
-        // SAFETY: the message came from GetMessageW.
-        unsafe {
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
 }
 
 /// Takes `window` out of the stack, and moves those below it up.
@@ -517,7 +463,7 @@ mod tests {
     use std::time::Instant;
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowDisplayAffinity, GetWindowLongW, GetWindowRect, IsWindow,
-        IsWindowVisible,
+        IsWindowVisible, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     };
 
     /// The tests share the stack, so run one at a time.
