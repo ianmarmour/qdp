@@ -47,9 +47,6 @@ use qdp::gateway::{
 use qdp_quic::KeyPin;
 use serde::Deserialize;
 
-/// Where the gateway keeps its keys and TOTP secrets by default.
-const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/qdp-gateway";
-
 /// The placeholder in the user filter that the user's name replaces.
 pub const USER_PLACEHOLDER: &str = "{user}";
 
@@ -540,7 +537,7 @@ fn default_listen() -> SocketAddr {
 
 /// The state directory by default.
 fn default_state_directory() -> PathBuf {
-    PathBuf::from(DEFAULT_STATE_DIRECTORY)
+    crate::locations::default_state_directory()
 }
 
 /// The user filter by default.

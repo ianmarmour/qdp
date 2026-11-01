@@ -77,6 +77,8 @@ qdp-codec = { path = "crates/qdp-codec" }
 qdp-desktop = { path = "crates/qdp-desktop", default-features = false }
 qdp-quic = { path = "crates/qdp-quic" }
 qdp-runtime = { path = "crates/qdp-runtime" }
+# The Service Control Manager, for the gateway's Windows service.
+windows-service = { version = "0.8.1", default-features = false }
 # The X11 and Wayland clipboards, to find content password managers mark
 # secret, which arboard does not report.
 wl-clipboard-rs = { version = "0.9.3", default-features = false }

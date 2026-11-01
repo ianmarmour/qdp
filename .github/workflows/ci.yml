@@ -156,6 +156,24 @@ jobs:
             qdp-linux-x86_64.rpm
           if-no-files-found: error
 
+      - name: Build and package the gateway
+        if: github.event_name == 'push'
+        run: |
+          cargo build --release --locked -p qdp-gateway
+          tar -czf qdp-gateway-linux-x86_64.tar.gz -C target/release qdp-gateway
+          if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
+          packaging/linux/build-gateway-rpm.sh target/release/qdp-gateway "$release" \
+            qdp-gateway-linux-x86_64.rpm
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: qdp-gateway-linux-x86_64
+          path: |
+            qdp-gateway-linux-x86_64.tar.gz
+            qdp-gateway-linux-x86_64.rpm
+          if-no-files-found: error
+
   windows:
     name: Windows
     needs: changes
@@ -200,6 +218,19 @@ jobs:
         with:
           name: qdp-windows-x86_64
           path: qdp-windows-x86_64.zip
+          if-no-files-found: error
+
+      - name: Build and package the gateway
+        if: github.event_name == 'push'
+        run: |
+          cargo build --release --locked -p qdp-gateway
+          7z a qdp-gateway-windows-x86_64.zip ./target/release/qdp-gateway.exe
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: qdp-gateway-windows-x86_64
+          path: qdp-gateway-windows-x86_64.zip
           if-no-files-found: error
 
   macos:
@@ -372,6 +403,9 @@ jobs:
           | Linux RPM (x86-64; Fedora 40 or later, openSUSE Tumbleweed) | \`qdp-linux-x86_64.rpm\` |
           | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
           | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
+          | Gateway for Linux (x86-64) | \`qdp-gateway-linux-x86_64.tar.gz\` |
+          | Gateway RPM (x86-64; Fedora 40 or later, RHEL 9 or later) | \`qdp-gateway-linux-x86_64.rpm\` |
+          | Gateway for Windows (x86-64; Windows Server 2019 or later) | \`qdp-gateway-windows-x86_64.zip\` |
 
           The newest build is always at
           \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/FILE\`.
