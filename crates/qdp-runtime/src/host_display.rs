@@ -159,6 +159,27 @@ impl HostDisplay {
         self.replan(self.plan.layout.capture, request_id, stream_ids)
     }
 
+    /// Follows the captured monitor to a new interface scale with a
+    /// configuration the host makes on its own, answering no request.
+    pub(crate) fn rescaled(
+        &mut self,
+        scale: DesktopScale,
+        stream_ids: &mut StreamIds,
+    ) -> Result<StreamChange, RuntimeError> {
+        self.set_scale(scale);
+        self.replan(self.plan.layout.capture, DisplayRequestId::NONE, stream_ids)
+    }
+
+    /// Takes the captured monitor's new interface scale, which the next
+    /// configuration carries.
+    pub(crate) fn set_scale(&mut self, scale: DesktopScale) {
+        info!(
+            scale_percent = scale.percent(),
+            "the captured monitor's interface scale changed"
+        );
+        self.scale = scale;
+    }
+
     /// Follows the captured monitor to a new size with a configuration the
     /// host makes on its own, answering no request.
     pub(crate) fn capture_resized(

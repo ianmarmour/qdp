@@ -17,7 +17,9 @@ use tokio::sync::{Notify, oneshot};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::media::{CursorState, FrameSource, MonitorPlacement, WantedDisplay, changed_blocks};
+use crate::media::{
+    CursorState, DesktopScale, FrameSource, MonitorPlacement, WantedDisplay, changed_blocks,
+};
 
 /// The name of the encoder thread, as debuggers and profilers show it.
 const THREAD_NAME: &str = "qdp-encoder";
@@ -64,6 +66,8 @@ pub(crate) struct EncodedOutput {
     pub(crate) cursor: Option<CursorState>,
     /// Where the captured monitor was in the desktop, if the source knows.
     pub(crate) placement: Option<MonitorPlacement>,
+    /// The captured monitor's interface scale, if the source knows.
+    pub(crate) desktop_scale: Option<DesktopScale>,
 }
 
 /// A thread that owns the capture source and the encoder.
@@ -256,6 +260,7 @@ fn run(
                         capture_size: captured.capture_size,
                         cursor: captured.cursor.clone(),
                         placement: captured.placement,
+                        desktop_scale: captured.desktop_scale,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -283,6 +288,8 @@ struct Encoded {
     cursor: Option<CursorState>,
     /// Where the captured monitor is in the desktop, if the source knows.
     placement: Option<MonitorPlacement>,
+    /// The captured monitor's interface scale, if the source knows.
+    desktop_scale: Option<DesktopScale>,
     /// How long capturing and scaling took.
     scale_time: Duration,
     /// The encoded frames.
@@ -340,6 +347,7 @@ fn encode_one(
     };
     let cursor = source.cursor();
     let placement = source.monitor_placement();
+    let desktop_scale = source.desktop_scale();
     let scale_time = capture_started_at.elapsed();
     let encoded = opened.encoder.encode(&frame, job.request)?;
     Ok(Encoded {
@@ -347,6 +355,7 @@ fn encode_one(
         capture_size,
         cursor,
         placement,
+        desktop_scale,
         scale_time,
         encoded,
     })

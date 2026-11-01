@@ -2,8 +2,9 @@
 //! screen and performing the client's input on each operating system.
 //!
 //! - Linux: `ScreenCapture` captures a monitor through the ScreenCast portal
-//!   and PipeWire, and `UinputInjector` creates virtual keyboard, mouse and
-//!   pointer devices through uinput, which works under every Wayland
+//!   and PipeWire, and can change its mode and interface scale to the
+//!   client's display, and `UinputInjector` creates virtual keyboard, mouse
+//!   and pointer devices through uinput, which works under every Wayland
 //!   compositor and X11 server.
 //! - macOS: `MacScreenCapture` captures the main display with
 //!   ScreenCaptureKit, and `QuartzInjector` posts Quartz events.
@@ -35,6 +36,8 @@ mod linux;
 mod lock_keys;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(target_os = "linux", feature = "screen-capture"))]
+mod monitor_modes;
 mod passthrough;
 mod touchpad;
 #[cfg(windows)]
@@ -76,36 +79,97 @@ pub use win32::{DesktopDuplication, SendInputInjector, WindowPen};
 )]
 const RESTORE_TOKEN_FILE: &str = "screencast-restore-token";
 
+/// The file, in the host's state directory, that keeps the captured
+/// monitor's own settings while the host has changed them.
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "screen-capture")),
+    allow(dead_code)
+)]
+const MONITOR_SETTINGS_FILE: &str = "monitor-settings";
+
+/// Whether the captured monitor takes the client's display for a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DisplayMatching {
+    /// The monitor keeps its own mode and scale, and the host scales its
+    /// frames to the client's display.
+    #[default]
+    Off,
+    /// The monitor's mode and interface scale change to come as close to
+    /// the client's display as the monitor allows, and change back when the
+    /// session ends.
+    On,
+}
+
+/// Puts back the monitor settings that an earlier host, which stopped
+/// without putting them back, saved in `state_directory`.
+#[cfg(all(target_os = "linux", feature = "screen-capture"))]
+pub fn restore_monitor_settings(state_directory: &Path) {
+    linux::restore_monitor_settings(&state_directory.join(MONITOR_SETTINGS_FILE));
+}
+
+/// Puts back the monitor settings an earlier host saved; this platform
+/// changes none.
+#[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
+pub fn restore_monitor_settings(_state_directory: &Path) {}
+
 /// Starts capturing the screen, keeping in `state_directory` what lets later
 /// sessions start without asking the user again. Blocks until the first
-/// frame arrives, which may wait for the user to choose a monitor.
+/// frame arrives, which may wait for the user to choose a monitor. With
+/// `matching` on, the monitor takes the client's display for the session.
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
-pub fn open_screen(state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
+pub fn open_screen(
+    state_directory: &Path,
+    matching: DisplayMatching,
+) -> Result<Box<dyn FrameSource>, String> {
     let token_path = state_directory.join(RESTORE_TOKEN_FILE);
     let token = std::fs::read_to_string(&token_path)
         .ok()
         .map(|token| token.trim().to_owned())
         .filter(|token| !token.is_empty());
-    let capture = ScreenCapture::open(token)?;
+    let mut capture = ScreenCapture::open(token)?;
     if let Some(token) = capture.restore_token() {
         if let Err(error) = std::fs::write(&token_path, token) {
             warn!(%error, path = %token_path.display(), "cannot keep the screen sharing choice");
+        }
+    }
+    if matching == DisplayMatching::On {
+        let saved_path = state_directory.join(MONITOR_SETTINGS_FILE);
+        if let Err(error) = capture.match_displays(saved_path) {
+            warn!(%error, "the monitor keeps its own display; the host scales its frames");
         }
     }
     Ok(Box::new(capture))
 }
 
 /// Starts capturing the main display. Blocks until the first frame arrives.
+/// The display keeps its own mode on this platform.
 #[cfg(target_os = "macos")]
-pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
+pub fn open_screen(
+    _state_directory: &Path,
+    matching: DisplayMatching,
+) -> Result<Box<dyn FrameSource>, String> {
+    warn_unmatched(matching);
     Ok(Box::new(MacScreenCapture::open()?))
 }
 
 /// Starts capturing the primary monitor. Blocks until the first image
-/// arrives.
+/// arrives. The monitor keeps its own mode on this platform.
 #[cfg(windows)]
-pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
+pub fn open_screen(
+    _state_directory: &Path,
+    matching: DisplayMatching,
+) -> Result<Box<dyn FrameSource>, String> {
+    warn_unmatched(matching);
     Ok(Box::new(DesktopDuplication::open()?))
+}
+
+/// Says that the monitor keeps its own display, if matching was asked for on
+/// a platform that cannot yet.
+#[cfg(any(target_os = "macos", windows))]
+fn warn_unmatched(matching: DisplayMatching) {
+    if matching == DisplayMatching::On {
+        warn!("this platform cannot change the monitor to the client's display yet");
+    }
 }
 
 /// Starts capturing the screen; this platform cannot yet.
@@ -114,7 +178,10 @@ pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, Stri
     target_os = "macos",
     windows
 )))]
-pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
+pub fn open_screen(
+    _state_directory: &Path,
+    _matching: DisplayMatching,
+) -> Result<Box<dyn FrameSource>, String> {
     Err("screen capture is not supported on this platform yet".to_owned())
 }
 

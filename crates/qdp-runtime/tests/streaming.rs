@@ -22,13 +22,13 @@ use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdenti
 use qdp_runtime::{
     ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
     ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
-    DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameInfo, FrameSink, FrameSource,
-    GamepadFeedback, HostAudio, HostAuthenticator, HostDesktop, HostOptions, InputAction,
-    InputHandle, InputInjector, InputQueue, Microphone, NoInput, OpenedDesktop, PassthroughDevice,
-    PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton,
-    PointerPosition, Presentation, PresentationTiming, RefreshMode, ResumptionSlot, RuntimeError,
-    SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, TouchPhase, TouchPoint, UserInput,
-    WantedDisplay, WarpKind, input_channel, input_classes, run, serve,
+    DesktopScale, DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameInfo, FrameSink,
+    FrameSource, GamepadFeedback, HostAudio, HostAuthenticator, HostDesktop, HostOptions,
+    InputAction, InputHandle, InputInjector, InputQueue, Microphone, NoInput, OpenedDesktop,
+    PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect, Playout,
+    PointerButton, PointerPosition, Presentation, PresentationTiming, RefreshMode, ResumptionSlot,
+    RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern, TouchPhase, TouchPoint,
+    UserInput, WantedDisplay, WarpKind, input_channel, input_classes, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -888,6 +888,8 @@ async fn display_changes_during_the_session() {
 struct MatchingPattern {
     /// The frames, at the size last asked for.
     pattern: TestPattern,
+    /// The interface scale last asked for, once asked.
+    scale: Option<DesktopScale>,
     /// The displays the host asked for.
     asked: Arc<Mutex<Vec<WantedDisplay>>>,
 }
@@ -901,16 +903,40 @@ impl FrameSource for MatchingPattern {
         self.pattern.capture()
     }
 
+    fn desktop_scale(&self) -> Option<DesktopScale> {
+        self.scale
+    }
+
     fn match_display(&mut self, display: &WantedDisplay) -> bool {
         self.asked.lock().unwrap().push(*display);
         self.pattern = TestPattern::new(display.width as usize, display.height as usize);
+        self.scale = DesktopScale::from_widths(display.scale_percent as usize, 100);
         true
+    }
+}
+
+/// Keeps the interface scales the host tells the injector.
+#[derive(Debug, Clone, Default)]
+struct ScaleRecorder(Arc<Mutex<Vec<DesktopScale>>>);
+
+impl InputInjector for ScaleRecorder {
+    fn inject(&mut self, _action: &InputAction) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "scale recorder"
+    }
+
+    fn set_desktop_scale(&mut self, scale: DesktopScale) {
+        self.0.lock().unwrap().push(scale);
     }
 }
 
 /// A source that can take the client's display is asked for it before the
 /// first frame and again when the display changes, and the video is its
-/// frames at their own size: no scaling, so not the pattern's shape.
+/// frames at their own size: no scaling, so not the pattern's shape. The
+/// input follows the scale the source takes with each display.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn host_monitor_follows_the_display() {
     let mut authenticator = HostAuthenticator::new().unwrap();
@@ -918,12 +944,14 @@ async fn host_monitor_follows_the_display() {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let source = MatchingPattern {
         pattern: TestPattern::new(WIDTH, HEIGHT),
+        scale: None,
         asked: Arc::clone(&asked),
     };
+    let scales = ScaleRecorder::default();
     let (address, pin, host) = start_host(
         authenticator,
         Box::new(source),
-        Box::new(NoInput),
+        Box::new(scales.clone()),
         None,
         HostAudio::default(),
     );
@@ -946,6 +974,7 @@ async fn host_monitor_follows_the_display() {
     let second = DisplaySize {
         width: 160,
         height: 96,
+        scale_percent: 200,
         ..first
     };
     let options = ClientOptions {
@@ -993,6 +1022,14 @@ async fn host_monitor_follows_the_display() {
         "{sizes:?}"
     );
     assert_eq!(sizes.last(), Some(&(160, 96)), "{sizes:?}");
+    let percents: Vec<u32> = scales
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|scale| scale.percent())
+        .collect();
+    assert_eq!(percents, [150, 200]);
 }
 
 /// A test pattern whose monitor shrinks to half its size after a few
