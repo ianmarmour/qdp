@@ -356,9 +356,10 @@ The host:
   attempt starts again at step 1 with a new code;
 - allows at most one pairing exchange at a time, answering `FAILED_RETRY` to a
   pairing attempt while another is in progress;
-- after three consecutive failed exchanges, MUST refuse pairing for at least five
-  minutes, and MUST double that time after each further failure, until an exchange
-  succeeds or the host's user resets it. A user who mistypes waits minutes, while an
+- after three consecutive failed exchanges, MUST refuse pairing for at least one
+  minute; after a fourth for three minutes, and after a fifth for five; and after
+  each further failure for twice the time before, until an exchange succeeds or the
+  host's user resets it. A user who mistypes waits a minute or so, while an
   attacker who cannot see the host's display gets about twenty guesses in a year,
   each of which the host shows to its user: a chance of about 0.2%;
 - on success, records the client's key pin, with its Device Name, as authorized for
