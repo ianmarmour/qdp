@@ -1,6 +1,10 @@
-//! Host identities and key pins (Section 11.1).
+//! Host and client identities, their key pins (Section 11.1), and keeping
+//! them between runs.
 
 use std::fmt;
+use std::fs;
+use std::io;
+use std::path::Path;
 
 use ring::digest;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -9,6 +13,48 @@ use crate::TransportError;
 
 /// The length of a key pin: a SHA-256 digest.
 const PIN_LENGTH: usize = 32;
+
+/// Permissions of a kept private key on Unix: readable by its owner only.
+#[cfg(unix)]
+const KEY_FILE_MODE: u32 = 0o600;
+
+/// The files an identity is kept in, in a directory of its own, and the name
+/// its self-signed certificate is given, which is not checked: the key is
+/// pinned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdentityFiles {
+    /// The file of the DER-encoded certificate.
+    pub certificate: &'static str,
+    /// The file of the DER-encoded PKCS #8 private key.
+    pub private_key: &'static str,
+    /// The certificate's name.
+    pub name: &'static str,
+}
+
+impl IdentityFiles {
+    /// A host's identity, which clients pin.
+    pub const HOST: Self = Self {
+        certificate: "host-certificate.der",
+        private_key: "host-key.der",
+        name: "qdp-host",
+    };
+
+    /// A client's identity, which hosts accept by its key (Section 4.4.2).
+    pub const CLIENT: Self = Self {
+        certificate: "client-certificate.der",
+        private_key: "client-key.der",
+        name: "qdp-client",
+    };
+}
+
+/// Where a kept identity came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IdentityOrigin {
+    /// It was kept from an earlier run.
+    Loaded,
+    /// It was generated now, and kept.
+    Generated,
+}
 
 /// The SHA-256 hash of a host certificate's SubjectPublicKeyInfo, which a client
 /// that pins the host's key compares with the certificate it is shown
@@ -111,6 +157,29 @@ impl TlsIdentity {
         ))
     }
 
+    /// Returns the identity kept in `directory`, in `files`, generating and
+    /// keeping a new one if there is none; the private key is readable only
+    /// by its owner.
+    pub fn load_or_generate(
+        directory: &Path,
+        files: IdentityFiles,
+    ) -> io::Result<(Self, IdentityOrigin)> {
+        let certificate_path = directory.join(files.certificate);
+        let key_path = directory.join(files.private_key);
+        if certificate_path.exists() && key_path.exists() {
+            let identity = Self::from_der(fs::read(&certificate_path)?, fs::read(&key_path)?)
+                .map_err(io::Error::other)?;
+            return Ok((identity, IdentityOrigin::Loaded));
+        }
+        let identity =
+            Self::generate_self_signed(vec![files.name.to_owned()]).map_err(io::Error::other)?;
+        let (certificate, key) = identity.to_der().map_err(io::Error::other)?;
+        fs::create_dir_all(directory)?;
+        write_private(&key_path, &key)?;
+        fs::write(&certificate_path, certificate)?;
+        Ok((identity, IdentityOrigin::Generated))
+    }
+
     /// Returns a copy of the identity, for building more than one TLS
     /// configuration.
     pub fn clone_key(&self) -> Self {
@@ -121,9 +190,51 @@ impl TlsIdentity {
     }
 }
 
+/// Writes a new file that only its owner can read.
+fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(KEY_FILE_MODE);
+    }
+    options.open(path)?.write_all(contents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new identity is kept and the same one is loaded on the next run;
+    /// another kind in the same directory is another identity.
+    #[test]
+    fn keeps_identities() {
+        let directory =
+            std::env::temp_dir().join(format!("qdp-quic-identity-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let (first, origin) =
+            TlsIdentity::load_or_generate(&directory, IdentityFiles::HOST).unwrap();
+        assert_eq!(origin, IdentityOrigin::Generated);
+        let (second, origin) =
+            TlsIdentity::load_or_generate(&directory, IdentityFiles::HOST).unwrap();
+        assert_eq!(origin, IdentityOrigin::Loaded);
+        assert_eq!(first.key_pin().unwrap(), second.key_pin().unwrap());
+        let (client, _) = TlsIdentity::load_or_generate(&directory, IdentityFiles::CLIENT).unwrap();
+        assert_ne!(first.key_pin().unwrap(), client.key_pin().unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(directory.join(IdentityFiles::HOST.private_key))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, KEY_FILE_MODE);
+        }
+        fs::remove_dir_all(&directory).unwrap();
+    }
 
     /// A generated identity has a stable pin, distinct from another identity's.
     #[test]

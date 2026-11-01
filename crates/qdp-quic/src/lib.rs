@@ -32,7 +32,7 @@ pub use config::{HostVerification, client_config, host_config};
 pub use connection::{PathStats, QdpConnection};
 pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDriver};
 pub use endpoint::{ClientEndpoint, HostEndpoint, IncomingConnection};
-pub use identity::{KeyPin, TlsIdentity};
+pub use identity::{IdentityFiles, IdentityOrigin, KeyPin, TlsIdentity};
 pub use streams::{
     OutgoingStream, ReceivedStream, StreamChunk, StreamFailure, StreamLimit, StreamPolicy,
 };

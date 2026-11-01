@@ -9,8 +9,9 @@
 #![allow(unsafe_code)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::ptr;
-use std::sync::{Mutex, Once, PoisonError};
+use std::sync::{Mutex, Once, OnceLock, PoisonError};
 use std::time::Duration;
 
 use jni_sys::{
@@ -20,14 +21,15 @@ use jni_sys::{
 use ndk::native_window::NativeWindow;
 use qdp::message::DeviceFeatures;
 use qdp_codec::{CodecPreference, set_video_surface};
+use qdp_quic::{IdentityFiles, TlsIdentity};
 use qdp_runtime::{Focus, Microphone, PointerButton, TouchPhase, UserInput};
 use tracing::{info, warn};
 
 use crate::gamepad::GamepadState;
 use crate::keymap::{HidKey, hid_key};
 use crate::logcat;
-use crate::session::{Config, Session};
-use crate::settings::{display_size, parse_pin};
+use crate::session::{Authentication, Config, Session};
+use crate::settings::{display_size, format_pin, parse_pin};
 
 /// The `decoder` value of `connect` asking for MediaCodec, failing without
 /// it; any other value but [`DECODER_SOFTWARE`] decodes in hardware when the
@@ -37,8 +39,22 @@ const DECODER_HARDWARE: jint = 1;
 /// The `decoder` value of `connect` asking for the software decoder.
 const DECODER_SOFTWARE: jint = 2;
 
+/// The `authentication` value of `connect` presenting a token.
+const AUTH_TOKEN: jint = 0;
+
+/// The `authentication` value of `connect` for a host the device paired
+/// with, which accepts the device's key.
+const AUTH_PAIRED: jint = 1;
+
+/// The `authentication` value of `connect` pairing with the code the host
+/// shows.
+const AUTH_PAIR: jint = 2;
+
 /// The session, while one runs.
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+/// The app's private files directory, where the device's key is kept.
+static FILES_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 
 /// Sets up logging and the app's context once.
 static INIT: Once = Once::new();
@@ -126,14 +142,20 @@ fn count(value: jint) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
 
-/// Sets up logging, and gives the audio library the app's context.
+/// Sets up logging, gives the audio library the app's context, and keeps
+/// the app's private files directory, `files_directory`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_init(
     env: *mut JNIEnv,
     _class: jclass,
     context: jobject,
+    files_directory: jstring,
 ) {
     guarded((), || {
+        // SAFETY: the VM calls this with its environment and a live
+        // reference.
+        let directory = unsafe { read_string(env, files_directory) };
+        let _ = FILES_DIRECTORY.set(PathBuf::from(directory));
         INIT.call_once(|| {
             logcat::init();
             let mut vm: *mut JavaVM = ptr::null_mut();
@@ -154,10 +176,43 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_init(
     });
 }
 
-/// Starts a session with the host at `host`, whose key pin is `pin`, with
-/// `token`, showing the video in `surface` on a display of `width × height`
-/// pixels refreshing at `refresh_millihertz`. Returns `null` once it has
-/// started, or why it could not.
+/// Returns the app's private files directory, once `init` gave it.
+fn files_directory() -> Result<PathBuf, String> {
+    FILES_DIRECTORY
+        .get()
+        .cloned()
+        .ok_or_else(|| "the core was not given the app's files directory".to_owned())
+}
+
+/// Returns how a session authenticates: the `authentication` value of
+/// `connect`, the host's key pin `pin` and the token `token` where it takes
+/// them, and the device's name `device_name` for pairing.
+fn authentication(
+    authentication: jint,
+    pin: &str,
+    token: String,
+    device_name: String,
+) -> Result<Authentication, String> {
+    match authentication {
+        AUTH_TOKEN => Ok(Authentication::Token {
+            pin: parse_pin(pin)?,
+            token,
+        }),
+        AUTH_PAIRED => Ok(Authentication::Paired {
+            pin: parse_pin(pin)?,
+        }),
+        AUTH_PAIR => Ok(Authentication::Pair { device_name }),
+        other => Err(format!("unknown authentication {other}")),
+    }
+}
+
+/// Starts a session with the host at `host`, authenticating as
+/// `authentication` says (one of [`AUTH_TOKEN`], [`AUTH_PAIRED`] and
+/// [`AUTH_PAIR`]) with the host's key pin `pin`, `token` and the device's
+/// name `device_name` where it takes them, showing the video in `surface`
+/// on a display of `width × height` pixels refreshing at
+/// `refresh_millihertz`. Returns `null` once it has started, or why it
+/// could not.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
@@ -165,8 +220,10 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
     _class: jclass,
     surface: jobject,
     host: jstring,
+    authentication_kind: jint,
     pin: jstring,
     token: jstring,
+    device_name: jstring,
     width: jint,
     height: jint,
     refresh_millihertz: jint,
@@ -176,30 +233,35 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
     guarded(ptr::null_mut(), || {
         // SAFETY: the VM calls this with its environment and live
         // references.
-        let (host, pin, token, window) = unsafe {
+        let (host, pin, token, device_name, window) = unsafe {
             (
                 read_string(env, host),
                 read_string(env, pin),
                 read_string(env, token),
+                read_string(env, device_name),
                 NativeWindow::from_surface(env, surface),
             )
         };
-        let config = parse_pin(&pin).map(|pin| Config {
-            host,
-            pin,
-            token,
-            display: display_size(count(width), count(height), count(refresh_millihertz)),
-            decoder: match decoder {
-                DECODER_HARDWARE => CodecPreference::Hardware,
-                DECODER_SOFTWARE => CodecPreference::Software,
-                _ => CodecPreference::Auto,
+        let config = authentication(authentication_kind, &pin, token, device_name).and_then(
+            |authentication| {
+                Ok(Config {
+                    host,
+                    authentication,
+                    identity_directory: files_directory()?,
+                    display: display_size(count(width), count(height), count(refresh_millihertz)),
+                    decoder: match decoder {
+                        DECODER_HARDWARE => CodecPreference::Hardware,
+                        DECODER_SOFTWARE => CodecPreference::Software,
+                        _ => CodecPreference::Auto,
+                    },
+                    microphone: if flag(microphone) {
+                        Microphone::On
+                    } else {
+                        Microphone::Off
+                    },
+                })
             },
-            microphone: if flag(microphone) {
-                Microphone::On
-            } else {
-                Microphone::Off
-            },
-        });
+        );
         let started = config.and_then(|config| {
             let window = window.ok_or("the surface has no window")?;
             stop_session();
@@ -564,6 +626,53 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_releaseAll(
     _class: jclass,
 ) {
     guarded((), || send(UserInput::ReleaseAll));
+}
+
+/// Answers the session's request for a pairing code with `code`, or
+/// declines with `null`, which ends the session.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_pairingCode(
+    env: *mut JNIEnv,
+    _class: jclass,
+    code: jstring,
+) {
+    guarded((), || {
+        // SAFETY: the VM calls this with its environment and a live
+        // reference or null.
+        let code = (!code.is_null()).then(|| unsafe { read_string(env, code) });
+        if let Some(session) = SESSION
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            session.answer_pairing(code);
+        }
+    });
+}
+
+/// Returns the device's key pin, generating its key the first time, for a
+/// host to accept with `qdp serve --client-key`; or `null` if the key cannot
+/// be kept.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_clientPin(
+    env: *mut JNIEnv,
+    _class: jclass,
+) -> jstring {
+    guarded(ptr::null_mut(), || {
+        let pin = files_directory().and_then(|directory| {
+            let (identity, _) = TlsIdentity::load_or_generate(&directory, IdentityFiles::CLIENT)
+                .map_err(|error| error.to_string())?;
+            identity.key_pin().map_err(|error| error.to_string())
+        });
+        match pin {
+            // SAFETY: the VM calls this with its environment.
+            Ok(pin) => unsafe { new_string(env, &format_pin(pin)) },
+            Err(error) => {
+                warn!(%error, "cannot keep the device's key");
+                ptr::null_mut()
+            }
+        }
+    })
 }
 
 /// Returns whether `pin` is a key pin, for the app to check what the user

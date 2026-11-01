@@ -50,6 +50,15 @@ sealed interface SessionEvent {
         val decodeMillis: Float,
     )
 
+    /**
+     * Pairing needs the code the host shows, which [Native.pairingCode]
+     * answers; [retry] after a code that did not work.
+     */
+    data class PairingCode(val retry: Boolean) : SessionEvent
+
+    /** Pairing succeeded with the host whose key pin is [pin]. */
+    data class Paired(val pin: String) : SessionEvent
+
     /** The session ended normally. */
     data object Ended : SessionEvent
 
@@ -87,6 +96,8 @@ sealed interface SessionEvent {
                 "pointer" -> PointerMode(values[0] == "relative")
                 "rumble" -> Rumble(values[0].toInt(), values[1].toInt(), values[2].toInt())
                 "stats" -> Stats(values[0].toInt(), values[1].toFloatOrNull(), values[2].toFloat(), slowest(values.drop(3)))
+                "pair" -> PairingCode(values[0] == "retry")
+                "paired" -> Paired(values[0])
                 "ended" -> Ended
                 "failed" -> Failed(rest)
                 else -> null
