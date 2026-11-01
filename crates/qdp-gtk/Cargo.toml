@@ -1,0 +1,22 @@
+[package]
+name = "qdp-gtk"
+description = "QDP's Linux app: the computers to stream from, found on the network or paired with, pairing, and qdp connect for each stream"
+readme = "../../README.md"
+keywords = ["remote-desktop", "streaming", "gtk"]
+categories = ["network-programming", "gui"]
+version.workspace = true
+edition.workspace = true
+# gtk4-rs needs a newer Rust than the other crates.
+rust-version = "1.92"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The app runs on Linux only; elsewhere it builds to a stub, so that the
+# workspace builds on every platform.
+[target.'cfg(target_os = "linux")'.dependencies]
+adw.workspace = true
+gtk.workspace = true
+
+[lints]
+workspace = true
