@@ -316,7 +316,9 @@ mode and interface scale as it does when the host runs in the session: the
 session helper asks the compositor, and the display gets its own back when the
 session ends; at the login screen it keeps its own. A display must be connected
 and on, a dummy plug standing in for one on a machine without a monitor. With several monitors, only the first
-is streamed and the pointer assumes it is the whole desktop. A console stream
+is streamed; the session helper tells where it is among them, so that the
+pointer and touches land on it, while at the login screen the pointer assumes
+it is the whole desktop. A console stream
 plays the sound of the desktop session shown when it starts, through that
 user's PipeWire, and presents the client's microphone there; one that starts at
 the login screen has no sound until the device connects again. The clipboard

@@ -29,8 +29,8 @@ use qdp_codec::{
     DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout, DmaBufPlane, PixelDepth, Rgb32Order,
 };
 use qdp_runtime::{
-    CapturedFrame, CursorShape, CursorState, FrameArrivals, FrameSource, PointerPosition,
-    RuntimeError, WantedDisplay,
+    CapturedFrame, CursorShape, CursorState, DesktopScale, FrameArrivals, FrameSource,
+    MonitorPlacement, PointerPosition, RuntimeError, WantedDisplay,
 };
 use tracing::{debug, info, warn};
 
@@ -173,6 +173,9 @@ pub struct ConsoleCapture {
     watcher: Option<Watcher>,
     /// Whether the display takes the client's mode and scale.
     matching: DisplayMatching,
+    /// Where the display is among the desktop's monitors, which the
+    /// desktop session's helper tells, once there is one.
+    placement: Option<MonitorPlacement>,
     /// The helper that changed the display, which puts it back when the
     /// capture ends.
     #[cfg(feature = "notifications")]
@@ -220,8 +223,10 @@ impl ConsoleCapture {
                 matching: options.matching,
                 #[cfg(feature = "notifications")]
                 matched: None,
+                placement: None,
             };
             capture.capture().map_err(|error| error.to_string())?;
+            capture.refresh_placement();
             return Ok(capture);
         }
         Err(format!(
@@ -235,6 +240,40 @@ impl ConsoleCapture {
     fn target(&self) -> Target {
         *lock(&self.target)
     }
+
+    /// Asks the desktop session's helper where the display is among the
+    /// desktop's monitors, which the host places the client's pointer and
+    /// touches by: absolute pointing devices cover them all.
+    #[cfg(feature = "notifications")]
+    fn refresh_placement(&mut self) {
+        let Some(Ok(helper)) = super::console_helper() else {
+            self.placement = None;
+            return;
+        };
+        let monitor = self.target().name.to_string();
+        match helper.placement(&monitor) {
+            Ok(placement) => {
+                info!(
+                    monitor,
+                    x = placement.monitor.x,
+                    y = placement.monitor.y,
+                    width = placement.monitor.width,
+                    height = placement.monitor.height,
+                    "the display's place in the desktop"
+                );
+                self.placement = Some(placement);
+            }
+            Err(error) => {
+                debug!(%error, "the display's place in the desktop is not known");
+                self.placement = None;
+            }
+        }
+    }
+
+    /// Leaves the display's place unknown: without notifications, this build
+    /// has no session helper to ask.
+    #[cfg(not(feature = "notifications"))]
+    fn refresh_placement(&mut self) {}
 
     /// Reads framebuffer `id` as a frame, or returns the last frame again if
     /// it is the same buffer.
@@ -315,7 +354,9 @@ impl FrameSource for ConsoleCapture {
             if picture != 0 {
                 return self.read(picture);
             }
-            find_again(&self.card, self.access, &self.target);
+            if find_again(&self.card, self.access, &self.target) {
+                self.refresh_placement();
+            }
             if let Some((_, last)) = &self.last {
                 return Ok(last.clone());
             }
@@ -409,6 +450,8 @@ impl FrameSource for ConsoleCapture {
                 height, "the display did not show its new size in time"
             );
         }
+        // Its mode and scale change its place in the desktop.
+        self.refresh_placement();
         (display.width, display.height) == (width, height)
     }
 
@@ -420,6 +463,17 @@ impl FrameSource for ConsoleCapture {
             warn!("this build cannot change the display's mode; the host scales its frames");
         }
         false
+    }
+
+    fn monitor_placement(&self) -> Option<MonitorPlacement> {
+        self.placement
+    }
+
+    /// The display's pixel width over its width in the desktop's
+    /// coordinates.
+    fn desktop_scale(&self) -> Option<DesktopScale> {
+        let placement = self.placement?;
+        DesktopScale::from_widths(self.size.0, usize::try_from(placement.monitor.width).ok()?)
     }
 
     /// Watches the display refresh, telling the host each time its picture
