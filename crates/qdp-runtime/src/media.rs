@@ -679,8 +679,10 @@ pub trait FrameSink {
     }
 
     /// Shows the host's cursor image at the user's pointer, or hides the
-    /// pointer when `None` (Section 9.3). The image is the size it has on the
-    /// host's monitor.
+    /// pointer when `None` (Section 9.3). The image's Scale is relative to
+    /// the host monitor's: at 100 it is drawn at its pixel size scaled as
+    /// the video is, the size it has on the host's monitor, and at 200 at
+    /// half that.
     fn set_cursor(&mut self, cursor: Option<&CursorImage>) {
         let _ = cursor;
     }

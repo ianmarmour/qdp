@@ -70,12 +70,18 @@ impl ClientCursor {
     /// to keep drawing the previous cursor until the image arrives.
     pub(crate) fn set(&mut self, set: CursorSet) -> Option<CursorChange<'_>> {
         self.current = set;
-        if set.cursor_id == CursorId::HIDDEN {
+        self.shown()
+    }
+
+    /// Returns what the host's latest `CURSOR_SET` means to draw, or `None`
+    /// while its image has not arrived.
+    pub(crate) fn shown(&self) -> Option<CursorChange<'_>> {
+        if self.current.cursor_id == CursorId::HIDDEN {
             return Some(CursorChange::Hidden);
         }
         self.images
-            .get(&set.cursor_id)
-            .filter(|image| image.image_serial == set.image_serial)
+            .get(&self.current.cursor_id)
+            .filter(|image| image.image_serial == self.current.image_serial)
             .map(CursorChange::Shown)
     }
 }

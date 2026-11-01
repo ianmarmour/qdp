@@ -314,6 +314,9 @@ struct ActiveClient<'a> {
     cursor: ClientCursor,
     /// The desktop position of the monitor's top-left corner, in pixels.
     monitor_origin: (f64, f64),
+    /// The host monitor's interface scale, in percent, which cursor images'
+    /// Scale is made relative to.
+    monitor_scale: u32,
     /// Clipboard sharing, if the session negotiated it.
     clipboard: Option<ClipboardLink>,
     /// The audio streams.
@@ -481,6 +484,7 @@ async fn run_session(
         lock_keys: LockSync::default(),
         cursor: ClientCursor::default(),
         monitor_origin: (0.0, 0.0),
+        monitor_scale: DisplaySize::UNSCALED,
         clipboard,
         display,
         display_timing: DisplayTimingReports::default(),
@@ -515,12 +519,31 @@ fn host_stream_policy(header: &StreamHeader, clipboard_limit: Option<usize>) -> 
     }
 }
 
-/// Shows a cursor change in the sink.
-fn show_cursor(sink: &mut dyn FrameSink, change: CursorChange<'_>) {
+/// Shows a cursor change in the sink, the image's Scale made relative to
+/// the host monitor's, `monitor_scale` percent, as [`FrameSink::set_cursor`]
+/// takes it.
+fn show_cursor(sink: &mut dyn FrameSink, change: CursorChange<'_>, monitor_scale: u32) {
     match change {
         CursorChange::Hidden => sink.set_cursor(None),
-        CursorChange::Shown(image) => sink.set_cursor(Some(image)),
+        CursorChange::Shown(image) => {
+            let mut image = image.clone();
+            image.scale = relative_scale(image.scale, monitor_scale);
+            sink.set_cursor(Some(&image));
+        }
     }
+}
+
+/// Returns a cursor image's Scale, `image_scale` percent, relative to the
+/// host monitor's, `monitor_scale` percent: 100 for an image drawn at the
+/// monitor's scale, which is shown at the size it has on the monitor
+/// (Section 9.2).
+fn relative_scale(image_scale: VarInt, monitor_scale: u32) -> VarInt {
+    let relative = u128::from(image_scale.into_inner()) * u128::from(DisplaySize::UNSCALED)
+        / u128::from(monitor_scale.max(1));
+    u64::try_from(relative)
+        .ok()
+        .and_then(|relative| VarInt::new(relative).ok())
+        .unwrap_or(VarInt::MAX)
 }
 
 impl ActiveClient<'_> {
@@ -703,7 +726,7 @@ impl ActiveClient<'_> {
         match CursorImage::decode(&data) {
             Ok(image) => {
                 if let Some(change) = self.cursor.image(image) {
-                    show_cursor(self.sink, change);
+                    show_cursor(self.sink, change, self.monitor_scale);
                 }
             }
             Err(error) => warn!(%error, "malformed cursor image ignored"),
@@ -775,7 +798,7 @@ impl ActiveClient<'_> {
             }
             ControlMessage::CursorSet(set) => {
                 if let Some(change) = self.cursor.set(set) {
-                    show_cursor(self.sink, change);
+                    show_cursor(self.sink, change, self.monitor_scale);
                 }
             }
             ControlMessage::HidFeatureRequest(request) => self.handle_feature_request(request)?,
@@ -812,6 +835,20 @@ impl ActiveClient<'_> {
     /// Replaces the video streams with those of `config` (Section 6.3.1).
     fn configure(&mut self, config: &DisplayConfig) -> Result<(), RuntimeError> {
         self.monitor_id = config.monitors.first().map(|monitor| monitor.id);
+        let monitor_scale = config
+            .monitors
+            .first()
+            .map_or(DisplaySize::UNSCALED, |monitor| {
+                u32::try_from(monitor.scale.into_inner()).unwrap_or(u32::MAX)
+            });
+        if monitor_scale != self.monitor_scale {
+            // The cursor drawn keeps its size on the monitor at its new
+            // scale.
+            self.monitor_scale = monitor_scale;
+            if let Some(change) = self.cursor.shown() {
+                show_cursor(self.sink, change, monitor_scale);
+            }
+        }
         if let Some(monitor) = config.monitors.first() {
             let coordinate =
                 |value: SignedVarInt| i32::try_from(value.into_inner()).unwrap_or_default();
@@ -1269,4 +1306,22 @@ fn record_size(record: &FeedbackRecord) -> usize {
     let mut writer = qdp::wire::Writer::new();
     record.encode(&mut writer);
     writer.len() + RECORD_OVERHEAD
+}
+
+#[cfg(test)]
+mod tests {
+    use qdp::wire::VarInt;
+
+    /// A cursor image drawn at the monitor's scale is shown at its size on
+    /// the monitor, and one drawn at another scale keeps its size relative
+    /// to the monitor's.
+    #[test]
+    fn makes_cursor_scales_relative() {
+        let relative =
+            |image: u32, monitor: u32| super::relative_scale(VarInt::from_u32(image), monitor);
+        assert_eq!(relative(300, 300), VarInt::from_u32(100));
+        assert_eq!(relative(100, 300), VarInt::from_u32(33));
+        assert_eq!(relative(200, 100), VarInt::from_u32(200));
+        assert_eq!(relative(150, 0), VarInt::from_u32(15_000));
+    }
 }
