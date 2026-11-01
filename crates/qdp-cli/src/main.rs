@@ -100,6 +100,10 @@ const VIEWER_CLOSED: &str = "viewer closed";
 /// connections closed.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// How long the runtime waits, once the program's work is done, for its
+/// blocking tasks before the program exits without them.
+const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(1);
+
 /// An error that ends the program, with a message for the user.
 type CliResult = Result<(), String>;
 
@@ -189,13 +193,18 @@ fn adopt_session_display() {
 #[cfg(not(target_os = "linux"))]
 fn adopt_session_display() {}
 
-/// Runs `future` on a multi-threaded runtime.
+/// Runs `future` on a multi-threaded runtime. Blocking work still running
+/// once it completes, such as a session's screen capture still waiting for
+/// the user to choose a monitor, is left behind after [`RUNTIME_SHUTDOWN`]
+/// rather than waited for, so that the program always exits.
 fn run_async<T>(future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|error| format!("cannot start the runtime: {error}"))?
-        .block_on(future)
+        .map_err(|error| format!("cannot start the runtime: {error}"))?;
+    let result = runtime.block_on(future);
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    result
 }
 
 /// Prints the host's key pin, creating the identity if needed.
@@ -354,17 +363,25 @@ async fn serve(args: ServeArgs) -> CliResult {
         }
     }
     // The sessions return their devices to rest before the host exits
-    // (Section 4.7), and the clients learn why the connections closed.
+    // (Section 4.7), and the clients learn why the connections closed. A
+    // second Ctrl-C stops waiting for them; those still running are ended
+    // as the set of sessions is dropped.
     let ended = async { while sessions.join_next().await.is_some() {} };
-    if tokio::time::timeout(SHUTDOWN_GRACE, ended).await.is_err() {
-        warn!("sessions did not end in time");
+    tokio::select! {
+        ended = tokio::time::timeout(SHUTDOWN_GRACE, ended) => if ended.is_err() {
+            warn!("sessions did not end in time");
+        },
+        _ = tokio::signal::ctrl_c() => warn!("interrupted again; not waiting for the sessions"),
     }
+    drop(sessions);
     if match_display == DisplayMatching::On {
         // A session that did not end in time left the monitor changed.
         let directory = Arc::clone(&state_directory);
-        let _ =
-            tokio::task::spawn_blocking(move || qdp_desktop::restore_monitor_settings(&directory))
-                .await;
+        let restore =
+            tokio::task::spawn_blocking(move || qdp_desktop::restore_monitor_settings(&directory));
+        if tokio::time::timeout(SHUTDOWN_GRACE, restore).await.is_err() {
+            warn!("the monitor's own settings were not restored in time");
+        }
     }
     let _ = tokio::time::timeout(SHUTDOWN_GRACE, endpoint.wait_idle()).await;
     Ok(())

@@ -379,11 +379,22 @@ async fn serve_session(
     // Only now is the desktop opened, before the messages the client
     // pipelined are processed (Section 11.2); the clipboard is read from now
     // on, so that its content is known when the session becomes active.
+    // Opening can wait, as for the user to choose a monitor to share; a
+    // client that leaves meanwhile ends the session at once, rather than
+    // once the desktop has opened, which may be never.
+    let quic = driver.connection().quic().clone();
+    let opened = tokio::select! {
+        opened = open() => opened?,
+        reason = quic.closed() => {
+            info!(%reason, "the client left while the desktop opened");
+            return Ok(HostSummary::default());
+        }
+    };
     let OpenedDesktop {
         mut source,
         mut injector,
         lock,
-    } = open().await?;
+    } = opened;
     let worker = clipboard
         .map(|shared| ClipboardWorker::spawn(shared.clipboard))
         .transpose()
