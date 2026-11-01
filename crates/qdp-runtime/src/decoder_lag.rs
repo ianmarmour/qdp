@@ -25,6 +25,9 @@ const BEHIND_HOLD: Duration = Duration::from_secs(1);
 pub(crate) struct DecoderLag {
     /// The lags of the latest frames, oldest first.
     recent: VecDeque<Duration>,
+    /// When the latest frames were decoded, on the client's clock, in
+    /// microseconds, oldest first.
+    decoded: VecDeque<u64>,
     /// Until when the decoder counts as behind, if its frames have shown it.
     behind_until: Option<Instant>,
 }
@@ -50,8 +53,22 @@ impl DecoderLag {
         }
         self.recent
             .push_back(Duration::from_micros(decoded.saturating_sub(arrived)));
-        let least = self.recent.iter().min().copied().unwrap_or_default();
-        if self.recent.len() == LAG_FRAMES && least > frame_interval {
+        if self.decoded.len() == LAG_FRAMES {
+            self.decoded.pop_front();
+        }
+        self.decoded.push_back(decoded);
+        if self.recent.len() < LAG_FRAMES {
+            return;
+        }
+        let mut lags: Vec<Duration> = self.recent.iter().copied().collect();
+        lags.sort_unstable();
+        let (least, median) = (lags[0], lags[lags.len() / 2]);
+        // Every frame lagging shows a slow decoder, where a lost fragment
+        // delays only some. Once behind, the decoder stays so while most of
+        // its frames lag: holding frames back makes some arrive just as it
+        // is ready for them, without lag, though it is no faster.
+        let lagging = least > frame_interval || (self.is_behind(now) && median > frame_interval);
+        if lagging {
             self.behind_until = Some(now + BEHIND_HOLD);
         }
     }
@@ -60,6 +77,40 @@ impl DecoderLag {
     pub(crate) fn is_behind(&self, now: Instant) -> bool {
         self.behind_until.is_some_and(|until| now < until)
     }
+
+    /// Returns how long the client took to decode each of its latest
+    /// frames, on average, from when one was decoded to when the next was:
+    /// while it is behind, the pace at which it takes frames.
+    pub(crate) fn decode_interval(&self) -> Option<Duration> {
+        let (&first, &last) = (self.decoded.front()?, self.decoded.back()?);
+        let intervals = self.decoded.len() as u64 - 1;
+        (intervals > 0 && last > first).then(|| Duration::from_micros((last - first) / intervals))
+    }
+
+    /// Returns the client's decoder at `now`: behind, taking a frame about
+    /// every interval its frames show, or keeping up.
+    pub(crate) fn state(&self, now: Instant) -> ClientDecoder {
+        if self.is_behind(now) {
+            ClientDecoder::Behind {
+                pace: self.decode_interval(),
+            }
+        } else {
+            ClientDecoder::KeepingUp
+        }
+    }
+}
+
+/// How the client's decoder keeps up with the frames sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClientDecoder {
+    /// It decodes frames as fast as they arrive.
+    KeepingUp,
+    /// It decodes frames slower than they arrive.
+    Behind {
+        /// The time between its decoding one frame and the next, once its
+        /// frames have shown it.
+        pace: Option<Duration>,
+    },
 }
 
 #[cfg(test)]
@@ -101,7 +152,7 @@ mod tests {
     }
 
     /// A decoder slower than the frame rate makes every frame lag, and it
-    /// counts as behind until a while after its frames stop showing it.
+    /// counts as behind until a while after most of its frames stop lagging.
     #[test]
     fn slow_decoder_is_behind() {
         let now = Instant::now();
@@ -114,15 +165,69 @@ mod tests {
         lag.frame_timing(&record(200, 40), INTERVAL, now);
         assert!(lag.is_behind(now));
 
-        // Fast frames end it, once the hold has passed.
+        // One fast frame does not end it; once most frames are fast, the
+        // hold runs out.
         let later = now + BEHIND_HOLD / 2;
         lag.frame_timing(&record(300, 2), INTERVAL, later);
+        assert!(lag.is_behind(now + BEHIND_HOLD));
+        for frame in 0..LAG_FRAMES as u32 / 2 {
+            lag.frame_timing(&record(320 + frame * 17, 2), INTERVAL, later);
+        }
+        let renewed = later + BEHIND_HOLD;
         assert!(lag.is_behind(later));
-        assert!(!lag.is_behind(now + BEHIND_HOLD));
+        assert!(!lag.is_behind(renewed));
         // Records without times are ignored.
         let mut unknown = record(0, 0);
         unknown.decoded_time = Timestamp::default();
         lag.frame_timing(&unknown, INTERVAL, later);
         assert_eq!(lag.recent.len(), LAG_FRAMES);
+    }
+
+    /// A decoder that is behind stays behind while most of its frames lag,
+    /// though holding frames back lets some arrive just in time, without
+    /// lag; once most stop lagging, it is behind no more after the hold.
+    #[test]
+    fn stays_behind_while_most_frames_lag() {
+        let now = Instant::now();
+        let mut lag = DecoderLag::default();
+        for frame in 0..LAG_FRAMES as u32 {
+            lag.frame_timing(&record(1 + frame * 120, 120), INTERVAL, now);
+        }
+        assert!(lag.is_behind(now));
+        // Every third frame arrives just in time, for a few holds over.
+        let mut at = now;
+        for frame in 0..4 * LAG_FRAMES as u32 {
+            at += BEHIND_HOLD / 2;
+            let wait = if frame % 3 == 0 { 1 } else { 120 };
+            lag.frame_timing(&record(2000 + frame * 120, wait), INTERVAL, at);
+            assert!(lag.is_behind(at), "frame {frame}");
+        }
+        // Most frames stop lagging: the hold runs out.
+        for frame in 0..LAG_FRAMES as u32 {
+            let wait = if frame % 3 == 0 { 120 } else { 1 };
+            lag.frame_timing(&record(9000 + frame * 17, wait), INTERVAL, at);
+        }
+        assert!(!lag.is_behind(at + BEHIND_HOLD));
+    }
+
+    /// The pace of a slow decoder is the time between its frames' decoding,
+    /// whatever their lag.
+    #[test]
+    fn measures_the_decoders_pace() {
+        let now = Instant::now();
+        let mut lag = DecoderLag::default();
+        assert_eq!(lag.decode_interval(), None);
+        assert_eq!(lag.state(now), ClientDecoder::KeepingUp);
+        // Frames arriving every 17 ms are decoded every 40 ms.
+        for frame in 0..LAG_FRAMES as u32 {
+            lag.frame_timing(&record(1 + frame * 17, 40 + frame * 23), INTERVAL, now);
+        }
+        assert_eq!(lag.decode_interval(), Some(Duration::from_millis(40)));
+        assert_eq!(
+            lag.state(now),
+            ClientDecoder::Behind {
+                pace: Some(Duration::from_millis(40))
+            }
+        );
     }
 }
