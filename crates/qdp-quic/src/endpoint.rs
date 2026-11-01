@@ -133,6 +133,15 @@ impl ClientEndpoint {
         })
     }
 
+    /// Returns a client endpoint over `endpoint`, as one whose connections go
+    /// through a gateway's tunnel (Section 13.6).
+    pub(crate) fn from_quinn(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            identity: None,
+        }
+    }
+
     /// Presents `identity` to the hosts the endpoint connects to from now
     /// on, for the `CLIENT_CERTIFICATE` method (Section 4.4.2).
     pub fn set_identity(&mut self, identity: TlsIdentity) {
