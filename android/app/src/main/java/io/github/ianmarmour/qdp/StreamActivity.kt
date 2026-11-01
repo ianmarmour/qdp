@@ -240,7 +240,12 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             is SessionEvent.Rumble -> gamepads.rumble(event.slot, event.low, event.high)
             is SessionEvent.Stats -> {
                 val latency = event.latencyMillis?.let { "%.1f ms".format(it) } ?: "– ms"
-                statsView.text = "%d fps · %s · decode %.1f ms".format(event.fps, latency, event.decodeMillis)
+                val summary = "%d fps · %s · decode %.1f ms".format(event.fps, latency, event.decodeMillis)
+                // The slowest frame shows which stage a spike came from.
+                statsView.text = event.slowest?.let {
+                    summary + "\nslowest %.1f ms: host + network %.1f · transfer %.1f · waiting %.1f · decode %.1f"
+                        .format(it.latencyMillis, it.toFirstFragmentMillis, it.transferMillis, it.queuedMillis, it.decodeMillis)
+                } ?: summary
             }
             SessionEvent.Ended -> {
                 stop()

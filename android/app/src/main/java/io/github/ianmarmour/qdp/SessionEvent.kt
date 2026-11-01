@@ -29,8 +29,26 @@ sealed interface SessionEvent {
     /** A gamepad's rumble, each motor from 0 to 65535. */
     data class Rumble(val slot: Int, val low: Int, val high: Int) : SessionEvent
 
-    /** The last second's video. */
-    data class Stats(val fps: Int, val latencyMillis: Float?, val decodeMillis: Float) : SessionEvent
+    /** The last second's video, and its slowest frame if any frame's latency is known. */
+    data class Stats(
+        val fps: Int,
+        val latencyMillis: Float?,
+        val decodeMillis: Float,
+        val slowest: SlowestFrame?,
+    ) : SessionEvent
+
+    /**
+     * A second's slowest frame: its latency, and where it went, in
+     * milliseconds: from capture to its first fragment (the host's encoding
+     * and the network), its transfer, waiting for the decoder, and decoding.
+     */
+    data class SlowestFrame(
+        val latencyMillis: Float,
+        val toFirstFragmentMillis: Float,
+        val transferMillis: Float,
+        val queuedMillis: Float,
+        val decodeMillis: Float,
+    )
 
     /** The session ended normally. */
     data object Ended : SessionEvent
@@ -39,6 +57,18 @@ sealed interface SessionEvent {
     data class Failed(val error: String) : SessionEvent
 
     companion object {
+        /** Returns the slowest frame a `stats` line's last five values give, or `null` for dashes. */
+        private fun slowest(values: List<String>): SlowestFrame? {
+            val millis = values.map { it.toFloatOrNull() ?: return null }
+            if (millis.size < SLOWEST_VALUES) {
+                return null
+            }
+            return SlowestFrame(millis[0], millis[1], millis[2], millis[3], millis[4])
+        }
+
+        /** The values of a `stats` line's slowest frame. */
+        private const val SLOWEST_VALUES = 5
+
         /** Returns the event a line describes, or `null` for one this app does not know. */
         fun parse(line: String): SessionEvent? {
             val word = line.substringBefore(' ')
@@ -56,7 +86,7 @@ sealed interface SessionEvent {
                 "warp" -> Warp(values[0].toFloat(), values[1].toFloat(), values[2] == "move")
                 "pointer" -> PointerMode(values[0] == "relative")
                 "rumble" -> Rumble(values[0].toInt(), values[1].toInt(), values[2].toInt())
-                "stats" -> Stats(values[0].toInt(), values[1].toFloatOrNull(), values[2].toFloat())
+                "stats" -> Stats(values[0].toInt(), values[1].toFloatOrNull(), values[2].toFloat(), slowest(values.drop(3)))
                 "ended" -> Ended
                 "failed" -> Failed(rest)
                 else -> null
