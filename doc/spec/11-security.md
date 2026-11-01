@@ -15,6 +15,9 @@ certificate in one of these ways:
   broker or an administrator. Clients MUST support this method.
 - **Public key infrastructure**: the certificate chains to a trusted certificate
   authority and is valid for the host's name. Clients MAY support this method.
+- **Pairing**: the client pins the key of a host with which it completed a
+  `PAIRING` exchange ([Section 4.4.9](04-session.md#449-pairing-0x06)), using a code
+  its user read on the host. Clients SHOULD support this method.
 
 A client MAY offer trust on first use: showing the key's fingerprint to the user on
 the first connection and pinning it if the user accepts. It MUST then warn loudly,
@@ -50,6 +53,14 @@ connection presents the host's certificate and a changed pin always takes effect
   as the Keychain on Apple platforms, the Keystore on Android or the user's
   protected store on Windows and Linux. Hosts accept each at most once and only for
   the identity that earned it.
+- A pairing code is short so that users can type it, and is safe only because it is
+  used once, in an exchange that gives an attacker one guess
+  ([Section 4.4.9](04-session.md#449-pairing-0x06)): a passive observer learns
+  nothing about it, and an active one, on either side, learns only whether one
+  guess was right. Hosts therefore never accept a code twice, limit how often
+  pairing may be tried, backing off exponentially after failures, and show every
+  pairing request to their user, who can notice requests they did not make. A host that shows the code where people other
+  than its user can see it, such as on a shared screen, lets them pair.
 - Hosts MUST limit failed attempts per connection
   ([Section 4.4.1](04-session.md#441-messages)) and SHOULD limit them per source
   address and per user across connections. Hosts SHOULD send the same `Reason` for

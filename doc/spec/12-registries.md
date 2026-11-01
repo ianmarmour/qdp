@@ -110,7 +110,7 @@ plain cancellation of the stream.
 
 | Field | Values |
 |---|---|
-| Authentication method | 0x01 `CLIENT_CERTIFICATE`, 0x02 `TOKEN`, 0x03 `SCRAM_SHA_256_PLUS`, 0x04 `ANONYMOUS`, 0x05 `PASSWORD` |
+| Authentication method | 0x01 `CLIENT_CERTIFICATE`, 0x02 `TOKEN`, 0x03 `SCRAM_SHA_256_PLUS`, 0x04 `ANONYMOUS`, 0x05 `PASSWORD`, 0x06 `PAIRING` |
 | `HDR` capability formats (mask) | 0x01 BT.2020 with PQ, 0x02 BT.2020 with HLG |
 | Video stream flags (mask) | 0x01 `FULL_RANGE`, 0x02 `LOSSLESS` |
 | Video fragment flags (mask) | 0x01 `KEY_FRAME`, 0x02 `RECOVERY`, 0x04 `RETRANSMISSION`, 0x08 `LAST` |

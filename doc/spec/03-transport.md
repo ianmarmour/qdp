@@ -237,3 +237,35 @@ Ping ID 7 and Origin Timestamp 1,500,000 µs:
 07             Ping ID = 7
 80 16 e3 60    Origin Timestamp = 1500000 (4-byte form: 0x80000000 | 1500000)
 ```
+
+## 3.13 Local network discovery
+
+Hosts MAY advertise themselves on a local network with DNS-Based Service Discovery
+[RFC6763] over Multicast DNS [RFC6762], so that clients can list them without the
+user typing an address:
+
+- **Service type**: `_qdp._udp`, in the domain `local.`.
+- **Instance name**: the host's name for users, as in `HOST_HELLO`, at most 63
+  bytes.
+- **SRV record**: the UDP port the host listens on.
+- **TXT record** ([RFC6763], Section 6), with these keys:
+  - `alpn`: the ALPN tokens ([Section 3.2](#32-alpn)) the host accepts, separated
+    by commas, such as `qdp-draft-00`;
+  - `pin`: the host's key pin, the SHA-256 hash of its certificate's
+    SubjectPublicKeyInfo, as 64 lower-case hexadecimal digits;
+  - `pair`: `1` while the host offers `PAIRING`
+    ([Section 4.4.9](04-session.md#449-pairing-0x06)); absent otherwise.
+
+  Clients ignore keys they do not know.
+
+Discovery records are not authenticated: anyone on the network can advertise any
+name, address and pin. A client MUST NOT treat a discovered pin as verified. It MAY
+use it to recognize a host whose key it already pinned, which the TLS handshake then
+verifies against the stored pin, and SHOULD warn the user when a host advertises the
+name of a known host with another pin. A host whose key the client does not know is
+authenticated by pairing, or by any other means of
+[Section 11.1](11-security.md#111-host-authentication).
+
+Advertising tells the local network that a QDP host is there and its name. Hosts
+SHOULD let the administrator turn it off, and stop advertising when they stop
+accepting connections.
