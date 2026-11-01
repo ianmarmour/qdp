@@ -302,9 +302,11 @@ read from the framebuffers it scans out through DRM. Unlike the portal, which
 exists only inside a desktop session, it shows the login screen, the lock
 screen, any desktop and the text console, and follows the display as the login
 screen hands it to the desktop someone logs into, so that a device can log in
-and unlock as at the machine. Input reaches whatever shows through uinput as
-always. The frames stay in GPU memory for the hardware encoder, which the
-console needs unless its buffers are linear, and the pointer is read from the
+and unlock as at the machine. Input reaches whatever shows through uinput,
+whoever's session it is, since driving the console is what the host is for. The
+frames stay in GPU memory for the hardware encoder, which the console needs
+unless its buffers are linear, including the 10-bit colour KDE and others scan
+out, which the GPU's video processor converts, and the pointer is read from the
 card's cursor plane. A display must be connected and on, a dummy plug standing
 in for one on a machine without a monitor. With several monitors, only the first
 is streamed and the pointer assumes it is the whole desktop. A console stream

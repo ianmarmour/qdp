@@ -83,21 +83,37 @@ pub use notification::{Notification, Urgency, notify};
 pub use passthrough::{DeviceSelector, PassthroughCapture};
 pub use touchpad::TouchpadCapture;
 
+#[cfg(all(target_os = "linux", feature = "notifications"))]
+pub use linux::run_session_helper;
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 pub use linux::{ConsoleCapture, ScreenCapture};
 #[cfg(target_os = "linux")]
 pub use linux::{SeatSession, UinputInjector, seat_session};
-#[cfg(all(target_os = "linux", feature = "notifications"))]
-pub use linux::{follow_console_session, run_session_helper};
 
 /// The command, after the program's name, that runs the helper a host
 /// streaming the console starts in the person's desktop session.
 pub const SESSION_HELPER_COMMAND: &str = "session-helper";
 
-/// Has notifications and the clipboard reach the console's session; only
-/// Linux hosts stream the console.
-#[cfg(not(all(target_os = "linux", feature = "notifications")))]
-pub fn follow_console_session() {}
+/// Whether the host follows the console's session, as one streaming the
+/// console does.
+static FOLLOWS_CONSOLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Has the host follow the desktop session shown on the console, as one
+/// streaming the console from outside any session does: its input drives
+/// that session, as a keyboard and mouse at the machine would, and on Linux
+/// its notifications and clipboard are that session's, through a helper
+/// running as its user.
+pub fn follow_console_session() {
+    FOLLOWS_CONSOLE.store(true, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(all(target_os = "linux", feature = "notifications"))]
+    linux::follow_console_session();
+}
+
+/// Returns whether the host follows the console's session.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn follows_console() -> bool {
+    FOLLOWS_CONSOLE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Serves a host's requests in this desktop session; only Linux hosts
 /// stream the console and start helpers.
@@ -426,10 +442,11 @@ pub fn input_injector(width: u32, height: u32) -> Box<dyn InputInjector> {
 }
 
 /// Opens the platform's input injector: uinput on Linux, if its devices
-/// stay with this session (Section 8.2.5).
+/// stay with this session (Section 8.2.5), or the host follows the
+/// console's session, which it is there to drive.
 #[cfg(target_os = "linux")]
 fn platform_injector(width: u32, height: u32) -> Result<Box<dyn InputInjector>, String> {
-    if !linux::devices_confined() {
+    if !linux::devices_confined() && !follows_console() {
         return Err(
             "virtual input devices would reach another user's session on seat0; \
              only the session of seat0's active user can inject input"
