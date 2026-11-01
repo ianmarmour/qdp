@@ -1,7 +1,9 @@
 //! Choosing between the platform's hardware codecs and the software ones.
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+#[cfg(target_os = "linux")]
+use crate::DmaBufFrame;
 use crate::decoder::SOFTWARE_DECODER;
 use crate::{
     Av1Decoder, Av1Encoder, CodecError, EncodedFrame, EncoderSettings, KeyFrameRequest, Yuv420Frame,
@@ -16,6 +18,31 @@ pub trait VideoEncoder {
         frame: &Yuv420Frame,
         request: KeyFrameRequest,
     ) -> Result<Vec<EncodedFrame>, CodecError>;
+
+    /// Returns whether [`VideoEncoder::encode_dma_buf`] can encode frames
+    /// the GPU holds.
+    #[cfg(target_os = "linux")]
+    fn takes_dma_bufs(&self) -> bool {
+        false
+    }
+
+    /// Passes one frame the GPU holds to the encoder, scaling it to the
+    /// encoder's size, and returns the frames whose encoding has completed,
+    /// oldest first. Encoders that cannot read such frames, and frames they
+    /// cannot read, fail with [`CodecError::DmaBufUnsupported`], after
+    /// which the caller encodes frames in memory instead.
+    #[cfg(target_os = "linux")]
+    fn encode_dma_buf(
+        &mut self,
+        frame: &DmaBufFrame,
+        request: KeyFrameRequest,
+    ) -> Result<Vec<EncodedFrame>, CodecError> {
+        let _ = (frame, request);
+        Err(CodecError::DmaBufUnsupported(format!(
+            "{} reads frames in memory only",
+            self.description()
+        )))
+    }
 
     /// Sets the quantizer, from 0 (best) to 255, of the frames encoded from
     /// now on, as rate control asks (Section 5.5). An encoder that cannot
@@ -67,6 +94,41 @@ pub fn open_encoder(
         }
     }
     Ok(Box::new(Av1Encoder::new(settings)?))
+}
+
+/// The size of the encoder opened to find whether it takes frames the GPU
+/// holds: small, and one every hardware encoder supports.
+#[cfg(target_os = "linux")]
+const PROBE_SIZE: (usize, usize) = (1280, 720);
+
+/// Returns whether the encoder `preference` opens can encode frames the GPU
+/// holds, which a capture can then hand over as DMA-BUFs rather than copy
+/// into memory. The software encoder cannot; whether the hardware encoder
+/// can is found once, by opening it.
+#[cfg(target_os = "linux")]
+pub fn encoder_takes_dma_bufs(preference: CodecPreference) -> bool {
+    /// Whether the hardware encoder takes them, once found.
+    static HARDWARE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if preference == CodecPreference::Software {
+        return false;
+    }
+    *HARDWARE.get_or_init(|| {
+        let settings = EncoderSettings {
+            width: PROBE_SIZE.0,
+            height: PROBE_SIZE.1,
+            frame_rate: 60,
+            speed: crate::FASTEST_SPEED,
+            quantizer: 100,
+            threads: 1,
+        };
+        match open_hardware_encoder(settings) {
+            Ok(encoder) => encoder.takes_dma_bufs(),
+            Err(error) => {
+                debug!(%error, "no hardware encoder to take frames the GPU holds");
+                false
+            }
+        }
+    })
 }
 
 /// Opens a decoder as `preference` asks, using `threads` threads for software

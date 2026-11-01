@@ -26,6 +26,8 @@ mod backend;
 #[cfg(target_os = "linux")]
 mod bits;
 mod decoder;
+#[cfg(target_os = "linux")]
+mod dma_buf;
 mod encoder;
 mod frame;
 #[cfg(target_os = "linux")]
@@ -45,8 +47,12 @@ pub use audio::{
     AudioContent, AudioDecoder, AudioEncoder, AudioFormat, OPUS_MAX_CHANNELS, OPUS_SAMPLE_RATE,
     PCM_MAX_CHANNELS, open_audio_decoder, open_audio_encoder,
 };
+#[cfg(target_os = "linux")]
+pub use backend::encoder_takes_dma_bufs;
 pub use backend::{CodecPreference, VideoDecoder, VideoEncoder, open_decoder, open_encoder};
 pub use decoder::Av1Decoder;
+#[cfg(target_os = "linux")]
+pub use dma_buf::{BufferIdentity, DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout};
 pub use encoder::{
     Av1Encoder, EncodedFrame, EncoderSettings, FASTEST_SPEED, KeyFrameRequest, tile_count,
 };
@@ -84,6 +90,10 @@ pub enum CodecError {
     /// The decoded picture is not 8-bit 4:2:0.
     #[error("unsupported picture format")]
     UnsupportedFormat,
+    /// The encoder cannot read a frame the GPU holds, so frames must come
+    /// in memory instead.
+    #[error("the encoder cannot read frames the GPU holds: {0}")]
+    DmaBufUnsupported(String),
     /// A hardware codec cannot handle the stream, so software must.
     #[error("the hardware codec cannot be used: {0}")]
     HardwareUnavailable(String),

@@ -2,7 +2,8 @@
 //! loaded at run time so that `qdp` neither needs libva to build nor fails to
 //! start without it.
 //!
-//! The structures mirror `va.h` and `va_enc_av1.h`. Each C union of bit fields
+//! The structures mirror `va.h`, `va_enc_av1.h`, `va_vpp.h` and
+//! `va_drmcommon.h`. Each C union of bit fields
 //! is a plain integer here, whose bits the encoder sets with the shifts below;
 //! C compilers on Linux allocate bit fields from the least significant bit.
 //! The tests check every size and the offsets the encoder relies on against
@@ -100,6 +101,59 @@ pub(super) const PACKED_HEADER_TYPE_PICTURE: u32 = 2;
 
 /// The coded buffer status bit set when a frame did not fit the buffer.
 pub(super) const CODED_BUFFER_OVERFLOW: u32 = 0x100;
+
+/// `VAProfileNone`, the profile of video processing.
+pub(super) const PROFILE_NONE: c_int = -1;
+
+/// `VAEntrypointVideoProc`: scaling and colour conversion.
+pub(super) const ENTRYPOINT_VIDEO_PROC: c_int = 10;
+
+/// `VA_RT_FORMAT_RGB32`: surfaces of 32-bit RGB pixels.
+pub(super) const RT_FORMAT_RGB32: u32 = 0x0002_0000;
+
+/// `VA_FOURCC_BGRX`: blue, green, red and an unused byte.
+pub(super) const FOURCC_BGRX: u32 = u32::from_le_bytes(*b"BGRX");
+
+/// `VA_FOURCC_RGBX`: red, green, blue and an unused byte.
+pub(super) const FOURCC_RGBX: u32 = u32::from_le_bytes(*b"RGBX");
+
+/// `VASurfaceAttribPixelFormat`.
+pub(super) const SURFACE_ATTRIB_PIXEL_FORMAT: c_int = 1;
+
+/// `VASurfaceAttribMemoryType`.
+pub(super) const SURFACE_ATTRIB_MEMORY_TYPE: c_int = 6;
+
+/// `VASurfaceAttribExternalBufferDescriptor`.
+pub(super) const SURFACE_ATTRIB_EXTERNAL_BUFFER: c_int = 7;
+
+/// `VA_SURFACE_ATTRIB_SETTABLE`.
+pub(super) const SURFACE_ATTRIB_SETTABLE: u32 = 0x2;
+
+/// `VAGenericValueTypeInteger`.
+pub(super) const GENERIC_VALUE_INTEGER: c_int = 1;
+
+/// `VAGenericValueTypePointer`.
+pub(super) const GENERIC_VALUE_POINTER: c_int = 3;
+
+/// `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2`: memory a
+/// [`DrmPrimeSurfaceDescriptor`] describes.
+pub(super) const MEM_TYPE_DRM_PRIME_2: u32 = 0x4000_0000;
+
+/// `VAProcPipelineParameterBufferType`.
+pub(super) const BUFFER_PROC_PIPELINE_PARAMETERS: c_int = 41;
+
+/// `VAProcColorStandardBT709`.
+pub(super) const COLOR_STANDARD_BT709: c_int = 2;
+
+/// `VA_SOURCE_RANGE_REDUCED`: luma from 16 to 235, chroma from 16 to 240.
+pub(super) const SOURCE_RANGE_REDUCED: u8 = 1;
+
+/// `VA_SOURCE_RANGE_FULL`: every value from 0 to 255.
+pub(super) const SOURCE_RANGE_FULL: u8 = 2;
+
+/// The H.273 code of BT.709, for `colour_primaries`,
+/// `transfer_characteristics` and `matrix_coefficients`.
+pub(super) const H273_BT709: u8 = 1;
 
 /// Bit positions in `VAEncSequenceParameterBufferAV1::seq_fields`.
 pub(super) mod seq_fields {
@@ -437,6 +491,198 @@ pub(super) struct Image {
     pub(super) va_reserved: [u32; 4],
 }
 
+/// The value of a `VAGenericValue`: an integer or a pointer, as its type
+/// says.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) union GenericValueData {
+    /// `i`.
+    pub(super) i: i32,
+    /// `p`.
+    pub(super) p: *mut c_void,
+}
+
+/// `VAGenericValue`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct GenericValue {
+    /// `type`.
+    pub(super) value_type: c_int,
+    /// `value`.
+    pub(super) value: GenericValueData,
+}
+
+/// `VASurfaceAttrib`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct SurfaceAttrib {
+    /// `type`.
+    pub(super) attrib_type: c_int,
+    /// `flags`.
+    pub(super) flags: u32,
+    /// `value`.
+    pub(super) value: GenericValue,
+}
+
+impl SurfaceAttrib {
+    /// An integer attribute to create surfaces with.
+    pub(super) fn integer(attrib_type: c_int, value: i32) -> Self {
+        Self {
+            attrib_type,
+            flags: SURFACE_ATTRIB_SETTABLE,
+            value: GenericValue {
+                value_type: GENERIC_VALUE_INTEGER,
+                value: GenericValueData { i: value },
+            },
+        }
+    }
+
+    /// A pointer attribute to create surfaces with.
+    pub(super) fn pointer(attrib_type: c_int, value: *mut c_void) -> Self {
+        Self {
+            attrib_type,
+            flags: SURFACE_ATTRIB_SETTABLE,
+            value: GenericValue {
+                value_type: GENERIC_VALUE_POINTER,
+                value: GenericValueData { p: value },
+            },
+        }
+    }
+
+    /// Returns the integer value, if the attribute holds one.
+    pub(super) fn integer_value(&self) -> Option<i32> {
+        if self.value.value_type != GENERIC_VALUE_INTEGER {
+            return None;
+        }
+        // SAFETY: an integer attribute's value is its `i` member.
+        Some(unsafe { self.value.value.i })
+    }
+}
+
+/// One DRM object of a [`DrmPrimeSurfaceDescriptor`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DrmPrimeObject {
+    /// `fd`.
+    pub(super) fd: c_int,
+    /// `size`.
+    pub(super) size: u32,
+    /// `drm_format_modifier`.
+    pub(super) drm_format_modifier: u64,
+}
+
+/// One layer of a [`DrmPrimeSurfaceDescriptor`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DrmPrimeLayer {
+    /// `drm_format`.
+    pub(super) drm_format: u32,
+    /// `num_planes`.
+    pub(super) num_planes: u32,
+    /// `object_index`.
+    pub(super) object_index: [u32; 4],
+    /// `offset`.
+    pub(super) offset: [u32; 4],
+    /// `pitch`.
+    pub(super) pitch: [u32; 4],
+}
+
+/// `VADRMPRIMESurfaceDescriptor`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DrmPrimeSurfaceDescriptor {
+    /// `fourcc`.
+    pub(super) fourcc: u32,
+    /// `width`.
+    pub(super) width: u32,
+    /// `height`.
+    pub(super) height: u32,
+    /// `num_objects`.
+    pub(super) num_objects: u32,
+    /// `objects`.
+    pub(super) objects: [DrmPrimeObject; 4],
+    /// `num_layers`.
+    pub(super) num_layers: u32,
+    /// `layers`.
+    pub(super) layers: [DrmPrimeLayer; 4],
+}
+
+/// `VAProcColorProperties`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ProcColorProperties {
+    /// `chroma_sample_location`.
+    pub(super) chroma_sample_location: u8,
+    /// `color_range`.
+    pub(super) color_range: u8,
+    /// `colour_primaries`.
+    pub(super) colour_primaries: u8,
+    /// `transfer_characteristics`.
+    pub(super) transfer_characteristics: u8,
+    /// `matrix_coefficients`.
+    pub(super) matrix_coefficients: u8,
+    /// `reserved`.
+    pub(super) reserved: [u8; 3],
+}
+
+/// `VAProcPipelineParameterBuffer`, on 64-bit targets.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ProcPipelineParameters {
+    /// `surface`.
+    pub(super) surface: VaId,
+    /// `surface_region`: null for the whole surface.
+    pub(super) surface_region: *const c_void,
+    /// `surface_color_standard`.
+    pub(super) surface_color_standard: c_int,
+    /// `output_region`: null for the whole output.
+    pub(super) output_region: *const c_void,
+    /// `output_background_color`.
+    pub(super) output_background_color: u32,
+    /// `output_color_standard`.
+    pub(super) output_color_standard: c_int,
+    /// `pipeline_flags`.
+    pub(super) pipeline_flags: u32,
+    /// `filter_flags`.
+    pub(super) filter_flags: u32,
+    /// `filters`.
+    pub(super) filters: *mut VaId,
+    /// `num_filters`.
+    pub(super) num_filters: u32,
+    /// `forward_references`.
+    pub(super) forward_references: *mut VaId,
+    /// `num_forward_references`.
+    pub(super) num_forward_references: u32,
+    /// `backward_references`.
+    pub(super) backward_references: *mut VaId,
+    /// `num_backward_references`.
+    pub(super) num_backward_references: u32,
+    /// `rotation_state`.
+    pub(super) rotation_state: u32,
+    /// `blend_state`.
+    pub(super) blend_state: *const c_void,
+    /// `mirror_state`.
+    pub(super) mirror_state: u32,
+    /// `additional_outputs`.
+    pub(super) additional_outputs: *mut VaId,
+    /// `num_additional_outputs`.
+    pub(super) num_additional_outputs: u32,
+    /// `input_surface_flag`.
+    pub(super) input_surface_flag: u32,
+    /// `output_surface_flag`.
+    pub(super) output_surface_flag: u32,
+    /// `input_color_properties`.
+    pub(super) input_color_properties: ProcColorProperties,
+    /// `output_color_properties`.
+    pub(super) output_color_properties: ProcColorProperties,
+    /// `processing_mode`.
+    pub(super) processing_mode: c_int,
+    /// `output_hdr_metadata`.
+    pub(super) output_hdr_metadata: *mut c_void,
+    /// `va_reserved`: `VA_PADDING_LARGE - 16` words on 64-bit targets.
+    pub(super) va_reserved: [u32; 16],
+}
+
 /// A structure of plain integers and pointers, for which all zero bits is a
 /// valid value: zero, or null.
 pub(super) trait Zeroed: Copy {
@@ -454,6 +700,9 @@ impl Zeroed for TileGroupParameters {}
 impl Zeroed for PackedHeaderParameters {}
 impl Zeroed for ImageFormat {}
 impl Zeroed for Image {}
+impl Zeroed for DrmPrimeSurfaceDescriptor {}
+impl Zeroed for ProcColorProperties {}
+impl Zeroed for ProcPipelineParameters {}
 
 /// The libva functions the encoder calls.
 #[derive(Debug, Clone, Copy)]
@@ -558,6 +807,9 @@ pub(super) struct LibVa {
     ) -> VaStatus,
     /// `vaDestroyImage`.
     pub(super) destroy_image: unsafe extern "C" fn(VaDisplay, VaId) -> VaStatus,
+    /// `vaQuerySurfaceAttributes`.
+    pub(super) query_surface_attributes:
+        unsafe extern "C" fn(VaDisplay, VaId, *mut SurfaceAttrib, *mut c_uint) -> VaStatus,
 }
 
 /// The file name of libva.
@@ -660,6 +912,7 @@ fn load() -> Result<LibVa, String> {
             create_image: symbol(va, c"vaCreateImage")?,
             put_image: symbol(va, c"vaPutImage")?,
             destroy_image: symbol(va, c"vaDestroyImage")?,
+            query_surface_attributes: symbol(va, c"vaQuerySurfaceAttributes")?,
         })
     }
 }
@@ -722,6 +975,69 @@ mod tests {
         assert_eq!(offset_of!(Image, data_size), 60);
         assert_eq!(offset_of!(Image, pitches), 68);
         assert_eq!(offset_of!(Image, offsets), 80);
+        assert_eq!(size_of::<GenericValue>(), 16);
+        assert_eq!(offset_of!(GenericValue, value), 8);
+        assert_eq!(size_of::<SurfaceAttrib>(), 24);
+        assert_eq!(offset_of!(SurfaceAttrib, flags), 4);
+        assert_eq!(offset_of!(SurfaceAttrib, value), 8);
+        assert_eq!(size_of::<DrmPrimeSurfaceDescriptor>(), 312);
+        assert_eq!(offset_of!(DrmPrimeSurfaceDescriptor, objects), 16);
+        assert_eq!(offset_of!(DrmPrimeObject, drm_format_modifier), 8);
+        assert_eq!(size_of::<DrmPrimeObject>(), 16);
+        assert_eq!(offset_of!(DrmPrimeSurfaceDescriptor, num_layers), 80);
+        assert_eq!(offset_of!(DrmPrimeSurfaceDescriptor, layers), 84);
+        assert_eq!(offset_of!(DrmPrimeLayer, offset), 24);
+        assert_eq!(offset_of!(DrmPrimeLayer, pitch), 40);
+        assert_eq!(size_of::<DrmPrimeLayer>(), 56);
+        assert_eq!(size_of::<ProcColorProperties>(), 8);
+        assert_eq!(size_of::<ProcPipelineParameters>(), 224);
+        assert_eq!(offset_of!(ProcPipelineParameters, surface_region), 8);
+        assert_eq!(
+            offset_of!(ProcPipelineParameters, surface_color_standard),
+            16
+        );
+        assert_eq!(offset_of!(ProcPipelineParameters, output_region), 24);
+        assert_eq!(
+            offset_of!(ProcPipelineParameters, output_background_color),
+            32
+        );
+        assert_eq!(
+            offset_of!(ProcPipelineParameters, output_color_standard),
+            36
+        );
+        assert_eq!(offset_of!(ProcPipelineParameters, filter_flags), 44);
+        assert_eq!(offset_of!(ProcPipelineParameters, filters), 48);
+        assert_eq!(offset_of!(ProcPipelineParameters, num_filters), 56);
+        assert_eq!(offset_of!(ProcPipelineParameters, forward_references), 64);
+        assert_eq!(offset_of!(ProcPipelineParameters, backward_references), 80);
+        assert_eq!(offset_of!(ProcPipelineParameters, rotation_state), 92);
+        assert_eq!(offset_of!(ProcPipelineParameters, blend_state), 96);
+        assert_eq!(offset_of!(ProcPipelineParameters, mirror_state), 104);
+        assert_eq!(offset_of!(ProcPipelineParameters, additional_outputs), 112);
+        assert_eq!(
+            offset_of!(ProcPipelineParameters, num_additional_outputs),
+            120
+        );
+        assert_eq!(offset_of!(ProcPipelineParameters, input_surface_flag), 124);
+        assert_eq!(offset_of!(ProcPipelineParameters, output_surface_flag), 128);
+        assert_eq!(
+            offset_of!(ProcPipelineParameters, input_color_properties),
+            132
+        );
+        assert_eq!(
+            offset_of!(ProcPipelineParameters, output_color_properties),
+            140
+        );
+        assert_eq!(offset_of!(ProcPipelineParameters, processing_mode), 148);
+        assert_eq!(offset_of!(ProcPipelineParameters, output_hdr_metadata), 152);
+        assert_eq!(offset_of!(ProcPipelineParameters, va_reserved), 160);
+    }
+
+    /// The pixel formats match `va.h`.
+    #[test]
+    fn fourccs_match_the_c_headers() {
+        assert_eq!(FOURCC_BGRX, 0x5852_4742);
+        assert_eq!(FOURCC_RGBX, 0x5842_4752);
     }
 
     /// The bit positions match the C bit fields, as a C compiler packs them.
