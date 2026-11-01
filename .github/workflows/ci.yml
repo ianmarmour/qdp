@@ -124,9 +124,10 @@ jobs:
 
       # The streaming tests encode, send and decode video and audio in real
       # time, a host and a client each; macOS runners have three processors,
-      # too few to run them all at once and keep time, so two run at a time.
+      # too few to run even two at once and keep time, so they run one at a
+      # time.
       - name: Tests
-        run: cargo test --workspace --locked -- --test-threads=2
+        run: cargo test --workspace --locked -- --test-threads=1
 
       - name: Build the qdp command
         run: cargo build --release --locked -p qdp-cli
