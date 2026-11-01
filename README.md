@@ -39,7 +39,9 @@ cargo build --release
 ```
 
 On the host, serve. The host creates its key in `./qdp-identity` the first
-time, and listens on UDP port 4433 unless given `--listen`:
+time, listens on UDP port 4433 unless given `--listen`, and advertises itself
+on the local network with DNS-SD as `_qdp._udp`, so that clients such as the
+Android app list it (through Avahi on Linux; `--advertise off` stops it):
 
 ```bash
 ./target/release/qdp serve

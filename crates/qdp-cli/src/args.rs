@@ -38,6 +38,8 @@ Serve options:
   --pairing on|off     Let new clients pair by typing a four-digit code that
                        this host shows in its log; paired clients are kept
                        in the identity directory (default on)
+  --advertise on|off   Advertise this host on the local network with DNS-SD,
+                       so that clients list it (default on)
   --source KIND        auto, screen or test-pattern (default auto: the screen,
                        or the test pattern if it cannot be captured)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
@@ -196,6 +198,15 @@ pub enum PairingMode {
     Off,
 }
 
+/// Whether the host advertises itself on the local network (Section 3.13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdvertiseMode {
+    /// The host advertises itself while it serves.
+    On,
+    /// The host does not advertise itself.
+    Off,
+}
+
 /// How a client trusts the host's key (Section 11.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostTrust {
@@ -225,6 +236,8 @@ pub struct ServeArgs {
     pub listen: SocketAddr,
     /// Whether new clients may pair.
     pub pairing: PairingMode,
+    /// Whether the host advertises itself on the local network.
+    pub advertise: AdvertiseMode,
     /// The directory of the host's identity.
     pub identity: PathBuf,
     /// The accepted tokens.
@@ -529,6 +542,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
     let mut serve = ServeArgs {
         listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
         pairing: PairingMode::On,
+        advertise: AdvertiseMode::On,
         identity: PathBuf::from(DEFAULT_IDENTITY_DIR),
         tokens: Vec::new(),
         client_keys: Vec::new(),
@@ -597,6 +611,15 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     "off" => PairingMode::Off,
                     other => {
                         return Err(error(format!("--pairing must be on or off, not {other}")));
+                    }
+                }
+            }
+            "--advertise" => {
+                serve.advertise = match value("--advertise", &mut arguments)?.as_str() {
+                    "on" => AdvertiseMode::On,
+                    "off" => AdvertiseMode::Off,
+                    other => {
+                        return Err(error(format!("--advertise must be on or off, not {other}")));
                     }
                 }
             }
@@ -917,7 +940,8 @@ mod tests {
         assert_eq!(connect.device_name.as_deref(), Some("Thor"));
     }
 
-    /// `serve` pairs unless told not to; `clients` lists, or removes one.
+    /// `serve` pairs and advertises unless told not to; `clients` lists, or
+    /// removes one.
     #[test]
     fn pairing_options() {
         let pairing = |line: &str| match parse_line(line).unwrap() {
@@ -927,6 +951,13 @@ mod tests {
         assert_eq!(pairing("serve"), PairingMode::On);
         assert_eq!(pairing("serve --pairing off --token t"), PairingMode::Off);
         assert!(parse_line("serve --pairing maybe").is_err());
+        let advertise = |line: &str| match parse_line(line).unwrap() {
+            Command::Serve(serve) => serve.advertise,
+            other => panic!("expected serve, got {other:?}"),
+        };
+        assert_eq!(advertise("serve"), AdvertiseMode::On);
+        assert_eq!(advertise("serve --advertise off"), AdvertiseMode::Off);
+        assert!(parse_line("serve --advertise loudly").is_err());
         assert_eq!(
             parse_line("clients").unwrap(),
             Command::Clients {

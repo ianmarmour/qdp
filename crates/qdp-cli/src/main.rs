@@ -25,8 +25,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use qdp::discovery::{PairingOffer, ServiceRecord};
 use qdp_codec::{CodecPreference, DecoderCommand};
-use qdp_desktop::{DisplayMatching, FrameMemory, ScreenOptions};
+use qdp_desktop::{Advertisement, Advertising, DisplayMatching, FrameMemory, ScreenOptions};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
 use qdp_runtime::{
     Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
@@ -42,9 +43,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::args::{
-    Audio, ClientsAction, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, GpuCapture,
-    HostTrust, LockPolicy, PairingMode, Presentation, ServeArgs, SourceKind, USAGE, format_pin,
-    parse_args,
+    AdvertiseMode, Audio, ClientsAction, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement,
+    GpuCapture, HostTrust, LockPolicy, PairingMode, Presentation, ServeArgs, SourceKind, USAGE,
+    format_pin, parse_args,
 };
 use crate::identity::Role;
 use crate::paired::{Paired, PairedFile};
@@ -279,6 +280,10 @@ async fn serve(args: ServeArgs) -> CliResult {
         .local_address()
         .map_err(|error| error.to_string())?;
     info!(%address, pin = format_pin(pin), "serving; clients connect with --pin {}", format_pin(pin));
+    let advertising = match args.advertise {
+        AdvertiseMode::On => advertise(&options.host_name, address, pin, args.pairing).await,
+        AdvertiseMode::Off => None,
+    };
     let (width, height) = args.size;
     let source_kind = args.source;
     let clipboard_directions = args.clipboard;
@@ -379,6 +384,9 @@ async fn serve(args: ServeArgs) -> CliResult {
             }
         }
     }
+    if let Some(advertising) = advertising {
+        advertising.withdraw().await;
+    }
     // The sessions return their devices to rest before the host exits
     // (Section 4.7), and the clients learn why the connections closed. A
     // second Ctrl-C stops waiting for them; those still running are ended
@@ -402,6 +410,34 @@ async fn serve(args: ServeArgs) -> CliResult {
     }
     let _ = tokio::time::timeout(SHUTDOWN_GRACE, endpoint.wait_idle()).await;
     Ok(())
+}
+
+/// Advertises the host named `name`, listening on `address` with key `pin`,
+/// on the local network, and logs why if it cannot.
+async fn advertise(
+    name: &str,
+    address: SocketAddr,
+    pin: KeyPin,
+    pairing: PairingMode,
+) -> Option<Advertising> {
+    let advertisement = Advertisement {
+        name: name.to_owned(),
+        address,
+        record: ServiceRecord::new(
+            pin.0,
+            match pairing {
+                PairingMode::On => PairingOffer::Offered,
+                PairingMode::Off => PairingOffer::NotOffered,
+            },
+        ),
+    };
+    match qdp_desktop::advertise(advertisement).await {
+        Ok(advertising) => Some(advertising),
+        Err(error) => {
+            warn!(%error, "not advertising on the local network; clients connect by address");
+            None
+        }
+    }
 }
 
 /// Returns the client's audio devices, as the user asked for them.

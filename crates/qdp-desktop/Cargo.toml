@@ -11,11 +11,14 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["audio", "gamepad", "screen-capture"]
+default = ["audio", "discovery", "gamepad", "screen-capture"]
 # Plays and captures audio: through PipeWire on Linux, which needs PipeWire's
 # development files and libclang to build, and through cpal elsewhere,
 # AAudio on Android.
 audio = ["dep:cpal", "dep:pipewire"]
+# Advertises the host on the local network (Section 3.13): through Avahi on
+# Linux.
+discovery = ["dep:futures-lite", "dep:tokio", "dep:zbus"]
 # Captures the client's gamepads. On Linux it needs libudev's development
 # files to build.
 gamepad = ["dep:gilrs"]
@@ -46,6 +49,7 @@ arboard.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { workspace = true, features = ["wayland-data-control"] }
 ashpd = { workspace = true, optional = true }
+futures-lite = { workspace = true, optional = true }
 libc.workspace = true
 pipewire = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "sync"] }
@@ -56,6 +60,7 @@ bitflags = { workspace = true, optional = true }
 wayland-protocols-wlr = { workspace = true, optional = true }
 wl-clipboard-rs.workspace = true
 x11rb.workspace = true
+zbus = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true

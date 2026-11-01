@@ -17,8 +17,10 @@
 //! and capture through, `GamepadCapture` watches a client's gamepads,
 //! [`PassthroughCapture`] passes the devices the user chose through,
 //! [`TouchpadCapture`] sends the touchpad's raw contacts, and
-//! [`lock_desktop`] locks the desktop when a session ends unexpectedly.
+//! [`lock_desktop`] locks the desktop when a session ends unexpectedly, and
+//! [`advertise`] advertises the host on the local network.
 
+mod advertise;
 #[cfg(not(target_os = "android"))]
 mod clipboard;
 #[cfg(all(
@@ -55,6 +57,7 @@ use qdp_runtime::{
 };
 use tracing::warn;
 
+pub use advertise::{Advertisement, Advertising, advertise};
 #[cfg(not(target_os = "android"))]
 pub use clipboard::SystemClipboard;
 #[cfg(target_os = "linux")]

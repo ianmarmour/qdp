@@ -15,6 +15,8 @@
 //!   a client and a host (Section 4).
 //! - [`auth`] implements SCRAM-SHA-256-PLUS for the Auth Data of the session
 //!   (Section 4.4.4).
+//! - [`discovery`] describes the DNS-SD service hosts advertise on a local
+//!   network (Section 3.13).
 //! - [`video`] holds the sans-I/O logic of video streams: fragmentation,
 //!   reassembly, retransmission, loss recovery and composition (Section 6).
 //! - [`hid`] parses and validates the HID report descriptors of passthrough
@@ -25,6 +27,7 @@
 //!   estimation of the peer's clock offset (Sections 5.1 and 5.2).
 
 pub mod auth;
+pub mod discovery;
 pub mod hid;
 pub mod input;
 pub mod message;
