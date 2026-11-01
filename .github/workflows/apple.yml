@@ -1,0 +1,80 @@
+# Builds the Apple apps: the Rust core as an XCFramework, then the Mac app
+# and the iPhone and iPad app with Xcode. CI calls it for every change
+# merged into main; it can also be started by hand on any branch, which is
+# how changes to the apps are checked before they merge.
+name: Apple
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.97.0
+
+jobs:
+  apple:
+    name: Apple apps
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the newest Xcode
+        run: |
+          xcode=$(ls -d /Applications/Xcode_*.app | sort -V | tail -n 1)
+          sudo xcode-select --switch "$xcode"
+          xcodebuild -version
+          sw_vers
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --target aarch64-apple-ios --target aarch64-apple-ios-sim --target aarch64-apple-darwin
+          rustup default "$RUST_TOOLCHAIN"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: apple
+
+      - name: Build the core
+        run: ./apple/build-core.sh
+
+
+      - name: Generate the Xcode project
+        working-directory: apple
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build the Mac app
+        working-directory: apple
+        # Signed ad hoc until a Developer ID is set up; testers allow it in
+        # Privacy & Security settings the first time.
+        run: |
+          xcodebuild -project QDP.xcodeproj -scheme QDP-macOS -configuration Release \
+            -destination 'generic/platform=macOS' -derivedDataPath build \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+          ditto -c -k --keepParent build/Build/Products/Release/QDP.app ../qdp-macos-app.zip
+
+      - name: Build the iPhone and iPad app
+        working-directory: apple
+        # Unsigned: sideloading tools sign it with the user's own account,
+        # and the App Store build will be signed with the project's.
+        run: |
+          xcodebuild -project QDP.xcodeproj -scheme QDP-iOS -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/QDP.app Payload/
+          zip -qry ../qdp-ios-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qdp-apple
+          path: |
+            qdp-macos-app.zip
+            qdp-ios-unsigned.ipa
+          if-no-files-found: error
