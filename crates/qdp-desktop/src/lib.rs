@@ -83,10 +83,10 @@ pub use notification::{Notification, Urgency, notify};
 pub use passthrough::{DeviceSelector, PassthroughCapture};
 pub use touchpad::TouchpadCapture;
 
-#[cfg(target_os = "linux")]
-pub use linux::UinputInjector;
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 pub use linux::{ConsoleCapture, ScreenCapture};
+#[cfg(target_os = "linux")]
+pub use linux::{SeatSession, UinputInjector, seat_session};
 #[cfg(target_os = "macos")]
 pub use macos::{MacScreenCapture, QuartzInjector, mac_key_usage};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -258,6 +258,27 @@ pub fn host_audio() -> HostAudio {
     HostAudio {
         desktop: Some(Box::new(linux::PipeWireInput::desktop())),
         microphone: Some(Box::new(linux::PipeWireOutput::virtual_microphone())),
+    }
+}
+
+/// The name of a user's PipeWire socket in their runtime directory.
+#[cfg(all(feature = "audio", target_os = "linux"))]
+const PIPEWIRE_SOCKET: &str = "pipewire-0";
+
+/// Returns the audio devices of `session`, another user's desktop session,
+/// as a host running outside any session, as a system service does,
+/// streams: the session's sound, and a microphone its applications hear,
+/// through the session's PipeWire.
+#[cfg(all(feature = "audio", target_os = "linux"))]
+pub fn host_audio_in(session: &SeatSession) -> HostAudio {
+    let socket = session.runtime_directory.join(PIPEWIRE_SOCKET);
+    HostAudio {
+        desktop: Some(Box::new(
+            linux::PipeWireInput::desktop().through(socket.clone()),
+        )),
+        microphone: Some(Box::new(
+            linux::PipeWireOutput::virtual_microphone().through(socket),
+        )),
     }
 }
 

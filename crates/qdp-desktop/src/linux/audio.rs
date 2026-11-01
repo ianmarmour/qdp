@@ -2,6 +2,7 @@
 //! default output's monitor; a virtual microphone that applications record
 //! the client's microphone from; and a client's speakers and microphone.
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -153,14 +154,27 @@ impl Drop for StreamThread {
 }
 
 /// Starts a stream for `purpose` of `channels` channels on a thread of its
-/// own, and waits until it is connected.
-fn start(purpose: Purpose, channels: u16, endpoint: Endpoint) -> Result<ActiveDevice, String> {
+/// own, through the PipeWire at socket `remote` or the session's own, and
+/// waits until it is connected.
+fn start(
+    purpose: Purpose,
+    channels: u16,
+    endpoint: Endpoint,
+    remote: Option<PathBuf>,
+) -> Result<ActiveDevice, String> {
     let (stop, stop_receiver) = pw::channel::channel();
     let (connected, connected_receiver) = mpsc::channel();
     let thread = std::thread::Builder::new()
         .name(THREAD_NAME.to_owned())
         .spawn(move || {
-            if let Err(error) = run(purpose, channels, endpoint, stop_receiver, &connected) {
+            if let Err(error) = run(
+                purpose,
+                channels,
+                endpoint,
+                remote,
+                stop_receiver,
+                &connected,
+            ) {
                 let _ = connected.send(Err(error));
             }
         })
@@ -205,6 +219,7 @@ fn run(
     purpose: Purpose,
     channels: u16,
     endpoint: Endpoint,
+    remote: Option<PathBuf>,
     stop: pw::channel::Receiver<()>,
     connected: &mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
@@ -212,8 +227,13 @@ fn run(
     let main_loop = pw::main_loop::MainLoopRc::new(None).map_err(|error| error.to_string())?;
     let context =
         pw::context::ContextRc::new(&main_loop, None).map_err(|error| error.to_string())?;
+    let remote = remote.map(|socket| {
+        pw::properties::properties! {
+            *pw::keys::REMOTE_NAME => socket.to_string_lossy().into_owned(),
+        }
+    });
     let core = context
-        .connect_rc(None)
+        .connect_rc(remote)
         .map_err(|error| format!("cannot connect to PipeWire: {error}"))?;
     let stream = pw::stream::StreamBox::new(&core, "qdp-audio", purpose.properties())
         .map_err(|error| error.to_string())?;
@@ -296,6 +316,9 @@ pub struct PipeWireInput {
     channels: u16,
     /// Its name, for logs.
     description: &'static str,
+    /// The socket of the PipeWire it captures from, or `None` for the
+    /// session's own.
+    remote: Option<PathBuf>,
 }
 
 impl PipeWireInput {
@@ -306,6 +329,7 @@ impl PipeWireInput {
             purpose: Purpose::Desktop,
             channels: 2,
             description: "PipeWire desktop audio",
+            remote: None,
         }
     }
 
@@ -315,6 +339,16 @@ impl PipeWireInput {
             purpose: Purpose::Microphone,
             channels: 1,
             description: "PipeWire microphone",
+            remote: None,
+        }
+    }
+
+    /// Returns the input capturing through the PipeWire at `socket`, such
+    /// as another user's session's, rather than this session's.
+    pub fn through(self, socket: PathBuf) -> Self {
+        Self {
+            remote: Some(socket),
+            ..self
         }
     }
 }
@@ -325,7 +359,12 @@ impl AudioInput for PipeWireInput {
     }
 
     fn start(&mut self, capture: CaptureSink) -> Result<ActiveDevice, String> {
-        start(self.purpose, self.channels, Endpoint::Capture(capture))
+        start(
+            self.purpose,
+            self.channels,
+            Endpoint::Capture(capture),
+            self.remote.clone(),
+        )
     }
 
     fn description(&self) -> &str {
@@ -343,6 +382,9 @@ pub struct PipeWireOutput {
     channels: u16,
     /// Its name, for logs.
     description: &'static str,
+    /// The socket of the PipeWire it plays through, or `None` for the
+    /// session's own.
+    remote: Option<PathBuf>,
 }
 
 impl PipeWireOutput {
@@ -353,6 +395,7 @@ impl PipeWireOutput {
             purpose: Purpose::Speakers,
             channels: 2,
             description: "PipeWire speakers",
+            remote: None,
         }
     }
 
@@ -363,6 +406,16 @@ impl PipeWireOutput {
             purpose: Purpose::VirtualMicrophone,
             channels: 1,
             description: "PipeWire virtual microphone",
+            remote: None,
+        }
+    }
+
+    /// Returns the output playing through the PipeWire at `socket`, such
+    /// as another user's session's, rather than this session's.
+    pub fn through(self, socket: PathBuf) -> Self {
+        Self {
+            remote: Some(socket),
+            ..self
         }
     }
 }
@@ -376,7 +429,12 @@ impl AudioOutput for PipeWireOutput {
         if channels > self.channels {
             warn!(channels, "more audio channels than the device plays");
         }
-        start(self.purpose, channels, Endpoint::Playback(playout))
+        start(
+            self.purpose,
+            channels,
+            Endpoint::Playback(playout),
+            self.remote.clone(),
+        )
     }
 
     fn description(&self) -> &str {

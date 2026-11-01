@@ -358,7 +358,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                         input_classes,
                         clipboard: shared_clipboard(clipboard_directions),
                         audio: match audio_setting {
-                            Audio::On => qdp_desktop::host_audio(),
+                            Audio::On => host_audio(source_kind),
                             Audio::Off => HostAudio::default(),
                         },
                         open: Box::new({
@@ -609,6 +609,37 @@ fn lock_desktop() {
     if let Err(error) = qdp_desktop::lock_desktop() {
         warn!(%error, "cannot lock the desktop");
     }
+}
+
+/// Returns the audio devices of a session streaming `kind`: those of the
+/// desktop session shown on the console when it streams the console, as
+/// a host running outside any session must reach them, and otherwise this
+/// session's own.
+#[cfg(target_os = "linux")]
+fn host_audio(kind: SourceKind) -> HostAudio {
+    if kind != SourceKind::Console {
+        return qdp_desktop::host_audio();
+    }
+    match qdp_desktop::seat_session() {
+        Some(session) => {
+            info!(
+                uid = session.uid,
+                "streaming the sound of the console's desktop session"
+            );
+            qdp_desktop::host_audio_in(&session)
+        }
+        None => {
+            info!("no one is logged in on the console; the session streams no sound");
+            HostAudio::default()
+        }
+    }
+}
+
+/// Returns the audio devices of a session: this session's own, as only
+/// Linux streams the console.
+#[cfg(not(target_os = "linux"))]
+fn host_audio(_kind: SourceKind) -> HostAudio {
+    qdp_desktop::host_audio()
 }
 
 /// What a session streams.

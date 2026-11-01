@@ -54,4 +54,5 @@ pub(crate) use hidraw::start as start_passthrough;
 #[cfg(feature = "screen-capture")]
 pub(crate) use monitor_matching::restore_saved as restore_monitor_settings;
 pub(crate) use seat::devices_confined;
+pub use seat::{SeatSession, seat_session};
 pub(crate) use touchpad_capture::start as start_touchpad;
