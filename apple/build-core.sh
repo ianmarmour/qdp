@@ -19,9 +19,10 @@ export MACOSX_DEPLOYMENT_TARGET=26.0
 build() {
     local log
     log=$(mktemp)
-    cargo rustc --manifest-path "$root/Cargo.toml" -p qdp-apple --lib --release \
+    CARGO_TERM_COLOR=never cargo rustc --manifest-path "$root/Cargo.toml" -p qdp-apple --lib --release \
         --target "$1" --crate-type staticlib -- --print native-static-libs 2>&1 | tee "$log" >&2
-    sed -n 's/.*native-static-libs: //p' "$log" | tail -n 1
+    # Without colour, but in case a terminal's escapes slipped in anyway.
+    sed -n 's/.*native-static-libs: //p' "$log" | tail -n 1 | sed "s/$(printf '\033')\[[0-9;]*m//g"
     rm -f "$log"
 }
 

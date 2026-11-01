@@ -49,6 +49,9 @@ targets:
     settings:
       base:
         ENABLE_HARDENED_RUNTIME: YES
+        # The core is built for Apple silicon, which streams with the AV1
+        # decoders of M3 and later.
+        ARCHS: arm64
   QDP-iOS:
     type: application
     platform: iOS
