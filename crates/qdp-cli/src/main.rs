@@ -338,6 +338,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                 };
                 let options = Arc::clone(&options);
                 let state_directory = Arc::clone(&state_directory);
+                let notice = SessionNotice::default();
                 sessions.spawn(async move {
                     let connection = match incoming.establish().await {
                         Ok(connection) => connection,
@@ -354,17 +355,23 @@ async fn serve(args: ServeArgs) -> CliResult {
                             Audio::On => qdp_desktop::host_audio(),
                             Audio::Off => HostAudio::default(),
                         },
-                        open: Box::new(move || {
-                            Box::pin(open_desktop(
-                                source_kind,
-                                (width, height),
-                                state_directory,
-                                lock_policy,
-                                screen,
-                            ))
+                        open: Box::new({
+                            let notice = notice.clone();
+                            move || {
+                                Box::pin(open_desktop(
+                                    source_kind,
+                                    (width, height),
+                                    state_directory,
+                                    lock_policy,
+                                    screen,
+                                    notice,
+                                    peer,
+                                ))
+                            }
                         }),
                     };
                     let result = qdp_runtime::serve(connection, ticket, &options, desktop).await;
+                    notice.close().await;
                     match result {
                         Ok(summary) => info!(
                             %peer,
@@ -468,17 +475,23 @@ fn shared_clipboard(directions: Option<ClipboardDirections>) -> Option<SharedCli
 
 /// Opens a session's desktop once its client has authenticated: what it
 /// streams, as [`open_source`] opens it, an input injector for it, and,
-/// when it streams the screen, the lock that `lock` asks for.
+/// when it streams the screen, the lock that `lock` asks for and `notice`
+/// that the client at `peer` streams it.
 async fn open_desktop(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
     lock: LockPolicy,
     screen: ScreenOptions,
+    notice: SessionNotice,
+    peer: SocketAddr,
 ) -> Result<OpenedDesktop, RuntimeError> {
     let (source, streamed) = open_source(kind, size, state_directory, screen)
         .await
         .map_err(RuntimeError::Capture)?;
+    if streamed == Streamed::Screen {
+        notice.show(peer).await;
+    }
     let (width, height) = source.size();
     let injector = qdp_desktop::input_injector(width as u32, height as u32);
     let lock = match (streamed, lock) {
@@ -490,6 +503,48 @@ async fn open_desktop(
         injector,
         lock,
     })
+}
+
+/// How long the notice that a device streams this desktop may stay at
+/// most; it is taken away when the session ends.
+const SESSION_NOTICE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The notice, shown while a session streams this machine's screen, that
+/// a device sees and controls it, so that whoever is at the machine knows
+/// (Section 11).
+#[derive(Debug, Clone, Default)]
+struct SessionNotice(Arc<Mutex<Option<Notification>>>);
+
+impl SessionNotice {
+    /// Shows that the client at `peer` streams this desktop, if the
+    /// desktop shows notifications.
+    async fn show(&self, peer: SocketAddr) {
+        let shown = qdp_desktop::notify(
+            "This computer is being streamed",
+            &format!(
+                "The device at {} sees this screen and controls it. Ending the stream \
+                 on the device, or stopping qdp serve, ends it.",
+                peer.ip()
+            ),
+            SESSION_NOTICE_LIFETIME,
+            Urgency::Critical,
+        )
+        .await;
+        match shown {
+            Ok(notification) => {
+                *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(notification);
+            }
+            Err(error) => debug!(%error, "the stream is not shown as a notification"),
+        }
+    }
+
+    /// Takes the notice away, once the session ended.
+    async fn close(&self) {
+        let shown = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(notification) = shown {
+            notification.close().await;
+        }
+    }
 }
 
 /// Locks this machine's desktop, or says why it cannot.
