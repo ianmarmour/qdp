@@ -4,6 +4,12 @@
 # merged into main, and a version for each tag such as v0.2.0. Pull requests
 # are not checked here, so that merging never waits for it; a run can be
 # started on any branch by hand, which builds without releasing.
+#
+# Runs started by hand check only what the branch changes, as Windows and
+# macOS runners cost two and ten times Linux's minutes: Linux always, and the
+# Windows, Windows app, macOS, Apple and Android jobs only when the branch
+# touches their code or the build itself. They skip release builds and
+# packages, and the macOS tests, which main's runs keep.
 name: CI
 
 on:
@@ -14,8 +20,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Every commit to main, and every tag, is built.
-  cancel-in-progress: false
+  # A newer run of a branch, main included, replaces its older one, whose
+  # build the newer commit supersedes, so that merges in quick succession
+  # are built once. A tag's release always finishes.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -27,6 +35,69 @@ env:
   RUST_TOOLCHAIN: 1.97.0
 
 jobs:
+  changes:
+    name: What changed
+    runs-on: ubuntu-24.04
+    outputs:
+      windows: ${{ steps.areas.outputs.windows }}
+      windows-app: ${{ steps.areas.outputs.windows-app }}
+      apple: ${{ steps.areas.outputs.apple }}
+      android: ${{ steps.areas.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Main and tags build everything. A branch builds a platform when it
+      # changes the build, a file of that platform's, or a line of shared
+      # code that names the platform.
+      - name: Find the platforms the change touches
+        id: areas
+        run: |
+          areas="windows windows-app apple android"
+          # Writes `value` for every platform.
+          all() {
+            for area in $areas; do echo "$area=$1" >> "$GITHUB_OUTPUT"; done
+          }
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            all true
+            exit 0
+          fi
+          base=$(git merge-base origin/main HEAD)
+          files=$(git diff --name-only "$base" HEAD)
+          lines=$(git diff --unified=0 "$base" HEAD | grep -E '^[+-][^+-]' || true)
+          manifests=$(git diff --unified=0 "$base" HEAD -- '*Cargo.toml' | grep -E '^[+-][^+-]' || true)
+          # The lock file and this workflow concern every platform, and so do the
+          # manifests, unless all they change is Windows' dependencies.
+          if printf '%s\n' "$files" | grep -Eq '^(Cargo\.lock|\.github/workflows/ci\.yml)$' \
+            || printf '%s\n' "$manifests" | grep -vE 'windows|Win32_' | grep -q .; then
+            all true
+            exit 0
+          fi
+          app='^(windows/|crates/qdp-windows/|\.github/workflows/windows-app\.yml)'
+          declare -A file_patterns=(
+            [windows]="$app|/win32/|/d3d11va/|/nvenc/|Cargo\.toml$"
+            [windows-app]="$app"
+            [apple]='^(apple/|crates/qdp-apple/|\.github/workflows/apple\.yml)|/macos/|metal_video|videotoolbox'
+            [android]='^(android/|crates/qdp-android/)|mediacodec'
+          )
+          # Lines of shared code that name a platform; the Windows app has none.
+          declare -A line_patterns=(
+            [windows]='cfg\((all\(|any\()?windows|target_os = "windows"|win32::'
+            [apple]='target_os = "(macos|ios)"|macos::'
+            [android]='target_os = "android"'
+          )
+          for area in $areas; do
+            touched=false
+            if printf '%s\n' "$files" | grep -Eq "${file_patterns[$area]}"; then
+              touched=true
+            elif [ -n "${line_patterns[$area]:-}" ] \
+              && printf '%s\n' "$lines" | grep -Eq "${line_patterns[$area]}"; then
+              touched=true
+            fi
+            echo "$area=$touched" >> "$GITHUB_OUTPUT"
+          done
+
   linux:
     name: Linux
     runs-on: ubuntu-24.04
@@ -58,12 +129,15 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build the qdp command
+        if: github.event_name == 'push'
         run: cargo build --release --locked -p qdp-cli
 
       - name: Package
+        if: github.event_name == 'push'
         run: tar -czf qdp-linux-x86_64.tar.gz -C target/release qdp
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
           name: qdp-linux-x86_64
           path: qdp-linux-x86_64.tar.gz
@@ -71,6 +145,8 @@ jobs:
 
   windows:
     name: Windows
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
     runs-on: windows-2025
     defaults:
       run:
@@ -99,12 +175,15 @@ jobs:
         run: cargo test --workspace --locked -- --test-threads=1
 
       - name: Build the qdp command
+        if: github.event_name == 'push'
         run: cargo build --release --locked -p qdp-cli
 
       - name: Package
+        if: github.event_name == 'push'
         run: 7z a qdp-windows-x86_64.zip ./target/release/qdp.exe
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
           name: qdp-windows-x86_64
           path: qdp-windows-x86_64.zip
@@ -112,6 +191,8 @@ jobs:
 
   macos:
     name: macOS
+    needs: changes
+    if: needs.changes.outputs.apple == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -131,15 +212,19 @@ jobs:
       # too few to run even two at once and keep time, so they run one at a
       # time.
       - name: Tests
+        if: github.event_name == 'push'
         run: cargo test --workspace --locked -- --test-threads=1
 
       - name: Build the qdp command
+        if: github.event_name == 'push'
         run: cargo build --release --locked -p qdp-cli
 
       - name: Package
+        if: github.event_name == 'push'
         run: tar -czf qdp-macos-arm64.tar.gz -C target/release qdp
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
           name: qdp-macos-arm64
           path: qdp-macos-arm64.tar.gz
@@ -147,6 +232,8 @@ jobs:
 
   android:
     name: Android
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
     env:
       HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
@@ -218,10 +305,14 @@ jobs:
 
   apple:
     name: Apple
+    needs: changes
+    if: needs.changes.outputs.apple == 'true'
     uses: ./.github/workflows/apple.yml
 
   windows-app:
     name: Windows app
+    needs: changes
+    if: needs.changes.outputs.windows-app == 'true'
     uses: ./.github/workflows/windows-app.yml
 
   release:
