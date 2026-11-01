@@ -1,33 +1,38 @@
 //! KDE Plasma's display settings, through KWin's output management protocol,
 //! as System Settings changes them: each monitor's modes, its mode and
 //! interface scale, and new ones applied.
+//!
+//! KWin 6.7 and later announce the monitors through an output device
+//! registry; earlier versions as one global each.
 
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
+use super::kde_protocols::output_device::kde_output_device_mode_v2::{self, KdeOutputDeviceModeV2};
+use super::kde_protocols::output_device::kde_output_device_registry_v2::{
+    self, KdeOutputDeviceRegistryV2,
+};
+use super::kde_protocols::output_device::kde_output_device_v2::{self, KdeOutputDeviceV2};
+use super::kde_protocols::output_management::kde_output_configuration_v2::{
+    self, KdeOutputConfigurationV2,
+};
+use super::kde_protocols::output_management::kde_output_management_v2::KdeOutputManagementV2;
+use super::monitor_matching::MonitorState;
+use crate::monitor_modes::{ModeRange, MonitorMode, MonitorSettings};
 use wayland_client::backend::ObjectId;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, event_created_child};
-use wayland_protocols_plasma::output_device::v2::client::kde_output_device_mode_v2::{
-    self, KdeOutputDeviceModeV2,
-};
-use wayland_protocols_plasma::output_device::v2::client::kde_output_device_v2::{
-    self, KdeOutputDeviceV2,
-};
-use wayland_protocols_plasma::output_management::v2::client::kde_output_configuration_v2::{
-    self, KdeOutputConfigurationV2,
-};
-use wayland_protocols_plasma::output_management::v2::client::kde_output_management_v2::KdeOutputManagementV2;
 
-use super::monitor_matching::MonitorState;
-use crate::monitor_modes::{ModeRange, MonitorMode, MonitorSettings};
+/// The versions of the monitors announced as globals: 2 names each monitor.
+const DEVICE_VERSIONS: RangeInclusive<u32> = 2..=26;
 
-/// The output device versions used: 2 names each monitor.
-const DEVICE_VERSIONS: RangeInclusive<u32> = 2..=11;
+/// The versions of the registry that announces the monitors instead, from
+/// KWin 6.7.
+const REGISTRY_VERSIONS: RangeInclusive<u32> = 21..=26;
 
 /// The output management versions used.
-const MANAGEMENT_VERSIONS: RangeInclusive<u32> = 1..=12;
+const MANAGEMENT_VERSIONS: RangeInclusive<u32> = 1..=22;
 
 /// How long KWin may take to apply settings.
 const APPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,7 +43,7 @@ const APPLY_POLL: Duration = Duration::from_millis(10);
 /// What KWin has said about its monitors and the settings applied.
 #[derive(Debug, Default)]
 struct Outputs {
-    /// The monitors, in the order they were bound.
+    /// The monitors, in the order KWin announced them.
     devices: Vec<Device>,
     /// Whether the settings applied were taken, once KWin said.
     applied: Option<Result<(), String>>,
@@ -59,6 +64,22 @@ struct Device {
     current: Option<ObjectId>,
     /// Its interface scale.
     scale: f64,
+    /// Whether KWin removed it.
+    removed: bool,
+}
+
+impl Device {
+    /// Returns a monitor KWin has yet to describe.
+    fn new(proxy: KdeOutputDeviceV2) -> Self {
+        Self {
+            proxy,
+            name: String::new(),
+            modes: Vec::new(),
+            current: None,
+            scale: 1.0,
+            removed: false,
+        }
+    }
 }
 
 /// One mode of a monitor, as KWin describes it.
@@ -88,6 +109,13 @@ impl Mode {
 }
 
 impl Outputs {
+    /// Returns the monitor `id`.
+    fn device_mut(&mut self, id: &ObjectId) -> Option<&mut Device> {
+        self.devices
+            .iter_mut()
+            .find(|device| device.proxy.id() == *id)
+    }
+
     /// Returns the mode `id` of any monitor.
     fn mode_mut(&mut self, id: &ObjectId) -> Option<&mut Mode> {
         self.devices
@@ -100,8 +128,15 @@ impl Outputs {
     fn device(&self, name: &str) -> Result<&Device, String> {
         self.devices
             .iter()
-            .find(|device| device.name == name)
-            .ok_or_else(|| format!("KWin has no monitor named {name}"))
+            .find(|device| device.name == name && !device.removed)
+            .ok_or_else(|| {
+                let known: Vec<&str> = self
+                    .devices
+                    .iter()
+                    .map(|device| device.name.as_str())
+                    .collect();
+                format!("KWin has no monitor named {name}; it has {known:?}")
+            })
     }
 }
 
@@ -129,16 +164,35 @@ impl Dispatch<KdeOutputManagementV2, ()> for Outputs {
     }
 }
 
-impl Dispatch<KdeOutputDeviceV2, usize> for Outputs {
+impl Dispatch<KdeOutputDeviceRegistryV2, ()> for Outputs {
     fn event(
         state: &mut Self,
-        _device: &KdeOutputDeviceV2,
-        event: kde_output_device_v2::Event,
-        index: &usize,
+        _registry: &KdeOutputDeviceRegistryV2,
+        event: kde_output_device_registry_v2::Event,
+        _data: &(),
         _connection: &Connection,
         _queue: &QueueHandle<Self>,
     ) {
-        let Some(device) = state.devices.get_mut(*index) else {
+        if let kde_output_device_registry_v2::Event::Output { output } = event {
+            state.devices.push(Device::new(output));
+        }
+    }
+
+    event_created_child!(Outputs, KdeOutputDeviceRegistryV2, [
+        kde_output_device_registry_v2::EVT_OUTPUT_OPCODE => (KdeOutputDeviceV2, ()),
+    ]);
+}
+
+impl Dispatch<KdeOutputDeviceV2, ()> for Outputs {
+    fn event(
+        state: &mut Self,
+        device: &KdeOutputDeviceV2,
+        event: kde_output_device_v2::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        let Some(device) = state.device_mut(&device.id()) else {
             return;
         };
         match event {
@@ -151,6 +205,7 @@ impl Dispatch<KdeOutputDeviceV2, usize> for Outputs {
             kde_output_device_v2::Event::CurrentMode { mode } => device.current = Some(mode.id()),
             kde_output_device_v2::Event::Scale { factor } => device.scale = factor,
             kde_output_device_v2::Event::Name { name } => device.name = name,
+            kde_output_device_v2::Event::Removed => device.removed = true,
             _ => {}
         }
     }
@@ -204,7 +259,6 @@ impl Dispatch<KdeOutputConfigurationV2, ()> for Outputs {
             kde_output_configuration_v2::Event::FailureReason { reason } => {
                 state.failure_reason = Some(reason);
             }
-            _ => {}
         }
     }
 }
@@ -236,29 +290,31 @@ impl KdeDisplays {
             return Ok(None);
         };
         let mut outputs = Outputs::default();
-        let device_interface = KdeOutputDeviceV2::interface().name;
-        globals.contents().with_list(|list| {
-            for global in list.iter().filter(|global| {
-                global.interface == device_interface && global.version >= *DEVICE_VERSIONS.start()
-            }) {
-                let proxy = globals.registry().bind::<KdeOutputDeviceV2, _, _>(
-                    global.name,
-                    global.version.min(*DEVICE_VERSIONS.end()),
-                    &handle,
-                    outputs.devices.len(),
-                );
-                outputs.devices.push(Device {
-                    proxy,
-                    name: String::new(),
-                    modes: Vec::new(),
-                    current: None,
-                    scale: 1.0,
-                });
-            }
-        });
-        // The first round trip describes the monitors, the second the modes
-        // they announced.
-        for _ in 0..2 {
+        // KWin 6.7 and later announce the monitors through the registry;
+        // earlier versions as one global each.
+        if globals
+            .bind::<KdeOutputDeviceRegistryV2, _, _>(&handle, REGISTRY_VERSIONS, ())
+            .is_err()
+        {
+            let device_interface = KdeOutputDeviceV2::interface().name;
+            globals.contents().with_list(|list| {
+                for global in list.iter().filter(|global| {
+                    global.interface == device_interface
+                        && global.version >= *DEVICE_VERSIONS.start()
+                }) {
+                    let proxy = globals.registry().bind::<KdeOutputDeviceV2, _, _>(
+                        global.name,
+                        global.version.min(*DEVICE_VERSIONS.end()),
+                        &handle,
+                        (),
+                    );
+                    outputs.devices.push(Device::new(proxy));
+                }
+            });
+        }
+        // The round trips announce the monitors, describe them, and describe
+        // the modes they announced.
+        for _ in 0..3 {
             queue
                 .roundtrip(&mut outputs)
                 .map_err(|error| format!("lost the connection to KWin: {error}"))?;
@@ -336,7 +392,18 @@ mod tests {
         let mut displays = KdeDisplays::open()
             .unwrap()
             .expect("the compositor is KWin");
-        let name = displays.outputs.devices[0].name.clone();
+        // KWin's names are the ones xdg-output gives, which the capture
+        // finds its monitor by.
+        let names: Vec<String> = super::super::desktop_layout::outputs()
+            .unwrap()
+            .into_iter()
+            .map(|output| output.name)
+            .collect();
+        assert!(!names.is_empty());
+        for name in &names {
+            displays.monitor(name).unwrap();
+        }
+        let name = names[0].clone();
         let state = displays.monitor(&name).unwrap();
         assert!(state.modes.contains(&state.current.mode));
         let scaled = MonitorSettings {

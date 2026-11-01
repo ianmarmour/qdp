@@ -50,8 +50,11 @@ qdp-runtime = { path = "crates/qdp-runtime" }
 wl-clipboard-rs = { version = "0.9.3", default-features = false }
 wayland-client = { version = "0.31.15", default-features = false }
 wayland-protocols = { version = "0.32.13", default-features = false, features = ["client", "unstable"] }
-# KWin's display settings, which the host changes to the client's display.
-wayland-protocols-plasma = { version = "0.3.12", default-features = false, features = ["client"] }
+# Generates KWin's display settings protocols, which the host changes to the
+# client's display, from their files.
+wayland-scanner = { version = "0.31.11", default-features = false }
+# The flag sets those generated protocols declare.
+bitflags = { version = "2.13.2", default-features = false }
 # The display settings of wlroots compositors and others sharing their
 # protocol, which the host changes to the client's display.
 wayland-protocols-wlr = { version = "0.3.12", default-features = false, features = ["client"] }
