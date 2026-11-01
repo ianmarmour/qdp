@@ -17,6 +17,9 @@
 //!   devices play the host's audio through an adaptive jitter buffer and send
 //!   the user's microphone.
 //!
+//! [`open_tunnel`] signs a client in to a gateway and opens a host through
+//! it, for [`run`] to connect to through the [`Tunnel`] it returns.
+//!
 //! [`TestPattern`] is a synthetic source for hosts without a screen capture
 //! backend, and for tests.
 
@@ -35,6 +38,7 @@ mod decode_thread;
 mod decoder_lag;
 mod encode_thread;
 mod frame_pacing;
+mod gateway_route;
 mod gateway_trust;
 mod host;
 mod host_cursor;
@@ -74,6 +78,10 @@ pub use client_input::{
     input_channel,
 };
 pub use clipboard::{Clipboard, ClipboardDirections, Focus, SharedClipboard};
+pub use gateway_route::{
+    AnswerFuture, Credentials, GatewayFailure, GatewayRoute, SignInAnswer, SignInPrompt,
+    SignInRequest, Tunnel, open_tunnel,
+};
 pub use gateway_trust::{GatewayTrust, GatewayUser};
 pub use host::{
     DesktopLock, DesktopOpener, EncoderTuning, HostDesktop, HostOptions, HostSummary,

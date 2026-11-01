@@ -434,7 +434,10 @@ a `otpauth://totp/` URI naming the issuer and the user, with the new secret in
 base32 [RFC4648] and the algorithm, digits and period above, which the client shows
 as a QR code and as text for the user's authenticator app. The next attempt's code
 proves that the app holds the secret; the verifier keeps the secret only once a
-code is accepted, and offers no enrollment to a user who has one. Because
+code is accepted, and offers no enrollment to a user who has one. As a failed
+code starts the user over at the first factor, a verifier MAY offer the same
+secret again for a few minutes, so that a user who mistyped a code need not add
+another secret to their app. Because
 enrollment lets whoever passed the first factor choose the second, verifiers
 SHOULD offer it only where that is acceptable, for example while an organization
 rolls out second factors, or once after an administrator reset the user's secret.

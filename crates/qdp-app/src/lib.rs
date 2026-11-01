@@ -14,6 +14,8 @@
 //! - `keymap`, with the `winit` feature, reports the keys of winit's windows
 //!   as HID usages, for the desktop clients.
 //! - [`placement`] fits the picture in the app's view, keeping its shape.
+//! - [`qr`] encodes the QR code that enrolls a user's authenticator app
+//!   with a gateway.
 //! - `window_input`, with the `winit` feature, converts the input of winit's
 //!   windows to QDP's and measures the display they show, for the desktop
 //!   clients.
@@ -24,6 +26,7 @@ pub mod gamepad;
 #[cfg(feature = "winit")]
 pub mod keymap;
 pub mod placement;
+pub mod qr;
 pub mod session;
 pub mod settings;
 pub mod sink;

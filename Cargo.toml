@@ -48,6 +48,10 @@ toml = { version = "1.1.8", default-features = false, features = ["parse", "serd
 # The system's certificate authorities, which the gateway checks the
 # directory's certificate with unless configured with the organization's.
 rustls-native-certs = { version = "0.8.5", default-features = false }
+# The QR code that enrolls a user's authenticator app with a gateway.
+qrcode = { version = "0.14.1", default-features = false }
+# The terminal's password prompt, which does not echo what is typed.
+rpassword = { version = "7.4.0", default-features = false }
 # GTK 4 and libadwaita, for the Linux app, at the versions of Ubuntu 24.04
 # (GTK 4.14, libadwaita 1.5) and later.
 gtk = { package = "gtk4", version = "0.11.5", default-features = false, features = ["v4_14"] }

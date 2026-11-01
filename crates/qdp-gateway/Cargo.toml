@@ -31,5 +31,9 @@ tracing-subscriber.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-service.workspace = true
 
+# The clients' side of signing in, which the tests run against the gateway.
+[dev-dependencies]
+qdp-runtime.workspace = true
+
 [lints]
 workspace = true

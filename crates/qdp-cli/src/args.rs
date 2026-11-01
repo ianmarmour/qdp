@@ -18,7 +18,9 @@ pub const USAGE: &str = "\
 Usage:
   qdp serve [options]          Serve this machine's desktop
   qdp connect HOST [options]   Connect to a host, by address or name,
-                               with an optional :PORT (default 4433)
+                               with an optional :PORT (default 4433); through
+                               a gateway, its ID there or its name inside the
+                               organization's network
   qdp discover [--watch]       List the hosts advertising on the local network;
                                --watch writes a line as each comes and goes,
                                until standard input closes, for an app
@@ -109,10 +111,20 @@ Connect options:
   --token TOKEN        Authenticate with TOKEN; without --token, a token in the
                        QDP_TOKEN environment variable, which other users
                        cannot read as they can a command line
-  --user NAME          Authenticate as NAME with the password in QDP_PASSWORD
+  --user NAME          Authenticate as NAME with the password in QDP_PASSWORD;
+                       with --gateway, sign in to the gateway as NAME
+  --gateway ADDRESS    Reach the host through the qdp-gateway at ADDRESS, a
+                       name or address with an optional :PORT (default 443):
+                       sign in with the directory's password, from
+                       QDP_PASSWORD or asked for, and a code from an
+                       authenticator app, whose QR code it shows the first
+                       time; the gateway vouches for the user to the host
+  --gateway-pin HEX    The gateway's key pin, from `qdp-gateway keys` (default:
+                       its certificate, checked with the system's certificate
+                       authorities)
   --identity DIR       Directory holding this client's key, with which it
                        authenticates when given neither --token nor --user,
-                       and the hosts it paired with
+                       the hosts it paired with, and its gateway sign-ins
                        (default ./qdp-client-identity)
   --server-name NAME   Name sent in the TLS handshake (default qdp-host)
   --frames N           Disconnect after N frames
@@ -149,6 +161,10 @@ QDP_LOG=info,qdp::window=debug.";
 
 /// The port QDP listens on by default.
 const DEFAULT_PORT: u16 = 4433;
+
+/// The name sent to a gateway given by address, which a pinned gateway's
+/// certificate need not match.
+const GATEWAY_ADDRESS_NAME: &str = "qdp-gateway";
 
 /// The default test pattern width.
 const DEFAULT_WIDTH: usize = 1280;
@@ -439,8 +455,8 @@ pub enum Presentation {
 /// The options of `qdp connect`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectArgs {
-    /// The host's address.
-    pub address: SocketAddr,
+    /// Where the host is.
+    pub destination: Destination,
     /// How the host's key is trusted.
     pub trust: HostTrust,
     /// The device's name a host shows when pairing, if not the machine's.
@@ -479,6 +495,49 @@ pub struct ConnectArgs {
     /// The video size to ask the host for, in pixels, whatever the window's,
     /// if the user chose one.
     pub resolution: Option<(u32, u32)>,
+}
+
+/// Where `qdp connect` reaches the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    /// At this address, directly.
+    Direct(SocketAddr),
+    /// Through a gateway.
+    Gateway(GatewayArgs),
+}
+
+impl Destination {
+    /// Returns the host as the user knows it, which names it in the window's
+    /// title and among the paired hosts.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Direct(address) => address.to_string(),
+            Self::Gateway(gateway) => gateway.target.clone(),
+        }
+    }
+}
+
+/// A gateway to reach the host through (Section 13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayArgs {
+    /// The gateway's address.
+    pub address: SocketAddr,
+    /// Its name, sent in the TLS handshake, which its certificate must be
+    /// valid for unless pinned.
+    pub name: String,
+    /// Its key pin, if given.
+    pub pin: Option<KeyPin>,
+    /// The host as given, which the gateway finds: an ID it lists, or a name
+    /// or address inside the network.
+    pub target: String,
+}
+
+impl GatewayArgs {
+    /// Returns the gateway as the client keeps its sign-in under: its name
+    /// and port.
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.name, self.address.port())
+    }
 }
 
 /// The smallest side of a video the host can send (Section 6.3).
@@ -558,11 +617,17 @@ pub fn parse_pin(text: &str) -> Result<KeyPin, ArgsError> {
 /// Resolves the host's address: an IP address or a host name, with or without a
 /// port, using the default port when there is none.
 pub fn resolve_address(text: &str) -> Result<SocketAddr, ArgsError> {
+    resolve_with_port(text, DEFAULT_PORT)
+}
+
+/// Resolves an IP address or host name, with or without a port, using
+/// `default_port` when there is none.
+fn resolve_with_port(text: &str, default_port: u16) -> Result<SocketAddr, ArgsError> {
     if let Ok(address) = text.parse::<SocketAddr>() {
         return Ok(address);
     }
     if let Ok(ip) = text.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, DEFAULT_PORT));
+        return Ok(SocketAddr::new(ip, default_port));
     }
     let has_port = text
         .rsplit_once(':')
@@ -570,12 +635,38 @@ pub fn resolve_address(text: &str) -> Result<SocketAddr, ArgsError> {
     let resolved = if has_port {
         text.to_socket_addrs()
     } else {
-        (text, DEFAULT_PORT).to_socket_addrs()
+        (text, default_port).to_socket_addrs()
     };
     resolved
         .map_err(|resolve_error| error(format!("cannot resolve {text}: {resolve_error}")))?
         .next()
         .ok_or_else(|| error(format!("{text} has no address")))
+}
+
+/// Returns the gateway `text` names, a name or address with an optional
+/// port, to reach `target` through, verified with `pin` if given.
+fn parse_gateway(
+    text: &str,
+    pin: Option<KeyPin>,
+    target: String,
+) -> Result<GatewayArgs, ArgsError> {
+    let address = resolve_with_port(text, qdp::gateway::DEFAULT_GATEWAY_PORT)?;
+    // The name without its port, or the generic one for an address.
+    let host = match text.parse::<SocketAddr>() {
+        Ok(_) => None,
+        Err(_) if text.parse::<IpAddr>().is_ok() => None,
+        Err(_) => Some(
+            text.rsplit_once(':')
+                .filter(|(_, port)| port.parse::<u16>().is_ok())
+                .map_or(text, |(name, _)| name),
+        ),
+    };
+    Ok(GatewayArgs {
+        address,
+        name: host.unwrap_or(GATEWAY_ADDRESS_NAME).to_owned(),
+        pin,
+        target,
+    })
 }
 
 /// Formats a key pin as 64 hexadecimal digits.
@@ -911,14 +1002,16 @@ fn parse_preference(option: &str, text: &str) -> Result<CodecPreference, ArgsErr
 
 /// Parses the arguments of `qdp connect`.
 fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectArgs, ArgsError> {
-    let address = arguments
+    let host = arguments
         .next()
         .ok_or_else(|| error("connect needs the host's address, such as 192.0.2.7"))?;
-    let address = resolve_address(&address)?;
     let mut pin = None;
     let mut pair = false;
+    let mut gateway = None;
+    let mut gateway_pin = None;
     let mut connect = ConnectArgs {
-        address,
+        // Resolved below, unless a gateway finds it.
+        destination: Destination::Direct(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))),
         trust: HostTrust::Remembered,
         device_name: None,
         token: None,
@@ -945,6 +1038,10 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--name" => connect.device_name = Some(value("--name", &mut arguments)?),
             "--token" => connect.token = Some(value("--token", &mut arguments)?),
             "--user" => connect.user = Some(value("--user", &mut arguments)?),
+            "--gateway" => gateway = Some(value("--gateway", &mut arguments)?),
+            "--gateway-pin" => {
+                gateway_pin = Some(parse_pin(&value("--gateway-pin", &mut arguments)?)?);
+            }
             "--identity" => connect.identity = value("--identity", &mut arguments)?.into(),
             "--server-name" => connect.server_name = value("--server-name", &mut arguments)?,
             "--frames" => connect.frames = Some(parse("--frames", &mut arguments)?),
@@ -984,6 +1081,11 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
+    connect.destination = match gateway {
+        Some(gateway) => Destination::Gateway(parse_gateway(&gateway, gateway_pin, host)?),
+        None if gateway_pin.is_some() => return Err(error("--gateway-pin needs --gateway")),
+        None => Destination::Direct(resolve_address(&host)?),
+    };
     if connect.token.is_some() && connect.user.is_some() {
         return Err(error("connect takes --token or --user, not both"));
     }
@@ -1141,6 +1243,35 @@ mod tests {
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }
 
+    /// With --gateway, `connect` leaves the host's name for the gateway to
+    /// find, inside the network.
+    #[test]
+    fn connect_through_a_gateway() {
+        let gateway = |line: &str| match parse_line(line) {
+            Ok(Command::Connect(ConnectArgs {
+                destination: Destination::Gateway(gateway),
+                ..
+            })) => Ok(gateway),
+            Ok(other) => panic!("expected connect through a gateway, got {other:?}"),
+            Err(error) => Err(error),
+        };
+        let pin = "cd".repeat(32);
+        let through = gateway(&format!(
+            "connect desk-12.corp.invalid:4433 --gateway 192.0.2.9 --gateway-pin {pin} --user alice"
+        ))
+        .unwrap();
+        assert_eq!(through.address, "192.0.2.9:443".parse().unwrap());
+        assert_eq!(through.name, GATEWAY_ADDRESS_NAME);
+        assert_eq!(through.pin, Some(KeyPin([0xcd; 32])));
+        assert_eq!(through.target, "desk-12.corp.invalid:4433");
+        assert_eq!(through.label(), "qdp-gateway:443");
+        let named = gateway("connect build-01 --gateway localhost:8443").unwrap();
+        assert_eq!(named.name, "localhost");
+        assert_eq!(named.address.port(), 8443);
+        assert_eq!(named.pin, None);
+        assert!(parse_line(&format!("connect 192.0.2.7 --gateway-pin {pin}")).is_err());
+    }
+
     /// Without --pin, `connect` uses the pin remembered from pairing, and
     /// with --pair it pairs, which takes no other credential.
     #[test]
@@ -1226,7 +1357,10 @@ mod tests {
         .unwrap() else {
             panic!("expected connect");
         };
-        assert_eq!(connect.address.port(), 4433);
+        assert_eq!(
+            connect.destination,
+            Destination::Direct("192.0.2.7:4433".parse().unwrap())
+        );
         assert_eq!(connect.trust, HostTrust::Pinned(KeyPin([0xab; 32])));
         assert_eq!(connect.frames, Some(10));
         assert_eq!(connect.presentation, Presentation::Window);
