@@ -9,6 +9,7 @@ name: QDP
 options:
   bundleIdPrefix: io.github.ianmarmour
   deploymentTarget:
+    iOS: "26.0"
     macOS: "26.0"
   createIntermediateGroups: true
 configFiles:
@@ -51,8 +52,44 @@ targets:
         # The core is built for Apple silicon, which streams with the AV1
         # decoders of M3 and later.
         ARCHS: arm64
+  QDP-iOS:
+    type: application
+    platform: iOS
+    sources: [Shared, iOS]
+    dependencies:
+      - framework: Generated/QDPCore.xcframework
+        embed: false
+    info:
+      path: Generated/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: QDP
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        CADisableMinimumFrameDurationOnPhone: true
+        GCSupportsControllerUserInteraction: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+        NSLocalNetworkUsageDescription: QDP finds the computers on your network you can stream from, and connects to them.
+        NSBonjourServices: [_qdp._udp]
+        NSMicrophoneUsageDescription: QDP sends your microphone to the computer you stream from when you turn it on.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
 schemes:
   QDP-macOS:
     build:
       targets:
         QDP-macOS: all
+  QDP-iOS:
+    build:
+      targets:
+        QDP-iOS: all
