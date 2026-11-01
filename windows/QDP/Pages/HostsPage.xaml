@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The computers to stream: those on the network and those paired with. -->
+<Page
+    x:Class="Qdp.Pages.HostsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:core="using:Qdp.Core"
+    NavigationCacheMode="Required">
+
+    <Grid Padding="40,28,40,0" RowSpacing="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Spacing="4">
+                <TextBlock Text="Computers" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock
+                    Text="Stream a computer on your network, or one you paired with."
+                    TextWrapping="Wrap"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{StaticResource BodyTextBlockStyle}" />
+            </StackPanel>
+            <Button
+                x:Name="AddButton"
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Style="{StaticResource AccentButtonStyle}"
+                Click="OnAddClicked">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE710;" FontSize="14" />
+                    <TextBlock Text="Add computer" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <InfoBar x:Name="ProblemBar" Grid.Row="1" Severity="Error" IsOpen="False" IsClosable="True" />
+
+        <GridView
+            x:Name="HostList"
+            Grid.Row="2"
+            Padding="0,0,0,32"
+            SelectionMode="None"
+            IsItemClickEnabled="True"
+            ItemClick="OnHostClicked"
+            AutomationProperties.Name="Computers">
+            <GridView.ItemTemplate>
+                <DataTemplate x:DataType="core:HostRow">
+                    <Grid
+                        Width="300"
+                        Padding="16"
+                        RowSpacing="12"
+                        ColumnSpacing="16"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource OverlayCornerRadius}"
+                        AutomationProperties.Name="{x:Bind Name}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ContextFlyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="Forget" Tag="{x:Bind}" IsEnabled="{x:Bind CanForget}" Click="OnForgetClicked">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE74D;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                            </MenuFlyout>
+                        </Grid.ContextFlyout>
+
+                        <Border Width="48" Height="48" CornerRadius="8" Background="{ThemeResource AccentFillColorDefaultBrush}">
+                            <FontIcon Glyph="&#xE7F4;" FontSize="22" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="{x:Bind StatusGlyph}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock
+                                    Text="{x:Bind Detail}"
+                                    TextTrimming="CharacterEllipsis"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Style="{StaticResource CaptionTextBlockStyle}" />
+                            </StackPanel>
+                        </StackPanel>
+                        <TextBlock
+                            Grid.Row="1"
+                            Grid.ColumnSpan="2"
+                            HorizontalAlignment="Right"
+                            Text="{x:Bind Action}"
+                            Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                            Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    </Grid>
+                </DataTemplate>
+            </GridView.ItemTemplate>
+        </GridView>
+
+        <StackPanel
+            x:Name="EmptyState"
+            Grid.Row="2"
+            MaxWidth="420"
+            Margin="0,48,0,0"
+            Spacing="12"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Top"
+            Visibility="Collapsed">
+            <FontIcon Glyph="&#xE701;" FontSize="40" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock Text="Looking for computers" HorizontalAlignment="Center" Style="{StaticResource SubtitleTextBlockStyle}" />
+            <TextBlock
+                Text="Computers running QDP's host on this network show here. You can also add one by its address."
+                HorizontalAlignment="Center"
+                TextAlignment="Center"
+                TextWrapping="Wrap"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Style="{StaticResource BodyTextBlockStyle}" />
+        </StackPanel>
+    </Grid>
+</Page>

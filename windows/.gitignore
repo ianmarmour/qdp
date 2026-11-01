@@ -1,0 +1,5 @@
+# What building the Windows app leaves behind.
+bin/
+obj/
+publish/
+*.user
