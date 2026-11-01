@@ -35,9 +35,9 @@ use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
 use crate::args::TouchpadMode;
 use crate::color::{Placement, RgbFrame, scale_into, yuv420_to_rgb};
-use crate::keymap::{HidKey, hid_key};
 use crate::sink::CliSink;
 use qdp_app::cursor::ScaledCursor;
+use qdp_app::keymap::{HidKey, hid_key};
 
 /// The window's initial size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(1280.0, 720.0);
