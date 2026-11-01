@@ -6,15 +6,21 @@
 //!
 //! This is its command line; the gateway itself is the library of this crate.
 
+use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use qdp::auth::totp::TotpSecret;
 
+use std::sync::Arc;
+
+use qdp::gateway::GatewayErrorCode;
 use qdp_gateway::config::Config;
 use qdp_gateway::directory::{Directory, DirectoryUser, LdapDirectory};
+use qdp_gateway::keys::GatewayKeys;
 use qdp_gateway::policy::{self, RoutedTarget};
+use qdp_gateway::server::Gateway;
 use qdp_gateway::totp_store::TotpStore;
 
 /// Where the configuration is read from by default.
@@ -27,6 +33,13 @@ const PASSWORD_VARIABLE: &str = "QDP_PASSWORD";
 /// The usage text.
 const USAGE: &str = "\
 Usage:
+  qdp-gateway serve [--config FILE]
+                          Serve users: sign them in with the directory and
+                          TOTP, and tunnel their sessions to the hosts they
+                          may reach
+  qdp-gateway keys [--config FILE]
+                          Print the pin clients pin the gateway by, and the
+                          assertion key hosts trust it by
   qdp-gateway check [--config FILE]
                           Check the configuration, and that the gateway's own
                           directory account can bind
@@ -54,6 +67,10 @@ names another file.";
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
+    /// Serve users.
+    Serve,
+    /// Print the gateway's pin and assertion key.
+    Keys,
     /// Check the configuration and the directory account.
     Check,
     /// Check a user's sign-in with the directory, and whether they may open
@@ -99,6 +116,8 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
     }
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     let command = match words.as_slice() {
+        ["serve"] => Command::Serve,
+        ["keys"] => Command::Keys,
         ["check"] => Command::Check,
         ["login", user] => Command::Login {
             user: (*user).to_owned(),
@@ -118,8 +137,10 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
 }
 
 fn main() -> ExitCode {
+    // Plain logs where no one reads colours, as in the system's journal.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
     let result = parse_args(std::env::args().skip(1)).and_then(run);
     match result {
@@ -139,6 +160,8 @@ fn run(invocation: Invocation) -> Result<(), String> {
     }
     let config = Config::load(&invocation.config).map_err(|error| error.to_string())?;
     match invocation.command {
+        Command::Serve => serve(config),
+        Command::Keys => keys(&config),
         Command::Check => check(&config),
         Command::Login { user, target } => login(&config, &user, target.as_deref()),
         Command::Enroll(user) => enroll(&config, &user),
@@ -155,6 +178,48 @@ fn block_on<T>(future: impl Future<Output = T>) -> Result<T, String> {
         .build()
         .map_err(|error| format!("cannot start the runtime: {error}"))?;
     Ok(runtime.block_on(future))
+}
+
+/// Serves users until interrupted.
+fn serve(config: Config) -> Result<(), String> {
+    let directory = LdapDirectory::new(&config.directory).map_err(|error| error.to_string())?;
+    let keys =
+        GatewayKeys::load(&config).map_err(|error| format!("cannot load the keys: {error}"))?;
+    let totp = TotpStore::load(&config.state_directory).map_err(|error| error.to_string())?;
+    let listen = config.listen;
+    block_on(async move {
+        let gateway = Arc::new(Gateway::new(config, directory, keys, totp));
+        let endpoint = gateway
+            .endpoint(listen)
+            .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
+        tracing::info!(address = %listen, "serving");
+        let serving = tokio::spawn(Arc::clone(&gateway).serve(endpoint.clone()));
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("shutting down");
+        }
+        endpoint.close(
+            quinn::VarInt::from_u64(GatewayErrorCode::SHUTDOWN.0.into_inner())
+                .unwrap_or(quinn::VarInt::MAX),
+            b"the gateway is shutting down",
+        );
+        endpoint.wait_idle().await;
+        serving.abort();
+        Ok(())
+    })?
+}
+
+/// Prints the gateway's pin and assertion key.
+fn keys(config: &Config) -> Result<(), String> {
+    let keys =
+        GatewayKeys::load(config).map_err(|error| format!("cannot load the keys: {error}"))?;
+    let assertion: String = keys
+        .assertion_public_key()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    println!("Clients pin the gateway with: {}", keys.tls_pin().to_hex());
+    println!("Hosts trust its assertions with: {assertion}");
+    Ok(())
 }
 
 /// Checks that the directory account binds.

@@ -28,8 +28,10 @@ mod verify;
 use qdp::session::{SessionError, UsageError};
 use thiserror::Error;
 
-pub use config::{HostVerification, client_config, host_config};
-pub use connection::{PathStats, QdpConnection};
+pub use config::{
+    HostVerification, client_config, gateway_client_config, gateway_server_config, host_config,
+};
+pub use connection::{PathStats, QdpConnection, peer_key_pin};
 pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDriver};
 pub use endpoint::{ClientEndpoint, HostEndpoint, IncomingConnection};
 pub use identity::{IdentityFiles, IdentityOrigin, KeyPin, TlsIdentity};

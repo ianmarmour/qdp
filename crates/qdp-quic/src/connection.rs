@@ -151,9 +151,7 @@ impl QdpConnection {
     /// handshake, if it presented one: on a host, the client's, for the
     /// `CLIENT_CERTIFICATE` method (Section 4.4.2).
     pub fn peer_key_pin(&self) -> Option<KeyPin> {
-        let identity = self.connection.peer_identity()?;
-        let chain = identity.downcast_ref::<Vec<CertificateDer<'static>>>()?;
-        KeyPin::of_certificate(chain.first()?).ok()
+        peer_key_pin(&self.connection)
     }
 
     /// Returns the `tls-exporter` channel binding of the connection, for
@@ -233,4 +231,13 @@ impl QdpConnection {
 /// Returns the QUIC application error code carrying a QDP error code.
 pub(crate) fn quic_code(code: ErrorCode) -> quinn::VarInt {
     quinn::VarInt::from_u64(code.0.into_inner()).unwrap_or(FALLBACK_ERROR_CODE)
+}
+
+/// Returns the key pin of the certificate the peer of `connection` presented
+/// in the handshake, if it presented one: on a host or a gateway, the
+/// client's.
+pub fn peer_key_pin(connection: &quinn::Connection) -> Option<KeyPin> {
+    let identity = connection.peer_identity()?;
+    let chain = identity.downcast_ref::<Vec<CertificateDer<'static>>>()?;
+    KeyPin::of_certificate(chain.first()?).ok()
 }
