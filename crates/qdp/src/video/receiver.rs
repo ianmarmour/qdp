@@ -328,7 +328,22 @@ impl VideoReceiver {
         now: Instant,
     ) {
         let frame_number = fragment.frame_number;
-        if frame_number <= self.last_decoded || frame_number == FrameNumber::NONE {
+        if frame_number == FrameNumber::NONE {
+            return;
+        }
+        if frame_number <= self.last_decoded {
+            // The host repeats a decoded frame while it has not heard that it
+            // was: tell it at once (Section 6.7).
+            if fragment.flags.contains(FragmentFlags::RETRANSMISSION) {
+                self.decoded_changed = true;
+            }
+            return;
+        }
+        // A frame being decoded, or one abandoned for it, needs nothing more.
+        if self
+            .decoding
+            .is_some_and(|decoding| frame_number <= decoding)
+        {
             return;
         }
         self.last_fragment_at = Some(now);
@@ -437,9 +452,15 @@ impl VideoReceiver {
         if let Some(timing) = self.timings.get_mut(&frame_number) {
             timing.decoded_time = self.clock.timestamp(now);
         }
-        self.frames = self.frames.split_off(&FrameNumber(
-            VarInt::new(frame_number.0.into_inner() + 1).unwrap_or(VarInt::MAX),
-        ));
+        let next = FrameNumber(VarInt::new(frame_number.0.into_inner() + 1).unwrap_or(VarInt::MAX));
+        self.frames = self.frames.split_off(&next);
+        // A next frame that arrived but was not kept is missing entirely,
+        // and asked for again like one that never arrived.
+        if next <= self.highest_seen {
+            self.frames
+                .entry(next)
+                .or_insert_with(|| PendingFrame::new(None, now));
+        }
     }
 
     /// Records that the decoder failed or was reset: the stream enters the
@@ -529,7 +550,7 @@ impl VideoReceiver {
             self.decoded_changed = false;
             self.decoded_sent_at = Some(now);
         }
-        let in_loss = self.state != ReceiverState::Decoding;
+        let in_loss = self.awaiting_recovery();
         let loss_due = self
             .loss_sent_at
             .is_none_or(|sent_at| now >= sent_at + LOSS_FEEDBACK_INTERVAL);
@@ -548,16 +569,17 @@ impl VideoReceiver {
     /// `KEY_ONLY` state, which every `VIDEO_FEEDBACK` datagram must carry
     /// (Section 6.8.3, rule 3), without counting it as sent.
     pub fn loss_record(&self) -> Option<FeedbackRecord> {
-        (self.state != ReceiverState::Decoding).then_some(FeedbackRecord::Loss(LossRecord {
-            stream_id: self.stream_id,
-            last_decoded_frame: self.last_decoded,
-            highest_frame_seen: self.highest_seen,
-        }))
+        self.awaiting_recovery()
+            .then_some(FeedbackRecord::Loss(LossRecord {
+                stream_id: self.stream_id,
+                last_decoded_frame: self.last_decoded,
+                highest_frame_seen: self.highest_seen,
+            }))
     }
 
     /// Returns when the next periodic feedback is due.
     fn next_feedback_due(&self) -> Option<Instant> {
-        let loss = (self.state != ReceiverState::Decoding).then(|| {
+        let loss = self.awaiting_recovery().then(|| {
             self.loss_sent_at.map_or(
                 self.last_fragment_at.unwrap_or(self.clock.epoch()),
                 |sent_at| sent_at + LOSS_FEEDBACK_INTERVAL,
@@ -592,6 +614,17 @@ impl VideoReceiver {
         Some(sent_at + interval)
     }
 
+    /// Returns whether the stream waits for a recovery frame: it is in the
+    /// `LOSS` or `KEY_ONLY` state, and no frame it may decode is complete or
+    /// being decoded. A frame that arrived whole is not lost while the
+    /// decoder works on it, and reporting the loss then would tell the host
+    /// that its recovery frame failed (Section 6.8.3, rule 3).
+    fn awaiting_recovery(&self) -> bool {
+        self.state != ReceiverState::Decoding
+            && self.decoding.is_none()
+            && !self.frames.values().any(|frame| self.is_jump_target(frame))
+    }
+
     /// Returns whether `frame` can be decoded at once in the current state,
     /// abandoning lower frames (Section 6.8.3).
     fn is_jump_target(&self, frame: &PendingFrame) -> bool {
@@ -610,7 +643,11 @@ impl VideoReceiver {
     /// state: in the `LOSS` and `KEY_ONLY` states, only for frames that may be
     /// acceptable and the frames after them (Section 6.8.3).
     fn may_nack(&self, frame_number: FrameNumber) -> bool {
-        if self.state == ReceiverState::Decoding {
+        if self.state == ReceiverState::Decoding
+            || self
+                .decoding
+                .is_some_and(|decoding| decoding < frame_number)
+        {
             return true;
         }
         let state = self.state;
@@ -773,12 +810,15 @@ impl VideoReceiver {
             ReceiverState::Decoding => {
                 Some(self.decoding.unwrap_or(self.last_decoded).0.into_inner() + 1)
             }
-            ReceiverState::Loss | ReceiverState::KeyOnly => self
-                .frames
-                .iter()
-                .rev()
-                .find(|(_, frame)| self.is_jump_target(frame))
-                .map(|(number, _)| number.0.into_inner()),
+            ReceiverState::Loss | ReceiverState::KeyOnly => match self.decoding {
+                Some(decoding) => Some(decoding.0.into_inner() + 1),
+                None => self
+                    .frames
+                    .iter()
+                    .rev()
+                    .find(|(_, frame)| self.is_jump_target(frame))
+                    .map(|(number, _)| number.0.into_inner()),
+            },
         };
         let Some(first) = first.and_then(|first| VarInt::new(first).ok()) else {
             return 0;
@@ -797,7 +837,9 @@ impl VideoReceiver {
     /// In the `LOSS` and `KEY_ONLY` states, discards the frames below the
     /// first that may be acceptable: the decoder can only jump past them.
     fn discard_unusable(&mut self) {
-        if self.state == ReceiverState::Decoding {
+        // The frames above one being decoded, which is acceptable, follow
+        // it in order.
+        if self.state == ReceiverState::Decoding || self.decoding.is_some() {
             return;
         }
         let state = self.state;
@@ -1005,6 +1047,96 @@ mod tests {
         assert!(decodable.resets_composition);
         assert_eq!(decodable.temporal_unit(), vec![7; 300]);
         assert!(decodable.header.blocks.is_full());
+    }
+
+    /// Frames that arrive while the key frame a stream waited for is being
+    /// decoded are kept, and decoded after it.
+    #[test]
+    fn keeps_frames_behind_a_key_frame_being_decoded() {
+        let mut harness = Harness::new();
+        let key = harness.send(FrameKind::Key, 1000);
+        harness.deliver(&key);
+        let decoding = harness.receiver.poll_decodable().unwrap();
+        let delta = harness.send(FrameKind::Delta, 1000);
+        let mut partial = delta.clone();
+        let missing = partial.remove(1);
+        harness.deliver(&partial);
+        // The gap in the frame behind it is asked for.
+        assert!(harness.receiver.poll_feedback(harness.now).iter().any(
+            |record| matches!(record, FeedbackRecord::Nack(nack) if nack.frame_number == frame(2))
+        ));
+        harness.deliver(&[missing]);
+        harness
+            .receiver
+            .frame_decoded(decoding.frame_number, harness.now);
+        assert_eq!(harness.decode_all(), [2]);
+    }
+
+    /// A stream waiting for a key frame reports the loss until one has
+    /// arrived whole, and not while it is decoded, which would tell the
+    /// host that it failed; a decoder that then fails starts the reports
+    /// again.
+    #[test]
+    fn no_loss_reported_while_a_recovery_frame_is_decoded() {
+        let mut harness = Harness::new();
+        assert!(matches!(
+            harness.receiver.poll_feedback(harness.now).as_slice(),
+            [FeedbackRecord::Loss(_)]
+        ));
+        let key = harness.send(FrameKind::Key, 1000);
+        harness.deliver(&key);
+        harness.now += LOSS_FEEDBACK_INTERVAL;
+        assert!(harness.receiver.poll_feedback(harness.now).is_empty());
+        assert!(harness.receiver.loss_record().is_none());
+        let decoding = harness.receiver.poll_decodable().unwrap();
+        harness.now += LOSS_FEEDBACK_INTERVAL;
+        assert!(harness.receiver.poll_feedback(harness.now).is_empty());
+        assert_eq!(decoding.frame_number, frame(1));
+        harness.receiver.decode_failed();
+        assert!(matches!(
+            harness.receiver.poll_feedback(harness.now).as_slice(),
+            [FeedbackRecord::Loss(_)]
+        ));
+    }
+
+    /// The host's tail-loss probe of a frame being decoded asks for nothing,
+    /// and once the frame is decoded, a probe of it brings `DECODED` at once.
+    #[test]
+    fn tail_probes_of_decoded_frames() {
+        let mut harness = Harness::new();
+        let key = harness.send(FrameKind::Key, 1000);
+        harness.deliver(&key);
+        harness.feedback();
+        let decoding = harness.receiver.poll_decodable().unwrap();
+        harness.now += 3 * RTT;
+        let probe = harness.sender.handle_timeout(RTT, harness.now);
+        assert_eq!(probe.len(), 1);
+        harness.deliver(&probe);
+        assert!(harness.receiver.frames.is_empty());
+        assert!(
+            !harness
+                .feedback()
+                .iter()
+                .any(|record| matches!(record, FeedbackRecord::Nack(_)))
+        );
+
+        harness
+            .receiver
+            .frame_decoded(decoding.frame_number, harness.now);
+        // The DECODED is lost, so the host probes again.
+        assert!(matches!(
+            harness.receiver.poll_feedback(harness.now).as_slice(),
+            [FeedbackRecord::Decoded(_)]
+        ));
+        assert!(harness.receiver.poll_feedback(harness.now).is_empty());
+        harness.now += 3 * RTT;
+        let probe = harness.sender.handle_timeout(RTT, harness.now);
+        harness.deliver(&probe);
+        assert!(matches!(
+            harness.feedback().as_slice(),
+            [FeedbackRecord::Decoded(DecodedRecord { last_decoded_frame, .. })]
+                if *last_decoded_frame == frame(1)
+        ));
     }
 
     /// A gap in a frame's fragments is NACKed and retransmissions complete it.

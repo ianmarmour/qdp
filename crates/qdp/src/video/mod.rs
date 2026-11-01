@@ -18,4 +18,4 @@ mod sender;
 
 pub use composition::{BlockSource, Composition};
 pub use receiver::{DecodableFrame, MAX_INCOMPLETE_FRAMES, ReceiverState, VideoReceiver};
-pub use sender::{FrameKind, SendFrameError, SentFrameInfo, VideoSender};
+pub use sender::{FrameKind, SendFrameError, SendQueue, SentFrameInfo, SentWhen, VideoSender};

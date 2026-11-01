@@ -1,10 +1,12 @@
 //! An established QDP connection: the QUIC connection and its control stream.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use qdp::auth::scram::{CHANNEL_BINDING_LENGTH, ChannelBinding, EXPORTER_LABEL};
 use qdp::registry::ErrorCode;
+use qdp::video::SendQueue;
 use quinn::{Connection, RecvStream, SendStream};
 use rustls::pki_types::CertificateDer;
 
@@ -52,6 +54,9 @@ pub struct QdpConnection {
     control_send: SendStream,
     /// The peer's direction of the control stream.
     control_recv: RecvStream,
+    /// The bytes of datagrams handed to [`QdpConnection::send_datagram`]
+    /// so far.
+    datagrams_offered: AtomicU64,
 }
 
 impl QdpConnection {
@@ -67,6 +72,7 @@ impl QdpConnection {
             connection,
             control_send,
             control_recv,
+            datagrams_offered: AtomicU64::new(0),
         };
         if connection.connection.max_datagram_size().is_none() {
             connection.close(
@@ -126,6 +132,21 @@ impl QdpConnection {
         DATAGRAM_SEND_BUFFER.saturating_sub(self.connection.datagram_send_buffer_space())
     }
 
+    /// Returns how far the datagram queue has drained: the bytes of
+    /// datagrams handed to [`QdpConnection::send_datagram`] so far, and how
+    /// many of them have left the queue. Datagrams leave it in the order
+    /// they were queued, so one has been sent once the bytes that left reach
+    /// those offered when it was queued. Datagrams sent on clones of
+    /// [`QdpConnection::quic`] are not counted, and while they wait the
+    /// bytes that left are undercounted by theirs.
+    pub fn datagram_queue(&self) -> SendQueue {
+        let offered = self.datagrams_offered.load(Ordering::Relaxed);
+        SendQueue {
+            offered,
+            departed: offered.saturating_sub(self.queued_datagram_bytes() as u64),
+        }
+    }
+
     /// Returns the pin of the certificate the peer presented in the TLS
     /// handshake, if it presented one: on a host, the client's, for the
     /// `CLIENT_CERTIFICATE` method (Section 4.4.2).
@@ -146,7 +167,11 @@ impl QdpConnection {
     }
 
     /// Sends a datagram, which must fit [`QdpConnection::max_datagram_size`].
+    /// It counts toward [`QdpConnection::datagram_queue`] even if it cannot
+    /// be queued, as if it left at once.
     pub fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), TransportError> {
+        self.datagrams_offered
+            .fetch_add(datagram.len() as u64, Ordering::Relaxed);
         Ok(self.connection.send_datagram(Bytes::from(datagram))?)
     }
 
