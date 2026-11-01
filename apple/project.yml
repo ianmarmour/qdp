@@ -1,0 +1,95 @@
+# The Apple apps' Xcode project, which XcodeGen generates as QDP.xcodeproj:
+#
+#   ./build-core.sh && xcodegen generate
+#
+# Both apps link the Rust core, Generated/QDPCore.xcframework, with the
+# system libraries Generated/QDPCore.xcconfig lists, and share the code in
+# Shared/.
+name: QDP
+options:
+  bundleIdPrefix: io.github.ianmarmour
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Generated/QDPCore.xcconfig
+  Release: Generated/QDPCore.xcconfig
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    PRODUCT_NAME: QDP
+    PRODUCT_BUNDLE_IDENTIFIER: io.github.ianmarmour.qdp
+    CODE_SIGN_STYLE: Automatic
+    DEAD_CODE_STRIPPING: YES
+targets:
+  QDP-macOS:
+    type: application
+    platform: macOS
+    sources: [Shared, macOS]
+    dependencies:
+      - framework: Generated/QDPCore.xcframework
+        embed: false
+    info:
+      path: Generated/macOS-Info.plist
+      properties:
+        CFBundleDisplayName: QDP
+        LSApplicationCategoryType: public.app-category.utilities
+        NSLocalNetworkUsageDescription: QDP finds the computers on your network you can stream from, and connects to them.
+        NSBonjourServices: [_qdp._udp]
+        NSMicrophoneUsageDescription: QDP sends your microphone to the computer you stream from when you turn it on.
+    entitlements:
+      path: Generated/macOS.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        ENABLE_HARDENED_RUNTIME: YES
+        # The core is built for Apple silicon, which streams with the AV1
+        # decoders of M3 and later.
+        ARCHS: arm64
+  QDP-iOS:
+    type: application
+    platform: iOS
+    sources: [Shared, iOS]
+    dependencies:
+      - framework: Generated/QDPCore.xcframework
+        embed: false
+    info:
+      path: Generated/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: QDP
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        CADisableMinimumFrameDurationOnPhone: true
+        GCSupportsControllerUserInteraction: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+        NSLocalNetworkUsageDescription: QDP finds the computers on your network you can stream from, and connects to them.
+        NSBonjourServices: [_qdp._udp]
+        NSMicrophoneUsageDescription: QDP sends your microphone to the computer you stream from when you turn it on.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+schemes:
+  QDP-macOS:
+    build:
+      targets:
+        QDP-macOS: all
+  QDP-iOS:
+    build:
+      targets:
+        QDP-iOS: all

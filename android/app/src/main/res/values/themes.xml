@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+    The window behind Compose, which shows while an activity starts: Ember's
+    surface, so that nothing flashes white or black before the first frame.
+    -->
+    <style name="Theme.Qdp" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
+
+    <!-- The stream, always dark behind its video. -->
+    <style name="Theme.Qdp.Stream" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>
