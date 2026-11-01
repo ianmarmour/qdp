@@ -9,6 +9,7 @@ mod app_events;
 mod args;
 #[cfg(feature = "window")]
 mod color;
+mod discover;
 #[cfg(feature = "window")]
 mod identity;
 mod paired;
@@ -17,7 +18,6 @@ mod sink;
 #[cfg(feature = "window")]
 mod window;
 
-use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 use qdp::discovery::{PairingOffer, ServiceRecord};
 use qdp_codec::{CodecPreference, DecoderCommand};
 use qdp_desktop::{
-    Advertisement, Advertising, Discovery, DisplayMatching, FoundHost, FrameMemory, HostPrivacy,
-    Notification, ScreenOptions, Urgency,
+    Advertisement, Advertising, DisplayMatching, FrameMemory, HostPrivacy, Notification,
+    ScreenOptions, Urgency,
 };
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
 use qdp_runtime::{
@@ -51,8 +51,8 @@ use qdp_app::events::{CodeRequest, Event};
 
 use crate::app_events::EventLines;
 use crate::args::{
-    AdvertiseMode, Audio, ClientsAction, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement,
-    GpuCapture, HostTrust, LockPolicy, PairingMode, Presentation, Privacy, ServeArgs, SourceKind,
+    AdvertiseMode, Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, GpuCapture,
+    HostTrust, LockPolicy, PairedAction, PairingMode, Presentation, Privacy, ServeArgs, SourceKind,
     USAGE, format_pin, parse_args,
 };
 use crate::identity::Role;
@@ -136,14 +136,18 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Pin { identity, role } => print_pin(&identity, role),
-        Command::Clients { identity, action } => clients(&identity, action),
+        Command::Paired {
+            identity,
+            role,
+            action,
+        } => paired(&identity, role, action),
         Command::Service(action) => service::run(action),
         Command::Serve(args) => {
             adopt_session_display();
             run_async(serve(args))
         }
         Command::Connect(args) => connect(args),
-        Command::Discover => run_async(discover()),
+        Command::Discover(mode) => run_async(discover::discover(mode)),
         Command::Decoder => qdp_codec::serve_decoder_on_stdio()
             .map_err(|error| format!("the decoder process failed: {error}")),
         Command::SessionHelper => qdp_desktop::run_session_helper(),
@@ -846,36 +850,45 @@ fn log_pairing(paired: &PairedFile, event: PairingEvent) {
     }
 }
 
-/// Runs `qdp clients`: lists the clients that paired with the host, or
-/// forgets one. A running host forgets it when it restarts.
-fn clients(identity: &Path, action: ClientsAction) -> CliResult {
-    let paired = PairedFile::clients(identity);
+/// Runs `qdp clients` or `qdp hosts`: lists or forgets the devices that
+/// the identity of `role` in `identity` paired with.
+fn paired(identity: &Path, role: Role, action: PairedAction) -> CliResult {
+    let (paired, kind) = match role {
+        Role::Host => (PairedFile::clients(identity), "client"),
+        Role::Client => (PairedFile::hosts(identity), "host"),
+    };
     match action {
-        ClientsAction::List => {
-            let clients = paired
+        PairedAction::List => {
+            let devices = paired
                 .load()
-                .map_err(|error| format!("cannot read the paired clients: {error}"))?;
-            if clients.is_empty() {
-                println!("No client has paired with this host.");
+                .map_err(|error| format!("cannot read the paired {kind}s: {error}"))?;
+            if devices.is_empty() {
+                match role {
+                    Role::Host => println!("No client has paired with this host."),
+                    Role::Client => println!("This client has not paired with a host."),
+                }
             }
-            for client in clients {
-                println!("{}  {}", format_pin(client.pin), client.label);
+            for device in devices {
+                println!("{}  {}", format_pin(device.pin), device.label);
             }
         }
-        ClientsAction::Remove(which) => {
+        PairedAction::Remove(which) => {
             let removed = paired
                 .remove(&which)
-                .map_err(|error| format!("cannot change the paired clients: {error}"))?;
+                .map_err(|error| format!("cannot change the paired {kind}s: {error}"))?;
             if removed.is_empty() {
                 return Err(format!(
-                    "no paired client is named {which} or has a pin starting with it"
+                    "no paired {kind} is labelled {which} or has a pin starting with it"
                 ));
             }
-            for client in removed {
-                println!(
-                    "Forgot {}; a running host forgets it once restarted.",
-                    client.label
-                );
+            for device in removed {
+                match role {
+                    Role::Host => println!(
+                        "Forgot {}; a running host forgets it once restarted.",
+                        device.label
+                    ),
+                    Role::Client => println!("Forgot {}.", device.label),
+                }
             }
         }
     }
@@ -1006,51 +1019,6 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
 async fn window_closed(close: &window::CloseSignal) {
     close.closed().await;
     tokio::time::sleep(CLOSE_GRACE).await;
-}
-
-/// How long `qdp discover` listens for hosts.
-const DISCOVERY_WAIT: Duration = Duration::from_secs(3);
-
-/// Lists the hosts that advertise on the local network within
-/// [`DISCOVERY_WAIT`], one a line: its name, address and whether it offers
-/// pairing.
-async fn discover() -> CliResult {
-    let found = Arc::new(Mutex::new(BTreeMap::<String, FoundHost>::new()));
-    let hosts = Arc::clone(&found);
-    let browsing = qdp_desktop::browse(move |discovery| {
-        let mut hosts = hosts.lock().unwrap_or_else(PoisonError::into_inner);
-        match discovery {
-            // A host found on several interfaces is listed once, at an
-            // IPv4 address if it has one.
-            Discovery::Found(host) => {
-                let better = hosts
-                    .get(&host.name)
-                    .is_none_or(|known| !known.address.is_ipv4() && host.address.is_ipv4());
-                if better {
-                    hosts.insert(host.name.clone(), host);
-                }
-            }
-            Discovery::Lost(name) => {
-                hosts.remove(&name);
-            }
-        }
-    });
-    if let Ok(Err(error)) = tokio::time::timeout(DISCOVERY_WAIT, browsing).await {
-        return Err(error);
-    }
-    let hosts = found.lock().unwrap_or_else(PoisonError::into_inner);
-    if hosts.is_empty() {
-        println!("No host advertises on the local network.");
-    }
-    for host in hosts.values() {
-        let pairing = match host.record.as_ref().map(|record| record.pairing) {
-            Some(PairingOffer::Offered) => "offers pairing",
-            Some(PairingOffer::NotOffered) => "does not offer pairing",
-            None => "unreadable record",
-        };
-        println!("{}  {}  {pairing}", host.name, host.address);
-    }
-    Ok(())
 }
 
 /// Completes on Ctrl-C, or never if the interrupt cannot be watched.

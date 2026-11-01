@@ -19,13 +19,19 @@ Usage:
   qdp serve [options]          Serve this machine's desktop
   qdp connect HOST [options]   Connect to a host, by address or name,
                                with an optional :PORT (default 4433)
-  qdp discover                 List the hosts advertising on the local network
+  qdp discover [--watch]       List the hosts advertising on the local network;
+                               --watch writes a line as each comes and goes,
+                               until standard input closes, for an app
   qdp pin [--identity DIR]     Print this host's key pin for clients
   qdp pin --client [--identity DIR]
                                Print this client's key pin for hosts
   qdp clients [--identity DIR] List the clients that paired with this host
   qdp clients remove WHICH [--identity DIR]
                                Forget a paired client, by its name or the
+                               start of its key pin
+  qdp hosts [--identity DIR]   List the hosts this client paired with
+  qdp hosts remove WHICH [--identity DIR]
+                               Forget a paired host, by its address or the
                                start of its key pin
   qdp service install [serve options]
                                Run the host as a service: on Linux a system
@@ -183,7 +189,7 @@ pub enum Command {
     /// session, which starts it. Not for people to run.
     SessionHelper,
     /// List the hosts advertising on the local network.
-    Discover,
+    Discover(DiscoverMode),
     /// Print the key pin of the host's or the client's identity.
     Pin {
         /// The directory of the identity.
@@ -191,12 +197,16 @@ pub enum Command {
         /// Whose identity it is.
         role: Role,
     },
-    /// List or forget the clients that paired with the host.
-    Clients {
-        /// The directory of the host's identity.
+    /// List or forget the clients that paired with the host, or the hosts
+    /// the client paired with.
+    Paired {
+        /// The directory of the identity.
         identity: PathBuf,
+        /// Whose identity it is: a host's lists its clients, a client's its
+        /// hosts.
+        role: Role,
         /// What to do.
-        action: ClientsAction,
+        action: PairedAction,
     },
     /// Install, remove or describe the host's system service.
     Service(ServiceAction),
@@ -219,12 +229,12 @@ pub enum ServiceAction {
     Status,
 }
 
-/// What `qdp clients` does.
+/// What `qdp clients` and `qdp hosts` do.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClientsAction {
-    /// List the paired clients.
+pub enum PairedAction {
+    /// List the paired devices.
     List,
-    /// Forget the clients named, or whose pin starts with, the text.
+    /// Forget the devices labelled, or whose pin starts with, the text.
     Remove(String),
 }
 
@@ -269,6 +279,17 @@ pub enum SourceKind {
     Console,
     /// A moving test pattern.
     TestPattern,
+}
+
+/// How `qdp discover` reports the hosts it finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DiscoverMode {
+    /// Lists those found within a few seconds, for people.
+    #[default]
+    List,
+    /// Writes a line as each comes and goes, until standard input closes,
+    /// for an app.
+    Watch,
 }
 
 /// Where `qdp connect` reports the session's progress.
@@ -564,7 +585,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
         Some("serve") => parse_serve(arguments).map(Command::Serve),
         Some("connect") => parse_connect(arguments).map(Command::Connect),
         Some(DECODER_COMMAND) => Ok(Command::Decoder),
-        Some("discover") => no_more(arguments).map(|()| Command::Discover),
+        Some("discover") => parse_discover(arguments).map(Command::Discover),
         Some(qdp_desktop::SESSION_HELPER_COMMAND) => Ok(Command::SessionHelper),
         Some("pin") => {
             let mut identity = None;
@@ -585,23 +606,8 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
                 role,
             })
         }
-        Some("clients") => {
-            let mut identity = PathBuf::from(DEFAULT_IDENTITY_DIR);
-            let mut action = ClientsAction::List;
-            while let Some(argument) = arguments.next() {
-                match argument.as_str() {
-                    "--identity" => identity = value("--identity", &mut arguments)?.into(),
-                    "remove" => {
-                        let which = arguments.next().ok_or_else(|| {
-                            error("clients remove needs a client's name or the start of its pin")
-                        })?;
-                        action = ClientsAction::Remove(which);
-                    }
-                    other => return Err(error(format!("unknown option: {other}"))),
-                }
-            }
-            Ok(Command::Clients { identity, action })
-        }
+        Some("clients") => parse_paired(arguments, Role::Host),
+        Some("hosts") => parse_paired(arguments, Role::Client),
         Some("service") => parse_service(arguments).map(Command::Service),
         Some("help" | "--help" | "-h") | None => Ok(Command::Help),
         Some(other) => Err(error(format!("unknown command: {other}"))),
@@ -638,6 +644,51 @@ fn no_more(mut arguments: impl Iterator<Item = String>) -> Result<(), ArgsError>
         Some(extra) => Err(error(format!("unexpected argument: {extra}"))),
         None => Ok(()),
     }
+}
+
+/// Parses the options of `qdp clients`, for `Role::Host`, or of `qdp hosts`,
+/// for `Role::Client`.
+fn parse_paired(
+    mut arguments: impl Iterator<Item = String>,
+    role: Role,
+) -> Result<Command, ArgsError> {
+    let (mut identity, removing) = match role {
+        Role::Host => (
+            PathBuf::from(DEFAULT_IDENTITY_DIR),
+            "clients remove needs a client's name or the start of its pin",
+        ),
+        Role::Client => (
+            PathBuf::from(DEFAULT_CLIENT_IDENTITY_DIR),
+            "hosts remove needs a host's address or the start of its pin",
+        ),
+    };
+    let mut action = PairedAction::List;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--identity" => identity = value("--identity", &mut arguments)?.into(),
+            "remove" => {
+                action = PairedAction::Remove(arguments.next().ok_or_else(|| error(removing))?)
+            }
+            other => return Err(error(format!("unknown option: {other}"))),
+        }
+    }
+    Ok(Command::Paired {
+        identity,
+        role,
+        action,
+    })
+}
+
+/// Parses the options of `qdp discover`.
+fn parse_discover(arguments: impl Iterator<Item = String>) -> Result<DiscoverMode, ArgsError> {
+    let mut mode = DiscoverMode::List;
+    for argument in arguments {
+        match argument.as_str() {
+            "--watch" => mode = DiscoverMode::Watch,
+            other => return Err(error(format!("unknown option: {other}"))),
+        }
+    }
+    Ok(mode)
 }
 
 /// Parses the options of `qdp serve`.
@@ -1099,19 +1150,38 @@ mod tests {
         assert!(parse_line("serve --advertise loudly").is_err());
         assert_eq!(
             parse_line("clients").unwrap(),
-            Command::Clients {
+            Command::Paired {
                 identity: PathBuf::from(DEFAULT_IDENTITY_DIR),
-                action: ClientsAction::List,
+                role: Role::Host,
+                action: PairedAction::List,
             }
         );
         assert_eq!(
             parse_line("clients remove Thor --identity id").unwrap(),
-            Command::Clients {
+            Command::Paired {
                 identity: PathBuf::from("id"),
-                action: ClientsAction::Remove("Thor".to_owned()),
+                role: Role::Host,
+                action: PairedAction::Remove("Thor".to_owned()),
             }
         );
         assert!(parse_line("clients remove").is_err());
+        assert_eq!(
+            parse_line("hosts").unwrap(),
+            Command::Paired {
+                identity: PathBuf::from(DEFAULT_CLIENT_IDENTITY_DIR),
+                role: Role::Client,
+                action: PairedAction::List,
+            }
+        );
+        assert_eq!(
+            parse_line("hosts --identity id remove ab12").unwrap(),
+            Command::Paired {
+                identity: PathBuf::from("id"),
+                role: Role::Client,
+                action: PairedAction::Remove("ab12".to_owned()),
+            }
+        );
+        assert!(parse_line("hosts remove").is_err());
     }
 
     /// `connect` needs an address, a pin and one credential.
@@ -1272,7 +1342,15 @@ mod tests {
     /// No arguments, or help, shows the usage text.
     #[test]
     fn help() {
-        assert_eq!(parse_line("discover").unwrap(), Command::Discover);
+        assert_eq!(
+            parse_line("discover").unwrap(),
+            Command::Discover(DiscoverMode::List)
+        );
+        assert_eq!(
+            parse_line("discover --watch").unwrap(),
+            Command::Discover(DiscoverMode::Watch)
+        );
+        assert!(parse_line("discover --forever").is_err());
         assert!(parse_line("discover now").is_err());
         assert_eq!(parse_line("").unwrap(), Command::Help);
         assert_eq!(parse_line("help").unwrap(), Command::Help);
