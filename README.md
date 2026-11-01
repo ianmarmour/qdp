@@ -295,10 +295,13 @@ cd android && ANDROID_HOME=~/Android/Sdk ./gradlew installRelease
 ```
 
 The app lists the hosts on the local network, as `qdp serve` advertises them,
-and the hosts it paired with. Tapping a new host pairs with it: the host prints
-a four-digit code, which the app asks for, and from then on tapping it
-connects at once. Holding a paired host forgets it. A host the app does not
-find can be paired with by its address, or reached with its pin and a token.
+and the hosts it paired with, as cards. Tapping a new host pairs with it: the
+host prints a four-digit code, which the app asks for, and from then on tapping
+it connects at once. A card's menu, which holding it also opens, forgets a
+paired host. A host the app does not find can be added by its address, and the
+dialog's Advanced section reaches it with its pin and a token. A controller or
+D-pad drives every screen: A selects, B goes back, Y opens a card's menu, X
+adds a host and Start opens settings.
 The app streams full screen. A handheld's built-in controls and connected controllers are sent as
 gamepads, with rumble. Touching the screen works as a trackpad by default: one
 finger moves the pointer, a tap clicks, two fingers right-click or scroll, and

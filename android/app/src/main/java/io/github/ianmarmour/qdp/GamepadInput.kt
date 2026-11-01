@@ -90,6 +90,25 @@ class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : Inpu
         pads.clear()
     }
 
+    /**
+     * Forgets the buttons, sticks and triggers held and sends every pad at
+     * rest, as when the stream's menu takes the gamepads: the presses that
+     * opened it are released to the menu, not to the host.
+     */
+    fun reset() {
+        for (pad in pads.values) {
+            pad.keys = 0
+            pad.hat = 0
+            pad.leftX = 0f
+            pad.leftY = 0f
+            pad.rightX = 0f
+            pad.rightY = 0f
+            pad.leftTrigger = 0f
+            pad.rightTrigger = 0f
+            pad.send()
+        }
+    }
+
     override fun onInputDeviceAdded(deviceId: Int) {
         val device = InputDevice.getDevice(deviceId) ?: return
         if (!Gamepads.isGamepad(device) || pads.containsKey(deviceId)) {

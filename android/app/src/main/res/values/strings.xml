@@ -13,6 +13,7 @@ verbs; errors give one cause and one next step. The UI says "computer";
     <string name="action_back">Back</string>
     <string name="action_connect">Connect</string>
     <string name="action_pair">Pair</string>
+    <string name="action_try_again">Try again</string>
     <string name="action_copy">Copy</string>
 
     <!-- Hosts screen. -->
@@ -143,4 +144,57 @@ verbs; errors give one cause and one next step. The UI says "computer";
     <string name="settings_device_pin_unavailable">Unavailable on this device</string>
     <string name="settings_version">Version</string>
     <string name="copied">Copied</string>
+
+    <!-- The stream. -->
+    <string name="stream_connecting">Connecting to %1$s…</string>
+    <string name="stream_starting">Starting the stream…</string>
+    <string name="stream_reconnecting_in">Connection dropped. Reconnecting in %1$d s…</string>
+    <string name="stream_reconnecting">Connection dropped. Reconnecting…</string>
+    <string name="stream_paired">Paired with %1$s</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="menu_resume">Resume</string>
+    <string name="menu_keyboard">Keyboard</string>
+    <string name="menu_touch">Touch</string>
+    <string name="menu_stats">Stats</string>
+    <string name="stats_hidden">Off</string>
+    <string name="stats_summary_level">Simple</string>
+    <string name="stats_detailed_level">Detailed</string>
+    <string name="stats_summary">%1$d fps · %2$s</string>
+    <string name="stats_latency">%1$.0f ms</string>
+    <string name="stats_latency_unknown">– ms</string>
+    <string name="stats_slowest">Slowest frame %1$.1f ms</string>
+    <string name="stats_stages">Host + network %1$.1f · transfer %2$.1f · queue %3$.1f · decode %4$.1f ms</string>
+    <string name="coachmark_menu">Press Back to open the menu.</string>
+    <string name="coachmark_menu_gamepad">Press Back, or Select + Start + L1 + R1 together, to open the menu.</string>
+
+    <!-- Pairing. -->
+    <string name="pair_title">Pair with %1$s</string>
+    <string name="pair_body">Enter the 4-digit code shown on %1$s.</string>
+    <string name="pair_footnote">%1$s will see this device as “%2$s”.</string>
+    <string name="pair_checking">Checking…</string>
+    <string name="pair_wrong_code">That code didn\'t match. %1$s is showing a new one.</string>
+    <plurals name="pair_code_spoken">
+        <item quantity="one">Pairing code, %1$d of %2$d digit</item>
+        <item quantity="other">Pairing code, %1$d of %2$d digits</item>
+    </plurals>
+    <string name="keypad_delete">Delete digit</string>
+
+    <!-- Why a stream ended, as a title naming the computer and one sentence of cause and fix. -->
+    <string name="error_not_found_title">Couldn\'t find %1$s</string>
+    <string name="error_not_found_body">Check the address, then try again.</string>
+    <string name="error_unreachable_title">Couldn\'t reach %1$s</string>
+    <string name="error_unreachable_body">Check it\'s awake and on the same Wi-Fi.</string>
+    <string name="error_key_changed_title">%1$s has a new key</string>
+    <string name="error_key_changed_body">It may not be the computer you paired with. If you trust it, forget it and pair again.</string>
+    <string name="error_pairing_busy_title">%1$s isn\'t pairing right now</string>
+    <string name="error_pairing_busy_body">It pairs with one device at a time and pauses after wrong codes, so wait a few minutes and try again.</string>
+    <string name="error_not_accepted_title">%1$s didn\'t accept this device</string>
+    <string name="error_not_accepted_body">Forget it and pair again, or check the token under Advanced.</string>
+    <string name="error_decoder_title">This device couldn\'t play the stream from %1$s</string>
+    <string name="error_decoder_body">Choose another decoder in Settings, then try again.</string>
+    <string name="error_other_title">The stream from %1$s stopped</string>
+    <string name="error_other_body">Something went wrong. Try again, or show details to see what happened.</string>
+    <string name="error_show_details">Show details</string>
+    <string name="error_hide_details">Hide details</string>
+    <string name="action_back_to_computers">Back to computers</string>
 </resources>

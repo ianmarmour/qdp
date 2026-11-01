@@ -1,18 +1,13 @@
 package io.github.ianmarmour.qdp
 
 import android.Manifest
-import android.app.Activity
-import android.app.AlertDialog
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
-import android.text.Editable
-import android.text.InputFilter
-import android.text.InputType
-import android.text.TextWatcher
-import android.util.TypedValue
+import android.os.SystemClock
 import android.view.Display
 import android.view.Gravity
 import android.view.InputDevice
@@ -23,19 +18,29 @@ import android.view.PointerIcon
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
-import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.view.WindowManager
-import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.TextView
-import android.widget.Toast
+import androidx.activity.BackEventCompat
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.ui.platform.ComposeView
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import io.github.ianmarmour.qdp.ui.stream.ConnectingStep
+import io.github.ianmarmour.qdp.ui.stream.PairingStep
+import io.github.ianmarmour.qdp.ui.stream.PairingUi
+import io.github.ianmarmour.qdp.ui.stream.StatsLevel
+import io.github.ianmarmour.qdp.ui.stream.StreamActions
+import io.github.ianmarmour.qdp.ui.stream.StreamNotice
+import io.github.ianmarmour.qdp.ui.stream.StreamOverlay
+import io.github.ianmarmour.qdp.ui.stream.StreamPhase
+import io.github.ianmarmour.qdp.ui.stream.StreamUiState
+import io.github.ianmarmour.qdp.ui.stream.Visibility
+import io.github.ianmarmour.qdp.ui.theme.QdpTheme
 import kotlin.concurrent.thread
-import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -45,29 +50,29 @@ import kotlin.math.roundToInt
  * mouse and keyboard sent back. The session runs while the surface exists,
  * so that leaving the app ends it and coming back connects again.
  *
- * Back, or Select, Start and both bumpers together, opens a menu with the
- * on-screen keyboard, the touch mode, statistics and disconnecting.
+ * A Compose overlay draws everything else over the video: the connecting
+ * screen, the reconnecting banner, statistics, and the menu, which Back or
+ * Select, Start and both bumpers together open, with the on-screen keyboard,
+ * the touch mode, statistics and disconnecting. While the menu or a status
+ * screen shows, input goes to the overlay instead of the host.
  *
  * A stream that pairs asks for the code the host shows, and keeps the host
  * once paired, connecting to it with the device's key from then on.
  */
-class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
+class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
     private lateinit var settings: Settings
     private lateinit var target: StreamTarget
+    private lateinit var ui: StreamUiState
     private lateinit var root: FrameLayout
     private lateinit var videoFrame: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var cursorView: CursorView
-    private lateinit var statsView: TextView
-    private lateinit var statusView: TextView
+    private lateinit var overlayView: ComposeView
     private lateinit var typing: TypingView
     private lateinit var gamepads: GamepadInput
     private lateinit var touch: TouchInput
     private var wifiLock: WifiManager.WifiLock? = null
     private var events: Thread? = null
-
-    /** The dialog asking for a pairing code, while one is open. */
-    private var codeDialog: AlertDialog? = null
 
     /** Whether the event thread keeps waiting for events. */
     @Volatile
@@ -75,18 +80,58 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
 
     /** Whether a session runs in the surface. */
     private var streaming = false
+
+    /** Whether the core waits for a pairing code, which it is answered exactly once. */
+    private var codeRequested = false
     private var refreshMillihertz = DEFAULT_REFRESH_MILLIHERTZ
     private var relative = false
-    private var menuOpen = false
-    private var keyboardWanted = false
-    private var statsShown = false
 
     override var videoWidth = 0
         private set
     override var videoHeight = 0
         private set
 
+    /** What the overlay's buttons do. */
+    private val actions = StreamActions(
+        resume = ::closeMenu,
+        showKeyboard = ::showKeyboard,
+        toggleTouchMode = ::toggleTouchMode,
+        cycleStats = ::cycleStats,
+        disconnect = ::leave,
+        submitCode = ::answerCode,
+        cancelPairing = ::cancelPairing,
+        tryAgain = ::tryAgain,
+        leave = ::leave,
+    )
+
+    /**
+     * Back closes the menu, following a predictive back gesture as it goes;
+     * cancels while connecting; and opens the menu otherwise. Android 16
+     * sends apps that target it neither onBackPressed nor the Back key.
+     */
+    private val back = object : OnBackPressedCallback(true) {
+        override fun handleOnBackProgressed(backEvent: BackEventCompat) {
+            if (ui.menu == Visibility.SHOWN) {
+                ui.backProgress = backEvent.progress
+            }
+        }
+
+        override fun handleOnBackCancelled() {
+            ui.backProgress = 0f
+        }
+
+        override fun handleOnBackPressed() {
+            ui.backProgress = 0f
+            when {
+                ui.menu == Visibility.SHOWN -> closeMenu()
+                ui.phase == StreamPhase.CONNECTING -> leave()
+                else -> openMenu()
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         Native.init(applicationContext)
         settings = Settings.load(this)
@@ -94,7 +139,12 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             finish()
             return
         }
-        statsShown = settings.showStats
+        ui = StreamUiState(
+            hostName = target.name,
+            deviceName = DeviceName.of(this),
+            touchMode = settings.touchMode,
+            statsLevel = if (settings.showStats) StatsLevel.SUMMARY else StatsLevel.HIDDEN,
+        )
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val fastest = fastestMode()
         window.attributes = window.attributes.apply {
@@ -119,21 +169,24 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             addView(cursorView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
         typing = TypingView(this) { event -> keyboard(event) }
-        statsView = overlayText(Gravity.TOP or Gravity.START).apply {
-            visibility = if (statsShown) View.VISIBLE else View.GONE
+        overlayView = ComposeView(this).apply {
+            setContent {
+                QdpTheme(settings.colorSource, dark = true) {
+                    StreamOverlay(ui, actions)
+                }
+            }
         }
-        statusView = overlayText(Gravity.CENTER)
         root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(videoFrame, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
             addView(typing, FrameLayout.LayoutParams(1, 1))
-            addView(statsView, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.START))
-            addView(statusView, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER))
+            addView(overlayView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             // The host's cursor is drawn instead of Android's.
-            pointerIcon = PointerIcon.getSystemIcon(this@StreamActivity, PointerIcon.TYPE_NULL)
+            pointerIcon = hiddenPointer()
             addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> layoutVideo() }
         }
         setContentView(root)
+        onBackPressedDispatcher.addCallback(this, back)
 
         gamepads = GamepadInput(this) { openMenu() }
         touch = TouchInput(this, ViewConfiguration.get(this)) { x, y -> cursorView.moveTo(x, y) }.apply {
@@ -143,6 +196,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, WIFI_LOCK_TAG)
             ?.apply { setReferenceCounted(false) }
         immersive()
+        surfaceView.requestFocus()
     }
 
     override fun onResume() {
@@ -171,14 +225,19 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         if (streaming) {
             return
         }
-        val (width, height) = requestedSize()
-        videoWidth = width
-        videoHeight = height
+        val size = StreamSize.requested(StreamSize.screen(currentDisplay()), settings.resolution)
+        videoWidth = size.width
+        videoHeight = size.height
         layoutVideo()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // The display runs at the stream's rate.
             surface.setFrameRate(refreshMillihertz / MILLIHERTZ, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
         }
+        ui.error = null
+        ui.pairing = null
+        ui.menu = Visibility.HIDDEN
+        ui.connectingStep = ConnectingStep.REACHING
+        setPhase(StreamPhase.CONNECTING)
         val microphone = settings.microphone &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val error = Native.connect(
@@ -187,19 +246,18 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             target.authentication,
             target.pin,
             target.token,
-            deviceName(),
-            width,
-            height,
+            ui.deviceName,
+            size.width,
+            size.height,
             refreshMillihertz,
             settings.decoder.code,
             microphone,
         )
         if (error != null) {
-            fail(error)
+            ui.error = StreamError.of(error)
             return
         }
         streaming = true
-        status("Connecting to ${target.name}…")
         listening = true
         events = thread(name = "qdp-events", isDaemon = true) { listen() }
         gamepads.start()
@@ -213,8 +271,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         }
         streaming = false
         listening = false
-        codeDialog?.dismiss()
-        codeDialog = null
+        codeRequested = false
         events?.join()
         events = null
         touch.cancel()
@@ -223,6 +280,22 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             surfaceView.releasePointerCapture()
         }
         Native.disconnect()
+    }
+
+    /** Ends the session and leaves the stream. */
+    private fun leave() {
+        stop()
+        finish()
+    }
+
+    /** Connects again after a failure, in the surface there is. */
+    private fun tryAgain() {
+        ui.error = null
+        ui.pairing = null
+        val surface = surfaceView.holder.surface
+        if (surface != null && surface.isValid) {
+            start(surface)
+        }
     }
 
     /** Waits for the session's events and handles them on the main thread. */
@@ -243,14 +316,25 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             return
         }
         when (event) {
-            SessionEvent.Connecting -> status("Connecting to ${target.name}…")
-            SessionEvent.Connected -> status("Starting the stream…")
-            is SessionEvent.Reconnecting -> status("Connection lost; reconnecting…")
+            SessionEvent.Connecting -> ui.connectingStep = ConnectingStep.REACHING
+            SessionEvent.Connected -> when (ui.phase) {
+                StreamPhase.CONNECTING -> ui.connectingStep = ConnectingStep.STARTING
+                // A connection made again shows the video at its size, so
+                // no video event follows.
+                StreamPhase.RECONNECTING -> setPhase(StreamPhase.LIVE)
+                StreamPhase.LIVE -> Unit
+            }
+            is SessionEvent.Reconnecting -> {
+                ui.reconnectAt = SystemClock.uptimeMillis() + event.delayMillis
+                if (ui.phase == StreamPhase.LIVE) {
+                    setPhase(StreamPhase.RECONNECTING)
+                }
+            }
             is SessionEvent.Video -> {
                 videoWidth = event.width
                 videoHeight = event.height
                 layoutVideo()
-                status(null)
+                setPhase(StreamPhase.LIVE)
             }
             SessionEvent.Cursor -> cursorView.setImage(Native.cursorImage())
             is SessionEvent.Warp -> {
@@ -259,126 +343,143 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             }
             is SessionEvent.PointerMode -> setRelative(event.relative)
             is SessionEvent.Rumble -> gamepads.rumble(event.slot, event.low, event.high)
-            is SessionEvent.Stats -> {
-                val latency = event.latencyMillis?.let { "%.1f ms".format(it) } ?: "– ms"
-                val summary = "%d fps · %s · decode %.1f ms".format(event.fps, latency, event.decodeMillis)
-                // The slowest frame shows which stage a spike came from.
-                statsView.text = event.slowest?.let {
-                    summary + "\nslowest %.1f ms: host + network %.1f · transfer %.1f · waiting %.1f · decode %.1f"
-                        .format(it.latencyMillis, it.toFirstFragmentMillis, it.transferMillis, it.queuedMillis, it.decodeMillis)
-                } ?: summary
-            }
+            is SessionEvent.Stats -> ui.stats = event
             is SessionEvent.PairingCode -> askForCode(event.retry)
             is SessionEvent.Paired -> {
                 // From now on the host is reached with the device's key,
                 // also when the stream connects again.
                 PairedHosts.keep(this, PairedHost(target.name, target.address, event.pin))
                 target = target.copy(authentication = Native.AUTH_PAIRED, pin = event.pin)
-                Toast.makeText(this, "Paired with ${target.name}", Toast.LENGTH_SHORT).show()
+                ui.pairing = null
+                ui.notice = StreamNotice.PAIRED
             }
-            SessionEvent.Ended -> {
-                stop()
-                finish()
-            }
+            SessionEvent.Ended -> leave()
             is SessionEvent.Failed -> {
                 stop()
-                fail(event.error)
-            }
-        }
-    }
-
-    /**
-     * Asks for the code the host shows, answering the core once all its
-     * digits are typed, or declining if the dialog is closed; [retry] after
-     * a code that did not work.
-     */
-    private fun askForCode(retry: Boolean) {
-        codeDialog?.dismiss()
-        status("Pairing with ${target.name}…")
-        val field = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
-            filters = arrayOf(InputFilter.LengthFilter(CODE_LENGTH))
-            gravity = Gravity.CENTER
-            hint = "0".repeat(CODE_LENGTH)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, CODE_TEXT_SIZE)
-            letterSpacing = CODE_LETTER_SPACING
-        }
-        val frame = FrameLayout(this).apply {
-            val padding = (24 * resources.displayMetrics.density).roundToInt()
-            setPadding(padding, 0, padding, 0)
-            addView(field, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        }
-        val message = if (retry) {
-            "That code did not work. Type the new code ${target.name} shows."
-        } else {
-            "Type the four-digit code ${target.name} shows. Run qdp serve there if it shows none."
-        }
-        var answered = false
-        fun answer(code: String?) {
-            if (!answered) {
-                answered = true
-                Native.pairingCode(code)
-            }
-        }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Pair with ${target.name}")
-            .setMessage(message)
-            .setView(frame)
-            .setNegativeButton(android.R.string.cancel) { _, _ -> answer(null) }
-            .setOnDismissListener { answer(null) }
-            .create()
-        field.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) {}
-
-            override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) {}
-
-            override fun afterTextChanged(text: Editable) {
-                if (text.length == CODE_LENGTH) {
-                    answer(text.toString())
-                    dialog.dismiss()
-                    status("Pairing with ${target.name}…")
+                val error = StreamError.of(event.error)
+                // Pairing's own dialog explains a failure while pairing.
+                if (ui.pairing != null) {
+                    ui.pairing = PairingUi(PairingStep.FAILED, failure = error)
+                } else {
+                    ui.error = error
                 }
+                routeInput()
             }
-        })
-        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
-        codeDialog = dialog
-        dialog.show()
-        field.requestFocus()
+        }
     }
 
-    /** Returns the device's name, which a host shows when pairing. */
-    private fun deviceName(): String =
-        android.provider.Settings.Global.getString(contentResolver, android.provider.Settings.Global.DEVICE_NAME)
-            ?.takeIf { it.isNotBlank() }
-            ?: Build.MODEL
-
-    /** Shows [error] and leaves the stream once it is read. */
-    private fun fail(error: String) {
-        status(null)
-        AlertDialog.Builder(this)
-            .setTitle("Disconnected")
-            .setMessage(error)
-            .setPositiveButton(android.R.string.ok) { _, _ -> finish() }
-            .setOnCancelListener { finish() }
-            .show()
+    /** Moves the stream to [phase], showing the menu's tip the first time the video is live. */
+    private fun setPhase(phase: StreamPhase) {
+        ui.phase = phase
+        if (phase == StreamPhase.LIVE && Tip.STREAM_MENU.pending(this)) {
+            ui.coachmark = Visibility.SHOWN
+            Tip.STREAM_MENU.shown(this)
+        }
+        routeInput()
     }
 
-    /** Shows [text] over the video, or nothing for `null`. */
-    private fun status(text: String?) {
-        statusView.text = text
-        statusView.visibility = if (text == null) View.GONE else View.VISIBLE
+    /** Asks for the code the host shows; [retry] after a code that did not match. */
+    private fun askForCode(retry: Boolean) {
+        codeRequested = true
+        val wrongCodes = ui.pairing?.wrongCodes ?: 0
+        ui.pairing = PairingUi(PairingStep.ENTERING, wrongCodes = if (retry) wrongCodes + 1 else wrongCodes)
     }
 
-    /** Follows the host's pointer mode: in relative mode the mouse is captured. */
+    /** Answers the core's request for a pairing code with [code]. */
+    private fun answerCode(code: String) {
+        if (!codeRequested) {
+            return
+        }
+        codeRequested = false
+        Native.pairingCode(code)
+        ui.pairing = ui.pairing?.copy(step = PairingStep.CHECKING)
+    }
+
+    /** Declines to pair, which ends the session, or leaves if no code is awaited. */
+    private fun cancelPairing() {
+        ui.pairing = null
+        if (codeRequested) {
+            codeRequested = false
+            // The core ends the session, whose end leaves the stream.
+            Native.pairingCode(null)
+        } else {
+            leave()
+        }
+    }
+
+    /** Follows the host's pointer mode: in relative mode the mouse is captured, unless the overlay takes input. */
     private fun setRelative(relative: Boolean) {
         this.relative = relative
         touch.relative = relative
         cursorView.shown = !relative
-        if (relative) {
+        if (relative && !ui.capturesTouch) {
             surfaceView.requestFocus()
             surfaceView.requestPointerCapture()
         } else {
             surfaceView.releasePointerCapture()
+        }
+    }
+
+    /** Opens the stream's menu, releasing everything held so that the host sees nothing stuck. */
+    private fun openMenu() {
+        if (ui.menu == Visibility.SHOWN || ui.phase == StreamPhase.CONNECTING) {
+            return
+        }
+        ui.menu = Visibility.SHOWN
+        ui.coachmark = Visibility.HIDDEN
+        touch.cancel()
+        gamepads.reset()
+        Native.releaseAll()
+        typing.hide()
+        if (relative) {
+            surfaceView.releasePointerCapture()
+        }
+        routeInput()
+    }
+
+    /** Closes the stream's menu. */
+    private fun closeMenu() {
+        if (ui.menu == Visibility.HIDDEN) {
+            return
+        }
+        ui.menu = Visibility.HIDDEN
+        routeInput()
+    }
+
+    /** Closes the menu and shows the on-screen keyboard. */
+    private fun showKeyboard() {
+        closeMenu()
+        // Once focus has left the menu.
+        root.post { typing.show() }
+    }
+
+    /** Switches between trackpad and direct touch, keeping the choice. */
+    private fun toggleTouchMode() {
+        val mode = if (touch.mode == TouchMode.TRACKPAD) TouchMode.DIRECT else TouchMode.TRACKPAD
+        touch.mode = mode
+        ui.touchMode = mode
+        settings = settings.copy(touchMode = mode).also { it.save(this) }
+    }
+
+    /** Shows more statistics, or none after the most, keeping whether they show. */
+    private fun cycleStats() {
+        ui.statsLevel = ui.statsLevel.next()
+        settings = settings.copy(showStats = ui.statsLevel != StatsLevel.HIDDEN).also { it.save(this) }
+    }
+
+    /**
+     * Gives input back to the host once the overlay no longer takes it:
+     * focus and the pointer capture return to the video, and Android's
+     * pointer, which the overlay shows while it takes input, hides again.
+     */
+    private fun routeInput() {
+        if (ui.capturesTouch) {
+            return
+        }
+        overlayView.pointerIcon = hiddenPointer()
+        surfaceView.requestFocus()
+        if (relative) {
+            surfaceView.requestPointerCapture()
         }
     }
 
@@ -392,25 +493,28 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             return
         }
         immersive()
-        if (relative) {
+        if (relative && !ui.capturesTouch) {
             surfaceView.requestPointerCapture()
-        }
-        if (keyboardWanted) {
-            keyboardWanted = false
-            typing.show()
         }
     }
 
+    // androidx.core's ComponentActivity marks its override of the framework's
+    // public Activity.dispatchKeyEvent as restricted, which lint reports for
+    // every override; overriding it is the framework's own API.
+    @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (ui.capturesKeys) {
+            return super.dispatchKeyEvent(event)
+        }
         if (gamepads.onKey(event)) {
             return true
         }
         return when (event.keyCode) {
-            // Volume stays the device's, and Back opens the menu.
+            // Volume stays the device's. Back is no key the host is sent, so
+            // it goes on to the back callback, which opens the menu.
             KeyEvent.KEYCODE_VOLUME_UP,
             KeyEvent.KEYCODE_VOLUME_DOWN,
             KeyEvent.KEYCODE_VOLUME_MUTE,
-            KeyEvent.KEYCODE_BACK,
             -> super.dispatchKeyEvent(event)
             else -> keyboard(event) || super.dispatchKeyEvent(event)
         }
@@ -443,6 +547,9 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (ui.capturesTouch) {
+            return super.dispatchTouchEvent(event)
+        }
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             return mouse(event)
         }
@@ -450,11 +557,15 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        // Unhandled, a gamepad's sticks and hat move focus in the menu as a D-pad would.
+        if (ui.capturesKeys && event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
+            return super.dispatchGenericMotionEvent(event)
+        }
         if (gamepads.onMotion(event)) {
             return true
         }
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
-            return mouse(event)
+            return if (ui.capturesTouch) super.dispatchGenericMotionEvent(event) else mouse(event)
         }
         return super.dispatchGenericMotionEvent(event)
     }
@@ -525,71 +636,16 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         }
     }
 
-    @Deprecated("Back opens the stream's menu")
-    @Suppress("DEPRECATION")
-    override fun onBackPressed() {
-        openMenu()
-    }
-
-    /** Opens the stream's menu. */
-    private fun openMenu() {
-        if (menuOpen) {
-            return
-        }
-        menuOpen = true
-        Native.releaseAll()
-        val otherMode = if (touch.mode == TouchMode.TRACKPAD) TouchMode.DIRECT else TouchMode.TRACKPAD
-        val items = arrayOf(
-            "Keyboard",
-            "Touch as ${getString(otherMode.label).lowercase()}",
-            if (statsShown) "Hide statistics" else "Show statistics",
-            "Disconnect",
-        )
-        AlertDialog.Builder(this)
-            .setItems(items) { _, which ->
-                when (which) {
-                    MENU_KEYBOARD -> keyboardWanted = true
-                    MENU_TOUCH -> {
-                        touch.mode = otherMode
-                        settings = settings.copy(touchMode = otherMode).also { it.save(this) }
-                    }
-                    MENU_STATS -> {
-                        statsShown = !statsShown
-                        statsView.visibility = if (statsShown) View.VISIBLE else View.GONE
-                        settings = settings.copy(showStats = statsShown).also { it.save(this) }
-                    }
-                    MENU_DISCONNECT -> {
-                        stop()
-                        finish()
-                    }
-                }
-            }
-            .setOnDismissListener { menuOpen = false }
-            .show()
-    }
-
     /** Hides the system bars, which a swipe shows for a moment. */
     private fun immersive() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-                // Android 15 and later always draw behind the system bars.
-                @Suppress("DEPRECATION")
-                window.setDecorFitsSystemWindows(false)
-            }
-            window.insetsController?.apply {
-                hide(WindowInsets.Type.systemBars())
-                systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
     }
+
+    /** Returns the pointer icon that shows nothing, as the host's cursor is drawn instead. */
+    private fun hiddenPointer(): PointerIcon = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
 
     /** Returns the display the activity is on. */
     private fun currentDisplay(): Display? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -606,20 +662,6 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         return display.supportedModes
             .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
             .maxByOrNull { it.refreshRate }
-    }
-
-    /** Returns the display size to ask the host for, landscape. */
-    private fun requestedSize(): Pair<Int, Int> {
-        val mode = currentDisplay()?.mode
-        val long = max(mode?.physicalWidth ?: FALLBACK_WIDTH, mode?.physicalHeight ?: FALLBACK_HEIGHT)
-        val short = min(mode?.physicalWidth ?: FALLBACK_WIDTH, mode?.physicalHeight ?: FALLBACK_HEIGHT)
-        val height = settings.resolution.height
-        if (height == 0) {
-            return long to short
-        }
-        // The chosen height at the screen's aspect ratio, an even width.
-        val width = (height * long.toFloat() / short).roundToInt() and 1.inv()
-        return width to height
     }
 
     /** Sizes the video to fit the screen with its aspect ratio. */
@@ -650,16 +692,6 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
 
     override fun videoPerView(): Float = videoWidth.toFloat() / videoFrame.width.coerceAtLeast(1)
 
-    /** Returns text drawn over the video. */
-    private fun overlayText(gravity: Int): TextView = TextView(this).apply {
-        this.gravity = gravity
-        setTextColor(Color.WHITE)
-        setShadowLayer(4f, 0f, 0f, Color.BLACK)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        val padding = (12 * resources.displayMetrics.density).roundToInt()
-        setPadding(padding, padding, padding, padding)
-    }
-
     private companion object {
         /** How long the event thread waits for each event before checking it should stop. */
         const val EVENT_WAIT_MILLIS = 100
@@ -673,24 +705,6 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         /** 1/120ths of a wheel detent per detent. */
         const val WHEEL_DETENT = 120f
 
-        /** The display size assumed when the display's is unknown. */
-        const val FALLBACK_WIDTH = 1920
-        const val FALLBACK_HEIGHT = 1080
-
         const val WIFI_LOCK_TAG = "qdp:stream"
-
-        /** The digits of a pairing code. */
-        const val CODE_LENGTH = 4
-
-        /** The size of a pairing code's digits, in scaled pixels. */
-        const val CODE_TEXT_SIZE = 32f
-
-        /** The space between a pairing code's digits, in ems. */
-        const val CODE_LETTER_SPACING = 0.5f
-
-        const val MENU_KEYBOARD = 0
-        const val MENU_TOUCH = 1
-        const val MENU_STATS = 2
-        const val MENU_DISCONNECT = 3
     }
 }
