@@ -34,7 +34,8 @@ use qdp_codec::Yuv420Frame;
 use tracing::debug;
 
 /// The shaders: a quad placed by a rectangle, the picture's colours from its
-/// three planes, and an overlay image.
+/// three planes, and an overlay image. Their names start with `qdp_`, since
+/// Metal reserves some plain ones, such as `quad`.
 ///
 /// The picture is limited-range BT.709 YUV 4:2:0, the format QDP's standard
 /// dynamic range streams use; the coefficients are those of the processor's
@@ -49,7 +50,7 @@ struct Corner {
 };
 
 // The rectangle's left, top, right and bottom edges, from -1 to 1.
-vertex Corner quad(uint index [[vertex_id]], constant float4 &rect [[buffer(0)]]) {
+vertex Corner qdp_quad(uint index [[vertex_id]], constant float4 &rect [[buffer(0)]]) {
     float2 unit = float2(float(index & 1), float(index >> 1));
     Corner corner;
     corner.position = float4(mix(rect.x, rect.z, unit.x), mix(rect.y, rect.w, unit.y), 0.0, 1.0);
@@ -57,26 +58,26 @@ vertex Corner quad(uint index [[vertex_id]], constant float4 &rect [[buffer(0)]]
     return corner;
 }
 
-fragment float4 picture(
+fragment float4 qdp_picture(
     Corner corner [[stage_in]],
     texture2d<float> luma [[texture(0)]],
     texture2d<float> blue [[texture(1)]],
     texture2d<float> red [[texture(2)]],
-    sampler linear [[sampler(0)]]
+    sampler bilinear [[sampler(0)]]
 ) {
-    float y = (luma.sample(linear, corner.coordinate).r * 255.0 - 16.0) / 219.0;
-    float cb = (blue.sample(linear, corner.coordinate).r * 255.0 - 128.0) / 224.0;
-    float cr = (red.sample(linear, corner.coordinate).r * 255.0 - 128.0) / 224.0;
+    float y = (luma.sample(bilinear, corner.coordinate).r * 255.0 - 16.0) / 219.0;
+    float cb = (blue.sample(bilinear, corner.coordinate).r * 255.0 - 128.0) / 224.0;
+    float cr = (red.sample(bilinear, corner.coordinate).r * 255.0 - 128.0) / 224.0;
     float3 rgb = float3(y + 1.5748 * cr, y - 0.1873 * cb - 0.4681 * cr, y + 1.8556 * cb);
     return float4(saturate(rgb), 1.0);
 }
 
-fragment float4 overlay(
+fragment float4 qdp_overlay(
     Corner corner [[stage_in]],
     texture2d<float> image [[texture(0)]],
-    sampler linear [[sampler(0)]]
+    sampler bilinear [[sampler(0)]]
 ) {
-    return image.sample(linear, corner.coordinate);
+    return image.sample(bilinear, corner.coordinate);
 }
 ";
 
@@ -238,8 +239,8 @@ impl MetalVideo {
         let library = device
             .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
             .map_err(|error| format!("cannot compile the video shaders: {error}"))?;
-        let picture = pipeline(&device, &library, "picture", Blending::Opaque)?;
-        let overlay = pipeline(&device, &library, "overlay", Blending::Alpha)?;
+        let picture = pipeline(&device, &library, "qdp_picture", Blending::Opaque)?;
+        let overlay = pipeline(&device, &library, "qdp_overlay", Blending::Alpha)?;
         let sampler = linear_sampler(&device)?;
 
         // winit makes its views layer-backed.
@@ -474,7 +475,7 @@ fn pipeline(
             .ok_or_else(|| format!("the video shaders have no {name} function"))
     };
     let descriptor = MTLRenderPipelineDescriptor::new();
-    let (vertex, fragment_function) = (function("quad")?, function(fragment)?);
+    let (vertex, fragment_function) = (function("qdp_quad")?, function(fragment)?);
     descriptor.setVertexFunction(Some(&vertex));
     descriptor.setFragmentFunction(Some(&fragment_function));
     // SAFETY: a pipeline has a first colour attachment.
