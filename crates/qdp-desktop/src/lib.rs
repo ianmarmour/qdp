@@ -90,7 +90,7 @@ pub use metal_video::{MetalVideo, Submitter};
 pub use video_scene::{Fate, Overlay, PixelRect, Scene};
 #[cfg(windows)]
 pub use win32::{
-    D3d11Video, DesktopDuplication, SendInputInjector, Submitter, SyncMode, WindowPen,
+    D3d11Video, DesktopDuplication, SendInputInjector, Submitter, SyncMode, SystemKeys, WindowPen,
 };
 
 /// The file, in the host's state directory, that keeps the token restoring the
