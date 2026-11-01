@@ -28,6 +28,10 @@ mod decoder;
 mod dma_buf;
 mod encoder;
 mod frame;
+// Hardware decoders that are given frame headers parsed, as DXVA's are, will
+// use this; for now only its tests do.
+#[cfg(test)]
+mod frame_parser;
 #[cfg(target_os = "linux")]
 mod headers;
 mod level;

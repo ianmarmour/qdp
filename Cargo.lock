@@ -2467,6 +2467,7 @@ dependencies = [
 name = "qdp-codec"
 version = "0.1.0"
 dependencies = [
+ "av1-grain",
  "libc",
  "ndk",
  "ndk-sys",

@@ -24,6 +24,9 @@ repository = "https://github.com/ianmarmour/qdp"
 arboard = { version = "3.7.0", default-features = false }
 # The ScreenCast portal, for screen capture on Linux.
 ashpd = { version = "0.13.13", default-features = false, features = ["screencast", "tokio"] }
+# Film grain tables, for testing the AV1 frame header parser with rav1e's
+# film grain; rav1e already depends on it.
+av1-grain = { version = "0.2.4", default-features = false, features = ["create"] }
 bytes = { version = "1.10", default-features = false, features = ["std"] }
 # Audio devices on macOS and Windows.
 cpal = { version = "0.18.2", default-features = false }
