@@ -45,8 +45,26 @@ jobs:
         shell: pwsh
         run: ./windows/build.ps1
 
+      - name: Build the qdp command, for a host to stream from
+        shell: bash
+        run: cargo build --release --locked -p qdp-cli
+
+      # Opens the app and its pages, and streams the test pattern from a host
+      # on the runner through the app's core, which decodes in software and
+      # draws with the runner's GPU-less Direct3D.
+      - name: Try the app
+        shell: powershell
+        run: ./windows/smoke.ps1
+
       - uses: actions/upload-artifact@v4
         with:
           name: qdp-windows-app
           path: qdp-windows-app-x64.zip
           if-no-files-found: error
+
+      # Not released: only artifacts named qdp-* are.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-windows-app
+          path: windows/screenshots

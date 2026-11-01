@@ -242,6 +242,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: qdp-*
           merge-multiple: true
 
       - name: Publish the release
