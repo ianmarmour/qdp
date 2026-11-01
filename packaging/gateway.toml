@@ -1,0 +1,46 @@
+# The QDP gateway's configuration: edit it for your organization, then start
+# the service. `qdp-gateway check` tests it and the directory account, and
+# `qdp-gateway login USER [HOST]` a user's sign-in. Every setting is described
+# in the gateway's documentation.
+
+# The name users see when signing in.
+name = "Example Corp"
+# Where it listens: UDP port 443, which networks allowing HTTP/3 let through.
+listen = "0.0.0.0:443"
+
+[directory]
+# The organization's directory, over TLS: ldaps://, or ldap:// with
+# starttls = true.
+url = "ldaps://dc1.corp.example.com"
+# The account the gateway finds users with, and the file holding its
+# password, which only the gateway may read.
+bind_dn = "CN=qdp-gateway,OU=Service Accounts,DC=corp,DC=example,DC=com"
+bind_password_file = "/etc/qdp-gateway/directory-password"
+base_dn = "DC=corp,DC=example,DC=com"
+# For OpenLDAP rather than Active Directory:
+# user_filter = "(&(objectClass=inetOrgPerson)(uid={user}))"
+# name_attribute = "uid"
+
+[totp]
+# Who enrolls TOTP secrets: "admin-only", with `qdp-gateway totp enroll USER`,
+# or "first-login", which shows a new user a QR code for their authenticator
+# app the first time they sign in.
+enrollment = "admin-only"
+
+[assertions]
+# The groups hosts are told users are in.
+groups = ["QDP Users"]
+
+# Hosts users are listed, by ID. `qdp pin` on a host prints its pin.
+[[host]]
+id = "build-01"
+name = "Build machine"
+address = "10.0.4.20:4433"
+pin = "0000000000000000000000000000000000000000000000000000000000000000"
+groups = ["QDP Users"]
+
+# Hosts users may open by their names inside the network.
+[[route]]
+names = ["*.desktops.corp.example.com"]
+networks = ["10.20.0.0/16"]
+groups = ["QDP Users"]

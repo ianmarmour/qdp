@@ -159,6 +159,33 @@ impl<D: Directory> Gateway<D> {
     }
 }
 
+/// Serves users with `config`, checking them against its LDAP directory,
+/// until `stop` completes, as when the user interrupts or the system stops
+/// the service, then closes every connection with `GATEWAY_SHUTDOWN`.
+pub async fn serve_until(config: Config, stop: impl Future<Output = ()>) -> Result<(), String> {
+    let directory = crate::directory::LdapDirectory::new(&config.directory)
+        .map_err(|error| error.to_string())?;
+    let keys =
+        GatewayKeys::load(&config).map_err(|error| format!("cannot load the keys: {error}"))?;
+    let totp = TotpStore::load(&config.state_directory).map_err(|error| error.to_string())?;
+    let listen = config.listen;
+    let gateway = Arc::new(Gateway::new(config, directory, keys, totp));
+    let endpoint = gateway
+        .endpoint(listen)
+        .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
+    tracing::info!(address = %listen, "serving");
+    let serving = tokio::spawn(Arc::clone(&gateway).serve(endpoint.clone()));
+    stop.await;
+    tracing::info!("shutting down");
+    endpoint.close(
+        quinn_code(GatewayErrorCode::SHUTDOWN),
+        b"the gateway is shutting down",
+    );
+    endpoint.wait_idle().await;
+    serving.abort();
+    Ok(())
+}
+
 /// Returns a gateway error code as quinn's.
 fn quinn_code(code: GatewayErrorCode) -> quinn::VarInt {
     quinn::VarInt::from_u64(code.0.into_inner()).unwrap_or(quinn::VarInt::MAX)

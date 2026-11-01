@@ -13,18 +13,18 @@ use std::process::ExitCode;
 
 use qdp::auth::totp::TotpSecret;
 
-use std::sync::Arc;
-
-use qdp::gateway::GatewayErrorCode;
 use qdp_gateway::config::Config;
 use qdp_gateway::directory::{Directory, DirectoryUser, LdapDirectory};
 use qdp_gateway::keys::GatewayKeys;
+use qdp_gateway::locations;
 use qdp_gateway::policy::{self, RoutedTarget};
-use qdp_gateway::server::Gateway;
+use qdp_gateway::server::serve_until;
+use qdp_gateway::service;
 use qdp_gateway::totp_store::TotpStore;
 
-/// Where the configuration is read from by default.
-const DEFAULT_CONFIG: &str = "/etc/qdp-gateway/gateway.toml";
+/// The file the Windows service logs to, in the gateway's ProgramData folder.
+#[cfg(windows)]
+const LOG_FILE: &str = "gateway.log";
 
 /// The environment variable `login` reads the user's password from, as
 /// `qdp connect --user` does.
@@ -37,6 +37,16 @@ Usage:
                           Serve users: sign them in with the directory and
                           TOTP, and tunnel their sessions to the hosts they
                           may reach
+  qdp-gateway service install [--config FILE]
+                          Run the gateway as a service from boot: a systemd
+                          unit as the user qdp-gateway on Linux, a Windows
+                          service as LocalService on Windows. Without a
+                          configuration, writes an example to edit first
+  qdp-gateway service uninstall
+                          Stop and remove the service; its configuration and
+                          keys stay
+  qdp-gateway service status
+                          Show whether the service runs
   qdp-gateway keys [--config FILE]
                           Print the pin clients pin the gateway by, and the
                           assertion key hosts trust it by
@@ -61,8 +71,9 @@ Usage:
                           List the users with a TOTP secret
   qdp-gateway help        Show this help
 
-The configuration is read from /etc/qdp-gateway/gateway.toml unless --config
-names another file.";
+The configuration is read from /etc/qdp-gateway/gateway.toml on Linux and
+C:\\ProgramData\\qdp-gateway\\gateway.toml on Windows unless --config names
+another file.";
 
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +98,14 @@ enum Command {
     Remove(String),
     /// List the users with a TOTP secret.
     List,
+    /// Install the service.
+    ServiceInstall,
+    /// Remove the service.
+    ServiceUninstall,
+    /// Show the service's state.
+    ServiceStatus,
+    /// Run as the Windows service, as the Service Control Manager starts it.
+    ServiceRun,
     /// Show the usage text.
     Help,
 }
@@ -102,7 +121,7 @@ struct Invocation {
 
 /// Parses the command line, without the program name.
 fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
-    let mut config = PathBuf::from(DEFAULT_CONFIG);
+    let mut config = locations::default_config();
     let mut words = Vec::new();
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
@@ -130,6 +149,10 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
         ["totp", "enroll", user] => Command::Enroll((*user).to_owned()),
         ["totp", "remove", user] => Command::Remove((*user).to_owned()),
         ["totp", "list"] => Command::List,
+        ["service", "install"] => Command::ServiceInstall,
+        ["service", "uninstall"] => Command::ServiceUninstall,
+        ["service", "status"] => Command::ServiceStatus,
+        ["service", "run"] => Command::ServiceRun,
         [] | ["help"] => Command::Help,
         _ => return Err(format!("unknown command: {}", words.join(" "))),
     };
@@ -137,12 +160,22 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Invocation,
 }
 
 fn main() -> ExitCode {
-    // Plain logs where no one reads colours, as in the system's journal.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
-        .init();
-    let result = parse_args(std::env::args().skip(1)).and_then(run);
+    let invocation = parse_args(std::env::args().skip(1));
+    let as_service = matches!(
+        &invocation,
+        Ok(Invocation {
+            command: Command::ServiceRun,
+            ..
+        })
+    );
+    if !as_service || init_service_log().is_err() {
+        // Plain logs where no one reads colours, as in the system's journal.
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_ansi(std::io::stderr().is_terminal())
+            .init();
+    }
+    let result = invocation.and_then(run);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -152,11 +185,47 @@ fn main() -> ExitCode {
     }
 }
 
+/// Logs to the gateway's log file, as the Windows service, which has no
+/// console; on other systems the journal keeps services' logs.
+fn init_service_log() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let path = locations::data_folder().join(LOG_FILE);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+        tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .init();
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("only the Windows service logs to a file".to_owned())
+    }
+}
+
 /// Runs a command.
 fn run(invocation: Invocation) -> Result<(), String> {
-    if invocation.command == Command::Help {
-        println!("{USAGE}");
-        return Ok(());
+    match invocation.command {
+        Command::Help => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Command::ServiceInstall => {
+            println!("{}", service::install(&invocation.config)?);
+            return Ok(());
+        }
+        Command::ServiceUninstall => {
+            println!("{}", service::uninstall()?);
+            return Ok(());
+        }
+        Command::ServiceStatus => return service::status(),
+        Command::ServiceRun => return run_service(invocation.config),
+        _ => {}
     }
     let config = Config::load(&invocation.config).map_err(|error| error.to_string())?;
     match invocation.command {
@@ -167,7 +236,24 @@ fn run(invocation: Invocation) -> Result<(), String> {
         Command::Enroll(user) => enroll(&config, &user),
         Command::Remove(user) => remove(&config.state_directory, &user),
         Command::List => list(&config.state_directory),
-        Command::Help => Ok(()),
+        Command::Help
+        | Command::ServiceInstall
+        | Command::ServiceUninstall
+        | Command::ServiceStatus
+        | Command::ServiceRun => Ok(()),
+    }
+}
+
+/// Runs the gateway as its Windows service.
+fn run_service(config: PathBuf) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        service::run(config)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = config;
+        Err("`service run` is for the Windows service; here, run `qdp-gateway serve`".to_owned())
     }
 }
 
@@ -180,32 +266,14 @@ fn block_on<T>(future: impl Future<Output = T>) -> Result<T, String> {
     Ok(runtime.block_on(future))
 }
 
-/// Serves users until interrupted.
+/// Serves users until interrupted, or until the system stops the service.
 fn serve(config: Config) -> Result<(), String> {
-    let directory = LdapDirectory::new(&config.directory).map_err(|error| error.to_string())?;
-    let keys =
-        GatewayKeys::load(&config).map_err(|error| format!("cannot load the keys: {error}"))?;
-    let totp = TotpStore::load(&config.state_directory).map_err(|error| error.to_string())?;
-    let listen = config.listen;
-    block_on(async move {
-        let gateway = Arc::new(Gateway::new(config, directory, keys, totp));
-        let endpoint = gateway
-            .endpoint(listen)
-            .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
-        tracing::info!(address = %listen, "serving");
-        let serving = tokio::spawn(Arc::clone(&gateway).serve(endpoint.clone()));
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("shutting down");
+    block_on(serve_until(config, async {
+        // A program that cannot watch for interrupts serves until killed.
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
         }
-        endpoint.close(
-            quinn::VarInt::from_u64(GatewayErrorCode::SHUTDOWN.0.into_inner())
-                .unwrap_or(quinn::VarInt::MAX),
-            b"the gateway is shutting down",
-        );
-        endpoint.wait_idle().await;
-        serving.abort();
-        Ok(())
-    })?
+    }))?
 }
 
 /// Prints the gateway's pin and assertion key.
@@ -349,10 +417,19 @@ mod tests {
     #[test]
     fn parses_commands() {
         assert_eq!(parse("").unwrap().command, Command::Help);
+        assert_eq!(parse("check").unwrap().config, locations::default_config());
         assert_eq!(
-            parse("check").unwrap().config,
-            PathBuf::from(DEFAULT_CONFIG)
+            parse("service install --config gw.toml").unwrap(),
+            Invocation {
+                command: Command::ServiceInstall,
+                config: PathBuf::from("gw.toml"),
+            }
         );
+        assert_eq!(
+            parse("service status").unwrap().command,
+            Command::ServiceStatus
+        );
+        assert!(parse("service").is_err());
         assert_eq!(
             parse("totp enroll alice --config gw.toml").unwrap(),
             Invocation {

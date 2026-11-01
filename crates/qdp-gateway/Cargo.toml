@@ -27,5 +27,9 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# The Service Control Manager, for the gateway's Windows service.
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
+
 [lints]
 workspace = true

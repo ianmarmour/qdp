@@ -490,6 +490,37 @@ and `libadwaita-devel` on Fedora:
 cargo build --release -p qdp-cli -p qdp-gtk && ./target/release/qdp-gtk
 ```
 
+## Gateway
+
+`qdp-gateway` ([`crates/qdp-gateway`](crates/qdp-gateway)) lets users outside
+an organization's network reach the QDP hosts inside it through one public
+endpoint ([Section 13](doc/spec/13-gateway.md) of the spec). It signs each
+user in with the organization's directory, LDAP or Active Directory over TLS,
+then always a TOTP code from an authenticator app such as Google
+Authenticator, Microsoft Authenticator or Authy, and tunnels their QDP
+sessions, end to end, to the hosts it lists for them or that its routes let
+them open by their names inside the network. It stands apart from QDP's apps
+and hosts, and runs as a service on Linux and Windows servers.
+
+On Linux, install the release's `qdp-gateway-linux-x86_64.rpm`, or run
+`sudo qdp-gateway service install`, which makes the user `qdp-gateway`, a
+hardened systemd unit and, the first time, an example configuration in
+`/etc/qdp-gateway/gateway.toml` to edit. On Windows, run
+`qdp-gateway service install` from an administrator's terminal: it installs a
+service running as LocalService, with its configuration, keys and log in
+`C:\ProgramData\qdp-gateway`, readable only by it and administrators, and,
+once configured, a firewall rule for its port. Then:
+
+```bash
+sudo qdp-gateway check                  # the configuration and directory account
+sudo qdp-gateway login alice build-01   # alice's sign-in, and whether she may open build-01
+sudo qdp-gateway totp enroll alice      # an otpauth:// URI for alice's authenticator app
+sudo qdp-gateway keys                   # the pin clients pin, the key hosts trust
+sudo qdp-gateway service install        # start it, now and at every boot
+```
+
+Hosts behind it admit its users with `qdp serve --gateway-key KEY`.
+
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
