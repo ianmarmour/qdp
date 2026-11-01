@@ -14,7 +14,12 @@
 //! | `warp <x> <y> move\|follow` | The host's pointer moved, in video pixels. |
 //! | `pointer absolute\|relative` | The host's pointer mode changed. |
 //! | `rumble <slot> <low> <high>` | A gamepad's rumble, each motor from 0 to 65535. |
-//! | `stats <fps> <latency_ms\|-> <decode_ms>` | The last second's video. |
+//! | `stats <fps> <latency_ms\|-> <decode_ms> <worst>` | The last second's video. |
+//!
+//! A `stats` line's `<worst>` is the slowest frame's latency, then the stages
+//! it went through: capture to its first fragment, transfer, waiting for the
+//! decoder and decoding, each in milliseconds; or five `-` when no frame's
+//! latency is known.
 //! | `ended` | The session ended normally. |
 //! | `failed <error>` | The session failed. |
 
@@ -22,7 +27,7 @@ use std::fmt;
 use std::time::Duration;
 
 use qdp::message::PointerKind;
-use qdp_runtime::WarpKind;
+use qdp_runtime::{LatencyStages, WarpKind};
 
 /// Something the app is told.
 #[derive(Debug, Clone, PartialEq)]
@@ -93,7 +98,21 @@ pub struct VideoStats {
     pub latency: Option<Duration>,
     /// The mean time decoding took.
     pub decode: Duration,
+    /// The slowest frame, of those whose latency is known.
+    pub worst: Option<SlowestFrame>,
 }
+
+/// The frame of a second whose latency was highest, and where it went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlowestFrame {
+    /// Its time from capture to decoding.
+    pub latency: Duration,
+    /// Where that time went.
+    pub stages: LatencyStages,
+}
+
+/// The values of a `stats` line's `<worst>` when no frame's latency is known.
+const UNKNOWN_WORST: &str = "- - - - -";
 
 /// Returns `duration` in milliseconds, to a tenth.
 fn milliseconds(duration: Duration) -> String {
@@ -122,13 +141,30 @@ impl fmt::Display for Event {
                 PointerKind::Relative => "pointer relative",
             }),
             Self::Rumble { slot, low, high } => write!(formatter, "rumble {slot} {low} {high}"),
-            Self::Stats(stats) => write!(
-                formatter,
-                "stats {} {} {}",
-                stats.frames,
-                stats.latency.map_or_else(|| "-".to_owned(), milliseconds),
-                milliseconds(stats.decode)
-            ),
+            Self::Stats(stats) => {
+                let worst = stats.worst.map_or_else(
+                    || UNKNOWN_WORST.to_owned(),
+                    |worst| {
+                        let stages = worst.stages;
+                        [
+                            worst.latency,
+                            stages.to_first_fragment,
+                            stages.transfer,
+                            stages.queued,
+                            stages.decode,
+                        ]
+                        .map(milliseconds)
+                        .join(" ")
+                    },
+                );
+                write!(
+                    formatter,
+                    "stats {} {} {} {worst}",
+                    stats.frames,
+                    stats.latency.map_or_else(|| "-".to_owned(), milliseconds),
+                    milliseconds(stats.decode)
+                )
+            }
             Self::Ended(Ending::Normal) => formatter.write_str("ended"),
             Self::Ended(Ending::Failed(error)) => write!(formatter, "failed {error}"),
         }
@@ -183,16 +219,26 @@ mod tests {
                     frames: 120,
                     latency: Some(Duration::from_micros(4_250)),
                     decode: Duration::from_micros(1_300),
+                    worst: Some(SlowestFrame {
+                        latency: Duration::from_micros(18_400),
+                        stages: LatencyStages {
+                            to_first_fragment: Duration::from_micros(14_100),
+                            transfer: Duration::from_micros(1_000),
+                            queued: Duration::from_micros(300),
+                            decode: Duration::from_micros(3_000),
+                        },
+                    }),
                 }),
-                "stats 120 4.2 1.3",
+                "stats 120 4.2 1.3 18.4 14.1 1.0 0.3 3.0",
             ),
             (
                 Event::Stats(VideoStats {
                     frames: 0,
                     latency: None,
                     decode: Duration::ZERO,
+                    worst: None,
                 }),
-                "stats 0 - 0.0",
+                "stats 0 - 0.0 - - - - -",
             ),
             (Event::Ended(Ending::Normal), "ended"),
             (

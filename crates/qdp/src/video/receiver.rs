@@ -70,6 +70,10 @@ pub struct DecodableFrame {
     /// Whether the frame marks every block changed for composition: Frame Number 1
     /// and key frames that end a loss (Section 6.9).
     pub resets_composition: bool,
+    /// When the frame's first fragment arrived.
+    pub first_arrival: Instant,
+    /// When the frame was complete: when its last missing fragment arrived.
+    pub completed_at: Instant,
     /// The reassembled frame payload.
     payload: Vec<u8>,
     /// The offset of the temporal unit in `payload`.
@@ -435,6 +439,8 @@ impl VideoReceiver {
             flags: frame.flags.unwrap_or_default(),
             header,
             resets_composition,
+            first_arrival: frame.first_arrival,
+            completed_at: frame.last_arrival,
             payload,
             temporal_unit_offset,
         })

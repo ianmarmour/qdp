@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use qdp::message::{CursorImage, PointerKind, PointerMode};
 use qdp_codec::DecodedPicture;
-use qdp_runtime::{CursorWarp, FrameInfo, FrameSink, SinkControl};
+use qdp_runtime::{CursorWarp, FrameInfo, FrameSink, LatencyStages, SinkControl};
 use tracing::{info, warn};
 
 use crate::cursor::CursorBitmap;
-use crate::events::{Event, VideoStats};
+use crate::events::{Event, SlowestFrame, VideoStats};
 
 /// How often the video's statistics are logged and sent to the app.
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
@@ -77,7 +77,9 @@ impl FrameSink for AndroidSink {
             self.send(Event::Video { width, height });
         }
         match self.show(frame) {
-            Ok(()) => self.stats.shown(info.latency, info.decode_time),
+            Ok(()) => self
+                .stats
+                .shown(info.latency, info.decode_time, info.stages()),
             Err(error) => self.stats.unshown(error),
         }
         if let Some(stats) = self.stats.finish(Instant::now()) {
@@ -143,6 +145,8 @@ struct StatsWindow {
     timed: u32,
     /// Their total decode time.
     decode: Duration,
+    /// The slowest frame, of those whose latency is known.
+    worst: Option<SlowestFrame>,
     /// The frames that could not be shown.
     unshown: u32,
     /// Why the last of them could not be.
@@ -158,19 +162,30 @@ impl StatsWindow {
             latency: Duration::ZERO,
             timed: 0,
             decode: Duration::ZERO,
+            worst: None,
             unshown: 0,
             last_error: None,
         }
     }
 
-    /// Counts a frame shown, `latency` after capture if known, that took
-    /// `decode` to decode.
-    fn shown(&mut self, latency: Option<Duration>, decode: Duration) {
+    /// Counts a frame shown, `latency` after capture if known, through
+    /// `stages`, that took `decode` to decode.
+    fn shown(
+        &mut self,
+        latency: Option<Duration>,
+        decode: Duration,
+        stages: Option<LatencyStages>,
+    ) {
         self.frames += 1;
         self.decode += decode;
-        if let Some(latency) = latency {
-            self.latency += latency;
-            self.timed += 1;
+        let Some(latency) = latency else {
+            return;
+        };
+        self.latency += latency;
+        self.timed += 1;
+        let slower = self.worst.is_none_or(|worst| latency > worst.latency);
+        if let (true, Some(stages)) = (slower, stages) {
+            self.worst = Some(SlowestFrame { latency, stages });
         }
     }
 
@@ -191,11 +206,19 @@ impl StatsWindow {
             frames: window.frames,
             latency: window.latency.checked_div(window.timed),
             decode: window.decode.checked_div(window.frames).unwrap_or_default(),
+            worst: window.worst,
         };
+        let milliseconds = |duration: Duration| duration.as_secs_f64() * 1000.0;
+        let worst = stats.worst.map(|worst| worst.stages);
         info!(
             fps = stats.frames,
-            latency_ms = stats.latency.map(|latency| latency.as_secs_f64() * 1000.0),
-            decode_ms = stats.decode.as_secs_f64() * 1000.0,
+            latency_ms = stats.latency.map(milliseconds),
+            decode_ms = milliseconds(stats.decode),
+            worst_ms = stats.worst.map(|worst| milliseconds(worst.latency)),
+            worst_to_first_fragment_ms = worst.map(|stages| milliseconds(stages.to_first_fragment)),
+            worst_transfer_ms = worst.map(|stages| milliseconds(stages.transfer)),
+            worst_queued_ms = worst.map(|stages| milliseconds(stages.queued)),
+            worst_decode_ms = worst.map(|stages| milliseconds(stages.decode)),
             "video"
         );
         if let Some(error) = window.last_error {
@@ -210,14 +233,28 @@ mod tests {
     use super::*;
 
     /// A window averages the frames it counted once it has lasted its
-    /// interval, and the next starts empty.
+    /// interval, keeps the slowest, and the next starts empty.
     #[test]
     fn averages_each_interval() {
         let start = Instant::now();
         let mut window = StatsWindow::new(start);
-        window.shown(Some(Duration::from_millis(4)), Duration::from_millis(1));
-        window.shown(Some(Duration::from_millis(6)), Duration::from_millis(3));
-        window.shown(None, Duration::from_millis(2));
+        let stages = |to_first_fragment_ms| LatencyStages {
+            to_first_fragment: Duration::from_millis(to_first_fragment_ms),
+            transfer: Duration::from_millis(1),
+            queued: Duration::ZERO,
+            decode: Duration::from_millis(1),
+        };
+        window.shown(
+            Some(Duration::from_millis(4)),
+            Duration::from_millis(1),
+            Some(stages(2)),
+        );
+        window.shown(
+            Some(Duration::from_millis(6)),
+            Duration::from_millis(3),
+            Some(stages(4)),
+        );
+        window.shown(None, Duration::from_millis(2), None);
         window.unshown("abandoned".to_owned());
         assert_eq!(window.finish(start + STATS_INTERVAL / 2), None);
         let stats = window.finish(start + STATS_INTERVAL).unwrap();
@@ -227,6 +264,10 @@ mod tests {
                 frames: 3,
                 latency: Some(Duration::from_millis(5)),
                 decode: Duration::from_millis(2),
+                worst: Some(SlowestFrame {
+                    latency: Duration::from_millis(6),
+                    stages: stages(4),
+                }),
             }
         );
         let empty = window.finish(start + STATS_INTERVAL * 2).unwrap();
@@ -236,6 +277,7 @@ mod tests {
                 frames: 0,
                 latency: None,
                 decode: Duration::ZERO,
+                worst: None,
             }
         );
     }

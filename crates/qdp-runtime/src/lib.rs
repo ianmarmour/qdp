@@ -83,7 +83,7 @@ pub use host_passthrough::{FeatureRequest, PassthroughDevice, PassthroughPolicy}
 pub use lock_keys::LockKeys;
 pub use media::{
     CapturedFrame, CursorShape, CursorState, CursorWarp, DesktopScale, DisplayTiming,
-    FrameArrivals, FrameInfo, FrameSink, FrameSource, LayoutRect, MonitorPlacement,
+    FrameArrivals, FrameInfo, FrameSink, FrameSource, LatencyStages, LayoutRect, MonitorPlacement,
     PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl, TestPattern,
     WantedDisplay, WarpKind, changed_blocks,
 };

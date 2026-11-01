@@ -1137,6 +1137,8 @@ impl ActiveClient<'_> {
                             latency,
                             decoded_at: decoded.decoded_at,
                             decode_time: decoded.decode_time,
+                            first_fragment_at: decoded.frame.first_arrival,
+                            completed_at: decoded.frame.completed_at,
                         };
                         finished.push((picture, info, stream.config_id));
                     }

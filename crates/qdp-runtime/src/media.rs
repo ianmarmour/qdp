@@ -546,6 +546,44 @@ pub struct FrameInfo {
     pub decoded_at: Instant,
     /// How long the decoder took to decode it.
     pub decode_time: Duration,
+    /// When the frame's first fragment arrived.
+    pub first_fragment_at: Instant,
+    /// When the frame was complete, all its fragments arrived.
+    pub completed_at: Instant,
+}
+
+impl FrameInfo {
+    /// Returns where the frame's latency went, once the clocks are
+    /// synchronized.
+    pub fn stages(&self) -> Option<LatencyStages> {
+        let captured = self.decoded_at.checked_sub(self.latency?)?;
+        let decode_started = self.decoded_at.checked_sub(self.decode_time)?;
+        Some(LatencyStages {
+            to_first_fragment: self.first_fragment_at.saturating_duration_since(captured),
+            transfer: self
+                .completed_at
+                .saturating_duration_since(self.first_fragment_at),
+            queued: decode_started.saturating_duration_since(self.completed_at),
+            decode: self.decode_time,
+        })
+    }
+}
+
+/// Where a frame's latency, from capture on the host to decoding on the
+/// client, went.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct LatencyStages {
+    /// From capture to the first fragment's arrival: the host's encoding and
+    /// sending, and the network's delay.
+    pub to_first_fragment: Duration,
+    /// From the first fragment to the last: the frame's transfer, and any
+    /// retransmission.
+    pub transfer: Duration,
+    /// From the frame's completion to its decoding's start, as it waited for
+    /// the decoder.
+    pub queued: Duration,
+    /// Decoding.
+    pub decode: Duration,
 }
 
 /// When a sink shows the frames it is given.
