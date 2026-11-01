@@ -12,6 +12,7 @@ mod capture;
 mod d3d11_video;
 mod image;
 mod input;
+mod input_desktop;
 mod keycodes;
 #[cfg(feature = "notifications")]
 mod notice;
