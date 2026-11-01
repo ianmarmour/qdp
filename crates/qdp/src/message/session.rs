@@ -45,6 +45,9 @@ impl AuthMethod {
     /// `PASSWORD`: a user name and password checked by the host's operating system
     /// (Section 4.4.8).
     pub const PASSWORD: Self = Self(VarInt::from_u32(0x05));
+    /// `PAIRING`: a four-digit code the host shows, which the client's user
+    /// types (Section 4.4.9).
+    pub const PAIRING: Self = Self(VarInt::from_u32(0x06));
 }
 
 /// The outcome of an authentication attempt (Section 4.4.1).
