@@ -311,6 +311,21 @@ is streamed and the pointer assumes it is the whole desktop. The host's sound,
 clipboard and notices need the desktop session, so they do not reach a console
 stream yet.
 
+To serve the console from boot, before anyone logs in, run the host as a system
+service. `sudo qdp service install` writes a systemd unit that runs
+`qdp serve --source console` as root with the `serve` options given after it,
+turns it on and starts it; `sudo qdp service status` shows how it is doing, and
+`sudo qdp service uninstall` removes it. The RPM ships the same service, off
+until `sudo systemctl enable --now qdp`. The service keeps the host's key and
+paired devices in `/var/lib/qdp`, so `sudo qdp clients --identity /var/lib/qdp`
+lists them, and pairing codes show in `journalctl -u qdp -f` until the desktop
+can show them. To keep the devices paired with a host run by hand, copy its
+identity directory before the service first starts:
+
+```bash
+sudo install -d -m 700 /var/lib/qdp && sudo cp -a qdp-identity/. /var/lib/qdp/
+```
+
 ## Android client
 
 The Android app in [`android`](android) streams from a host to phones,

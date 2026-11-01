@@ -1,0 +1,34 @@
+# The QDP host as a system service: from boot, it streams the console, what
+# the graphics card shows, so that devices can log in and unlock as at the
+# machine. Turn it on with `systemctl enable --now qdp`, or with
+# `qdp service install [serve options]`, which writes its own copy.
+[Unit]
+Description=QDP host, streaming this machine's console
+Documentation=https://github.com/ianmarmour/qdp
+Wants=network-online.target
+After=network-online.target systemd-logind.service
+
+[Service]
+ExecStart=/usr/bin/qdp serve --source console --identity ${STATE_DIRECTORY}
+# The host's key and the devices paired with it.
+StateDirectory=qdp
+StateDirectoryMode=0700
+# Where the GPU's drivers keep the shaders they compile.
+CacheDirectory=qdp
+Environment=XDG_CACHE_HOME=%C/qdp
+Restart=on-failure
+RestartSec=5
+# The host reads the GPU's framebuffers, which needs root, and creates input
+# devices; nothing else of the system is its to change.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
