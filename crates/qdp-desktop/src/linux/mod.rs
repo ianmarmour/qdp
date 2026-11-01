@@ -34,6 +34,8 @@ mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
 mod seat;
+#[cfg(feature = "notifications")]
+mod session_helper;
 mod touchpad;
 mod touchpad_capture;
 mod touchscreen;
@@ -55,4 +57,8 @@ pub(crate) use hidraw::start as start_passthrough;
 pub(crate) use monitor_matching::restore_saved as restore_monitor_settings;
 pub(crate) use seat::devices_confined;
 pub use seat::{SeatSession, seat_session};
+#[cfg(feature = "notifications")]
+pub(crate) use session_helper::{HelperClipboard, HelperNotification, console_helper};
+#[cfg(feature = "notifications")]
+pub use session_helper::{follow_console_session, run_session_helper};
 pub(crate) use touchpad_capture::start as start_touchpad;

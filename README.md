@@ -311,7 +311,11 @@ is streamed and the pointer assumes it is the whole desktop. A console stream
 plays the sound of the desktop session shown when it starts, through that
 user's PipeWire, and presents the client's microphone there; one that starts at
 the login screen has no sound until the device connects again. The clipboard
-and notices do not reach a console stream yet.
+and the host's notices, such as pairing codes and that a device streams the
+screen, reach the desktop session shown on the console through a helper the
+host starts as its user, `qdp session-helper`, since a session's notification
+service and clipboard serve only its own user; with no one logged in, pairing
+codes show only in the log.
 
 To serve the console from boot, before anyone logs in, run the host as a system
 service. `sudo qdp service install` writes a systemd unit that runs
@@ -320,8 +324,8 @@ turns it on and starts it; `sudo qdp service status` shows how it is doing, and
 `sudo qdp service uninstall` removes it. The RPM ships the same service, off
 until `sudo systemctl enable --now qdp`. The service keeps the host's key and
 paired devices in `/var/lib/qdp`, so `sudo qdp clients --identity /var/lib/qdp`
-lists them, and pairing codes show in `journalctl -u qdp -f` until the desktop
-can show them. To keep the devices paired with a host run by hand, copy its
+lists them, and pairing codes show in the logged-in desktop and in
+`journalctl -u qdp -f`. To keep the devices paired with a host run by hand, copy its
 identity directory before the service first starts:
 
 ```bash

@@ -139,6 +139,7 @@ fn main() -> ExitCode {
         Command::Connect(args) => connect(args),
         Command::Decoder => qdp_codec::serve_decoder_on_stdio()
             .map_err(|error| format!("the decoder process failed: {error}")),
+        Command::SessionHelper => qdp_desktop::run_session_helper(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -238,6 +239,11 @@ fn password() -> Result<String, String> {
 /// Runs `qdp serve`: accepts clients until interrupted, serving each one in its
 /// own task.
 async fn serve(args: ServeArgs) -> CliResult {
+    if args.source == SourceKind::Console {
+        // The console's session's notifications and clipboard, rather than
+        // this process's own session's, which a service has none of.
+        qdp_desktop::follow_console_session();
+    }
     let identity = identity::load_or_create(&args.identity, Role::Host)
         .map_err(|error| format!("cannot load the host identity: {error}"))?;
     let pin = identity.key_pin().map_err(|error| error.to_string())?;

@@ -87,6 +87,24 @@ pub use touchpad::TouchpadCapture;
 pub use linux::{ConsoleCapture, ScreenCapture};
 #[cfg(target_os = "linux")]
 pub use linux::{SeatSession, UinputInjector, seat_session};
+#[cfg(all(target_os = "linux", feature = "notifications"))]
+pub use linux::{follow_console_session, run_session_helper};
+
+/// The command, after the program's name, that runs the helper a host
+/// streaming the console starts in the person's desktop session.
+pub const SESSION_HELPER_COMMAND: &str = "session-helper";
+
+/// Has notifications and the clipboard reach the console's session; only
+/// Linux hosts stream the console.
+#[cfg(not(all(target_os = "linux", feature = "notifications")))]
+pub fn follow_console_session() {}
+
+/// Serves a host's requests in this desktop session; only Linux hosts
+/// stream the console and start helpers.
+#[cfg(not(all(target_os = "linux", feature = "notifications")))]
+pub fn run_session_helper() -> Result<(), String> {
+    Err("the session helper runs only on Linux".to_owned())
+}
 #[cfg(target_os = "macos")]
 pub use macos::{MacScreenCapture, QuartzInjector, mac_key_usage};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -360,6 +378,21 @@ pub fn display_timing() -> Option<DisplayTiming> {
 /// if it cannot be used.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
+    // A host following the console's session shares that session's
+    // clipboard, through its helper.
+    #[cfg(all(target_os = "linux", feature = "notifications"))]
+    if let Some(helper) = linux::console_helper() {
+        return match helper {
+            Ok(helper) => {
+                tracing::info!("sharing the console session's clipboard");
+                Some(Box::new(linux::HelperClipboard::new(helper)))
+            }
+            Err(error) => {
+                warn!(%error, "the clipboard will not be shared");
+                None
+            }
+        };
+    }
     match SystemClipboard::open() {
         Ok(clipboard) => {
             tracing::info!(clipboard = clipboard.description(), "sharing the clipboard");
