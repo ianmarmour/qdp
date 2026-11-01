@@ -40,6 +40,9 @@ mod headers;
 mod level;
 #[cfg(target_os = "android")]
 mod mediacodec;
+// NVENC's structures' tests run everywhere; the encoder is Windows'.
+#[cfg(any(windows, test))]
+mod nvenc;
 mod obu;
 mod picture;
 mod process_decoder;

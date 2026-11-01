@@ -21,6 +21,8 @@ mod picture;
 #[cfg(windows)]
 pub use decoder::D3d11Decoder;
 #[cfg(windows)]
+pub(crate) use device::create_for_vendor;
+#[cfg(windows)]
 pub use device::video_device;
 #[cfg(windows)]
 pub use picture::D3d11Picture;
