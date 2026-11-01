@@ -10,6 +10,7 @@ members = [
     "crates/qdp-desktop",
     "crates/qdp-quic",
     "crates/qdp-runtime",
+    "crates/qdp-windows",
 ]
 
 [workspace.package]

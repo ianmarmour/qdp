@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -158,6 +159,9 @@ struct Watcher {
     focused: Arc<AtomicBool>,
     /// The connected gamepads, by slot, with the rumble playing on each.
     gamepads: HashMap<u32, (GamepadId, Option<Effect>)>,
+    /// Rumble handed over by an app that reads the session's feedback
+    /// itself.
+    handed: Receiver<GamepadFeedback>,
 }
 
 impl Watcher {
@@ -250,7 +254,11 @@ impl Watcher {
             }
         }
         while !stop.load(Ordering::Relaxed) {
-            while let Some(GamepadFeedback { slot, output }) = self.input.try_gamepad_feedback() {
+            while let Some(GamepadFeedback { slot, output }) = self
+                .input
+                .try_gamepad_feedback()
+                .or_else(|| self.handed.try_recv().ok())
+            {
                 self.rumble(slot, output);
             }
             let Some(event) = self.gilrs.next_event_blocking(Some(POLL_INTERVAL)) else {
@@ -274,6 +282,8 @@ impl Watcher {
 pub struct GamepadCapture {
     /// Whether the window has focus.
     focused: Arc<AtomicBool>,
+    /// Hands the thread rumble that an app read from the session itself.
+    handed_rumble: Sender<GamepadFeedback>,
     /// Raised to stop the thread.
     stop: Arc<AtomicBool>,
     /// The thread.
@@ -287,6 +297,7 @@ impl GamepadCapture {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_focused = Arc::clone(&focused);
         let thread_stop = Arc::clone(&stop);
+        let (handed_rumble, handed) = channel();
         let thread = std::thread::Builder::new()
             .name(THREAD_NAME.to_owned())
             .spawn(move || {
@@ -302,12 +313,14 @@ impl GamepadCapture {
                     input,
                     focused: thread_focused,
                     gamepads: HashMap::new(),
+                    handed,
                 };
                 watcher.run(&thread_stop);
             })
             .map_err(|error| format!("cannot watch the gamepads: {error}"))?;
         Ok(Self {
             focused,
+            handed_rumble,
             stop,
             thread: Some(thread),
         })
@@ -317,6 +330,23 @@ impl GamepadCapture {
     /// sent only while it has.
     pub fn set_focused(&self, focused: bool) {
         self.focused.store(focused, Ordering::Relaxed);
+    }
+
+    /// Plays rumble on the gamepad in `slot`, each motor from 0 off to
+    /// 65535 full: for apps that read the session's gamepad feedback
+    /// themselves, which the capture then does not see.
+    pub fn rumble(&self, slot: u32, low: u16, high: u16) {
+        let output = GamepadOutput {
+            low_frequency_rumble: low,
+            high_frequency_rumble: high,
+            left_trigger_rumble: 0,
+            right_trigger_rumble: 0,
+            led_red: 0,
+            led_green: 0,
+            led_blue: 0,
+        };
+        // The thread may have ended with the session.
+        let _ = self.handed_rumble.send(GamepadFeedback { slot, output });
     }
 }
 

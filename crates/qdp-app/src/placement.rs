@@ -1,5 +1,6 @@
-//! Where the picture sits in the layer: centred, with its aspect ratio
-//! kept, as the app also computes to map touches to the picture.
+//! Where the picture sits in the app's view: centred, with its aspect ratio
+//! kept, as the app also computes to map touches and the pointer to the
+//! picture.
 
 /// A rectangle in the layer's pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -15,6 +15,9 @@
 pub mod cursor;
 pub mod events;
 pub mod gamepad;
+#[cfg(feature = "winit")]
+pub mod keymap;
+pub mod placement;
 pub mod session;
 pub mod settings;
 pub mod sink;

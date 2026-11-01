@@ -1,0 +1,33 @@
+[package]
+name = "qdp-windows"
+description = "The Windows app's core of Quick Desktop Protocol (QDP): sessions with a host, in a stream window drawn with Direct3D 11, behind a C interface the app calls"
+readme = "../../README.md"
+keywords = ["remote-desktop", "windows", "streaming"]
+categories = ["network-programming"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The app loads the core as qdp_windows.dll.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qdp.workspace = true
+qdp-app.workspace = true
+qdp-runtime.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+qdp-app = { workspace = true, features = ["winit"] }
+qdp-codec.workspace = true
+qdp-desktop = { workspace = true, features = ["audio", "gamepad"] }
+qdp-quic.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true

@@ -171,6 +171,13 @@ impl Session {
         })
     }
 
+    /// Returns a handle that sends the user's input to the session from any
+    /// thread, as [`Session::send`] does, for capture that runs on threads
+    /// of its own, such as gamepads'.
+    pub fn input(&self) -> InputHandle {
+        self.input.clone()
+    }
+
     /// Answers the session's request for the pairing code with `code`, or
     /// declines with `None`. Does nothing while no code is asked for.
     pub fn answer_pairing(&self, code: Option<String>) {
