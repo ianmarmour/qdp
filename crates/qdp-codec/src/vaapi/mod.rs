@@ -27,7 +27,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use self::conversion::GpuConversion;
 use self::ffi::{
@@ -1138,7 +1138,21 @@ impl VaapiEncoder {
         // A failed frame leaves no usable reference, so the next is a key frame.
         let slots = self.slots.clone();
         self.slots.clear();
-        self.submit(&header, plan)?;
+        if let Err(error) = self.submit(&header, plan) {
+            // A driver that refuses frames referring to any slot, whatever
+            // its version says, gets frames that refer only to the previous
+            // one, starting again from a key frame.
+            if self.support.slot_use == SlotUse::Rotating && matches!(plan, Plan::Inter { .. }) {
+                warn!(
+                    %error,
+                    "the driver refuses frames that refer to older ones; losses are repaired with key frames"
+                );
+                self.support.slot_use = SlotUse::PreviousOnly;
+                self.slots = ReferenceSlots::new(SlotUse::PreviousOnly);
+                return self.encode_input(KeyFrameRequest::Force, started);
+            }
+            return Err(error);
+        }
         let encoded = Instant::now();
         let bytes = self.read_coded()?;
         let read = Instant::now();
