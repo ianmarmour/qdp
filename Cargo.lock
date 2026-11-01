@@ -2275,6 +2275,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "qdp-android"
+version = "0.1.0"
+dependencies = [
+ "jni-sys 0.3.1",
+ "ndk",
+ "ndk-context",
+ "ndk-sys",
+ "qdp",
+ "qdp-codec",
+ "qdp-desktop",
+ "qdp-quic",
+ "qdp-runtime",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "qdp-cli"
 version = "0.1.0"
 dependencies = [

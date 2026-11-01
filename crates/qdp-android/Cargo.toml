@@ -1,0 +1,35 @@
+[package]
+name = "qdp-android"
+description = "The Android client of Quick Desktop Protocol (QDP): the app's Rust core, which the Kotlin app calls through JNI"
+readme = "../../README.md"
+keywords = ["remote-desktop", "android", "streaming"]
+categories = ["network-programming"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The app's shared library is built with `cargo rustc --crate-type cdylib`
+# (android/build-core.sh): the workspace's tests link the crate on hosts
+# whose software decoder cannot be linked into a shared library.
+
+[dependencies]
+qdp.workspace = true
+qdp-codec.workspace = true
+qdp-quic.workspace = true
+qdp-runtime.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni-sys.workspace = true
+ndk.workspace = true
+ndk-context.workspace = true
+ndk-sys.workspace = true
+qdp-desktop = { workspace = true, default-features = false, features = ["audio"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
