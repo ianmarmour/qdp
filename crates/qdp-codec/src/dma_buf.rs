@@ -34,6 +34,21 @@ pub struct DmaBufLayout {
     pub pitch: u32,
 }
 
+/// A further plane of a frame's buffer that its modifier adds to the
+/// pixels', such as the metadata of a compressed layout: where it is in
+/// the buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct DmaBufPlane {
+    /// The offset of its first row, in bytes.
+    pub offset: u32,
+    /// The bytes from one of its rows to the next.
+    pub pitch: u32,
+}
+
+/// The most planes a modifier adds to the pixels': DRM buffers have four
+/// planes at most.
+pub const MAX_EXTRA_PLANES: usize = 3;
+
 /// Which buffer a DMA-BUF descriptor refers to: the same for every
 /// descriptor of one buffer, and different for every other buffer that
 /// exists at the same time.
@@ -61,6 +76,8 @@ pub struct DmaBufFrame {
     size: u64,
     /// Which buffer it is.
     identity: BufferIdentity,
+    /// The planes the modifier adds to the pixels', in the same buffer.
+    extra_planes: Vec<DmaBufPlane>,
 }
 
 impl DmaBufFrame {
@@ -98,7 +115,21 @@ impl DmaBufFrame {
                 device: metadata.dev(),
                 inode: metadata.ino(),
             },
+            extra_planes: Vec::new(),
         })
+    }
+
+    /// Returns the frame with the planes its modifier adds to the pixels',
+    /// in the same buffer, such as a compressed layout's metadata, as a
+    /// display's buffers have; [`MAX_EXTRA_PLANES`] at most are kept.
+    pub fn with_extra_planes(mut self, planes: &[DmaBufPlane]) -> Self {
+        self.extra_planes = planes.iter().copied().take(MAX_EXTRA_PLANES).collect();
+        self
+    }
+
+    /// Returns the planes the modifier adds to the pixels'.
+    pub fn extra_planes(&self) -> &[DmaBufPlane] {
+        &self.extra_planes
     }
 
     /// Returns the width in pixels.

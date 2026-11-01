@@ -295,6 +295,21 @@ default one: `QDP_LOG=info,qdp::window=debug` on the client and
 host trace each pointer button, every move while a button is held, positions
 the host ignores and the host's warps of the client's pointer.
 
+On Linux, `qdp serve --source console`, run as root, streams the console
+instead: whatever the graphics card shows on its first display that is on,
+read from the framebuffers it scans out through DRM. Unlike the portal, which
+exists only inside a desktop session, it shows the login screen, the lock
+screen, any desktop and the text console, and follows the display as the login
+screen hands it to the desktop someone logs into, so that a device can log in
+and unlock as at the machine. Input reaches whatever shows through uinput as
+always. The frames stay in GPU memory for the hardware encoder, which the
+console needs unless its buffers are linear, and the pointer is read from the
+card's cursor plane. A display must be connected and on, a dummy plug standing
+in for one on a machine without a monitor. With several monitors, only the first
+is streamed and the pointer assumes it is the whole desktop. The host's sound,
+clipboard and notices need the desktop session, so they do not reach a console
+stream yet.
+
 ## Android client
 
 The Android app in [`android`](android) streams from a host to phones,

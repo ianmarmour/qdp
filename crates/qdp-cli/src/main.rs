@@ -15,7 +15,7 @@ mod sink;
 #[cfg(feature = "window")]
 mod window;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -162,6 +162,8 @@ fn init_logging() {
         .unwrap_or(LevelFilter::INFO);
     tracing_subscriber::fmt()
         .with_max_level(most)
+        // Colours only for a terminal, not in a service's journal.
+        .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .finish()
         .with(filter)
@@ -617,10 +619,10 @@ enum Streamed {
 }
 
 /// Opens what a session streams: the screen, which takes the client's
-/// display and delivers frames as `screen` says, or a `size` test pattern.
-/// Capturing the screen
-/// can wait for the user to choose a monitor, so it runs on a blocking
-/// thread.
+/// display and delivers frames as `screen` says, the console, or a `size`
+/// test pattern. Capturing the screen can wait for the user to choose a
+/// monitor, and the console for a display to show a picture, so they open
+/// on a blocking thread.
 async fn open_source(
     kind: SourceKind,
     size: (usize, usize),
@@ -633,6 +635,15 @@ async fn open_source(
     };
     if kind == SourceKind::TestPattern {
         return Ok(test_pattern());
+    }
+    if kind == SourceKind::Console {
+        if screen.matching == DisplayMatching::On {
+            warn!("the console keeps its display's mode; the host scales its frames");
+        }
+        let console = tokio::task::spawn_blocking(move || qdp_desktop::open_console(screen.frames))
+            .await
+            .map_err(|error| error.to_string())??;
+        return Ok((console, Streamed::Screen));
     }
     let screen =
         tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory, screen))

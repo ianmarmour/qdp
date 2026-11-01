@@ -20,7 +20,7 @@
 //! stream asks for frames in memory from then on, and the last DMA-BUF frame
 //! is read into memory to stand in until the first one arrives.
 
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -45,6 +45,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use super::desktop_layout;
+use super::dma_buf_map::read_linear;
 use super::monitor_matching::MonitorMatching;
 use crate::FrameMemory;
 use crate::latest_frame::LatestFrame;
@@ -86,16 +87,6 @@ const MAX_FRAME_RATE: u32 = 360;
 
 /// The bytes of one 32-bit pixel.
 const PIXEL_BYTES: u32 = 4;
-
-/// `DMA_BUF_IOCTL_SYNC`: `_IOW('b', 0, struct dma_buf_sync)`, which brackets
-/// the processor's access to a mapped DMA-BUF.
-const DMA_BUF_IOCTL_SYNC: u64 = 0x4008_6200;
-
-/// `DMA_BUF_SYNC_READ`, with `DMA_BUF_SYNC_START`, which is 0.
-const DMA_BUF_SYNC_READ: u64 = 1;
-
-/// `DMA_BUF_SYNC_END`.
-const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
 /// The pointer image size offered for cursor metadata, in pixels: the
 /// preferred, smallest and largest side.
@@ -1219,58 +1210,6 @@ fn dma_buf_frame(data: &spa::buffer::Data, format: &StreamFormat) -> Option<DmaB
         pitch,
     };
     DmaBufFrame::new(descriptor, layout).ok()
-}
-
-/// Reads a frame in a linear DMA-BUF into memory, or returns `None` if it is
-/// not linear or cannot be mapped. Reading GPU memory is slow, so this is
-/// for the one frame that stands in when frames move to memory.
-fn read_linear(frame: &DmaBufFrame) -> Option<Yuv420Frame> {
-    let layout = frame.layout();
-    if layout.modifier != DRM_FORMAT_MOD_LINEAR {
-        return None;
-    }
-    let size = usize::try_from(frame.size()).ok()?;
-    let start = layout.offset as usize;
-    let pitch = layout.pitch as usize;
-    let end = start + pitch * (layout.height - 1) + layout.width * PIXEL_BYTES as usize;
-    if end > size {
-        return None;
-    }
-    let descriptor = frame.descriptor().as_raw_fd();
-    // SAFETY: maps `size` bytes of the buffer read-only and shared; the
-    // mapping is undone below and nothing refers to it after.
-    let address = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            descriptor,
-            0,
-        )
-    };
-    if address == libc::MAP_FAILED {
-        return None;
-    }
-    let sync = |flags: u64| {
-        let mut sync = flags;
-        // SAFETY: `DMA_BUF_IOCTL_SYNC` reads one `u64` of flags.
-        unsafe { libc::ioctl(descriptor, DMA_BUF_IOCTL_SYNC as _, &mut sync) };
-    };
-    sync(DMA_BUF_SYNC_READ);
-    // SAFETY: the mapping holds `size` readable bytes until it is undone.
-    let bytes = unsafe { std::slice::from_raw_parts(address.cast::<u8>(), size) };
-    let converted = Yuv420Frame::from_rgb32(
-        layout.width,
-        layout.height,
-        pitch,
-        layout.order,
-        &bytes[start..],
-    );
-    sync(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END);
-    // SAFETY: the mapping was made above and `bytes` is no longer used.
-    unsafe { libc::munmap(address, size) };
-    converted
 }
 
 #[cfg(test)]
