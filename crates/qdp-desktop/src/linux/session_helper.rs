@@ -3,9 +3,9 @@
 //! session's notification service and its compositor's clipboard serve only
 //! the session's own user, so the host starts `qdp session-helper` as that
 //! user, in the session's environment, and asks it over a pipe: to show and
-//! take away notifications, to read and replace the clipboard's text, and to
+//! take away notifications, to read and replace the clipboard's text, to
 //! bring a monitor to the client's display through the compositor's display
-//! settings, and back.
+//! settings, and back, and to tell where a monitor is among the desktop's.
 //!
 //! The host follows the session shown on `seat0`, starting a helper for its
 //! user when one is needed, and another when someone else logs in.
@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use qdp_runtime::{Clipboard, WantedDisplay};
+use qdp_runtime::{Clipboard, LayoutRect, MonitorPlacement, WantedDisplay};
 use tracing::{debug, info};
 
 use super::seat::{SeatSession, seat_session};
@@ -79,6 +79,9 @@ enum Kind {
     MatchDisplay,
     /// Put back the monitor's own settings.
     RestoreDisplay,
+    /// Tell where the monitor named is among the desktop's: done with its
+    /// rectangle and the desktop's, in the desktop's coordinates.
+    Layout,
     /// Done, with the clipboard's text when it was read.
     Done,
     /// The clipboard holds no text.
@@ -89,13 +92,14 @@ enum Kind {
 
 impl Kind {
     /// Every kind with its byte.
-    const BYTES: [(Self, u8); 9] = [
+    const BYTES: [(Self, u8); 10] = [
         (Self::Notify, b'n'),
         (Self::Close, b'c'),
         (Self::GetText, b'g'),
         (Self::SetText, b's'),
         (Self::MatchDisplay, b'm'),
         (Self::RestoreDisplay, b'r'),
+        (Self::Layout, b'l'),
         (Self::Done, b'd'),
         (Self::Empty, b'e'),
         (Self::Failed, b'f'),
@@ -254,6 +258,40 @@ fn decode_size(payload: &[u8]) -> Option<(u32, u32)> {
     Some((width.parse().ok()?, height.parse().ok()?))
 }
 
+/// Returns a placement's payload: the monitor's left, top, width and
+/// height, then the desktop's, apart.
+fn encode_placement(placement: &MonitorPlacement) -> Vec<u8> {
+    let rect = |rect: LayoutRect| {
+        [
+            rect.x.to_string(),
+            rect.y.to_string(),
+            rect.width.to_string(),
+            rect.height.to_string(),
+        ]
+    };
+    let mut fields = rect(placement.monitor).to_vec();
+    fields.extend(rect(placement.desktop));
+    fields.join("\0").into_bytes()
+}
+
+/// Reads a placement's payload.
+fn decode_placement(payload: &[u8]) -> Option<MonitorPlacement> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let mut fields = text.split(char::from(FIELD_SEPARATOR));
+    let mut rect = || {
+        Some(LayoutRect {
+            x: fields.next()?.parse().ok()?,
+            y: fields.next()?.parse().ok()?,
+            width: fields.next()?.parse().ok()?,
+            height: fields.next()?.parse().ok()?,
+        })
+    };
+    Some(MonitorPlacement {
+        monitor: rect()?,
+        desktop: rect()?,
+    })
+}
+
 /// The helper's pipe: requests go in, answers come out, one at a time.
 struct Pipe {
     /// Requests, until the helper is asked to finish.
@@ -388,6 +426,13 @@ impl SessionHelper {
         };
         let size = self.request_done(Kind::MatchDisplay, &request.encode())?;
         decode_size(&size).ok_or_else(|| "the helper answered no size".to_owned())
+    }
+
+    /// Returns where the session's monitor named `monitor` is among the
+    /// desktop's monitors, in the desktop's coordinates.
+    pub(crate) fn placement(&self, monitor: &str) -> Result<MonitorPlacement, String> {
+        let placement = self.request_done(Kind::Layout, monitor.as_bytes())?;
+        decode_placement(&placement).ok_or_else(|| "the helper answered no placement".to_owned())
     }
 
     /// Puts back the own settings of the monitor `match_display` changed.
@@ -611,6 +656,10 @@ pub fn run_session_helper() -> Result<(), String> {
                 displays.restore();
                 (Kind::Done, Vec::new())
             }
+            Kind::Layout => match placement_of(&String::from_utf8_lossy(&payload)) {
+                Ok(placement) => (Kind::Done, encode_placement(&placement)),
+                Err(error) => (Kind::Failed, error.into_bytes()),
+            },
             Kind::Done | Kind::Empty | Kind::Failed => (
                 Kind::Failed,
                 b"the helper answers, it does not ask".to_vec(),
@@ -679,6 +728,25 @@ impl Displays {
         #[cfg(feature = "screen-capture")]
         drop(self.matching.take());
     }
+}
+
+/// Returns where the session's monitor named `monitor` is among the
+/// desktop's monitors.
+#[cfg(feature = "screen-capture")]
+fn placement_of(monitor: &str) -> Result<MonitorPlacement, String> {
+    let outputs = super::desktop_layout::outputs()?;
+    let output = outputs
+        .iter()
+        .find(|output| output.name == monitor)
+        .ok_or_else(|| format!("the desktop has no monitor named {monitor}"))?;
+    super::desktop_layout::placement(output.rect, &outputs)
+        .ok_or_else(|| "the desktop's monitors have no extent".to_owned())
+}
+
+/// Fails: this build cannot list the desktop's monitors.
+#[cfg(not(feature = "screen-capture"))]
+fn placement_of(_monitor: &str) -> Result<MonitorPlacement, String> {
+    Err("this build cannot list the desktop's monitors".to_owned())
 }
 
 /// Returns where the monitor's own settings are kept while they are
@@ -765,6 +833,30 @@ mod tests {
         assert_eq!(MatchRequest::decode(b"DP-3\x002560\x001600"), None);
         assert_eq!(decode_size(&encode_size((2560, 1600))), Some((2560, 1600)));
         assert_eq!(decode_size(b"2560"), None);
+    }
+
+    /// Placements read back as written.
+    #[test]
+    fn encodes_placements() {
+        let placement = MonitorPlacement {
+            monitor: LayoutRect {
+                x: 2560,
+                y: -120,
+                width: 1920,
+                height: 1080,
+            },
+            desktop: LayoutRect {
+                x: 0,
+                y: -120,
+                width: 4480,
+                height: 1560,
+            },
+        };
+        assert_eq!(
+            decode_placement(&encode_placement(&placement)),
+            Some(placement)
+        );
+        assert_eq!(decode_placement(b"1\x002\x003"), None);
     }
 
     /// Every kind reads back from its byte.
