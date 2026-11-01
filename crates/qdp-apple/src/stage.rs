@@ -14,7 +14,7 @@ use qdp_desktop::{Fate, Overlay, PixelRect, Scene, Submitter};
 use qdp_runtime::{FrameInfo, Presentation, PresentationTiming};
 use tracing::info;
 
-use qdp_app::placement::fit;
+use qdp_app::placement::{Rect, fit};
 
 /// An interface scale of one, in percent.
 const UNSCALED_PERCENT: f64 = 100.0;
@@ -166,7 +166,7 @@ impl Stage {
     /// Returns the host's cursor at the pointer, scaled as the picture is
     /// (Section 9.2), with the picture at `rect` in the layer showing a
     /// `video` picture.
-    fn overlay(&mut self, rect: qdp_app::placement::Rect, video: (usize, usize)) -> Option<Overlay> {
+    fn overlay(&mut self, rect: Rect, video: (usize, usize)) -> Option<Overlay> {
         let picture = rect.width / video.0.max(1) as f64;
         {
             // The image is scaled again only when it or the picture's scale

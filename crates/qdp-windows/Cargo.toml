@@ -11,9 +11,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# The app loads the core as qdp_windows.dll.
-[lib]
-crate-type = ["cdylib", "rlib"]
+# The app loads the core as qdp_windows.dll, built with `cargo rustc
+# --crate-type cdylib` (windows/build-core.ps1): the workspace's tests link
+# the crate on hosts whose software decoder cannot be linked into a shared
+# library.
 
 [dependencies]
 qdp.workspace = true
@@ -27,6 +28,7 @@ qdp-codec.workspace = true
 qdp-desktop = { workspace = true, features = ["audio", "gamepad"] }
 qdp-quic.workspace = true
 tracing-subscriber.workspace = true
+windows.workspace = true
 winit.workspace = true
 
 [lints]

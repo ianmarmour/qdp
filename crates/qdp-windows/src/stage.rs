@@ -1,17 +1,19 @@
 //! What the render thread draws: the newest picture, placed in the stream
 //! window, handed over from the session's thread and resized from the
-//! window's; and when each picture reached the screen, for the host's timing
-//! (Section 5.3).
+//! window's, with the host's cursor over it where the window draws it; and
+//! when each picture reached the screen, for the host's timing (Section
+//! 5.3).
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use qdp::message::{FrameNumber, StreamId};
+use qdp_app::cursor::ScaledCursor;
 use qdp_app::placement::{Rect, fit};
 use qdp_app::sink::Presenter;
 use qdp_codec::DecodedPicture;
-use qdp_desktop::{Fate, PixelRect, Scene, Submitter};
-use qdp_runtime::{FrameInfo, Presentation, PresentationTiming};
+use qdp_desktop::{Fate, Overlay, PixelRect, Scene, Submitter};
+use qdp_runtime::{DisplayTiming, FrameInfo, Presentation, PresentationTiming};
 use tracing::info;
 
 /// How often the drawing's statistics are logged.
@@ -41,6 +43,10 @@ pub(crate) struct Stage {
     window: (u32, u32),
     /// The picture's size, in pixels, once one arrived.
     video: Option<(usize, usize)>,
+    /// The host's cursor where the window draws it, at a position on the
+    /// host's monitor in pixels: while the system's pointer cannot be where
+    /// the host's is (Section 9.4).
+    cursor: Option<((f64, f64), ScaledCursor)>,
 }
 
 /// Locks a stage.
@@ -56,6 +62,7 @@ impl Stage {
             submitter,
             window,
             video: None,
+            cursor: None,
         }
     }
 
@@ -68,17 +75,41 @@ impl Stage {
         if picture.is_none() && self.video.is_none() {
             return;
         }
+        let placed = self.placement();
+        let overlay = match (placed, &self.cursor) {
+            (Some((rect, video)), Some(((x, y), cursor))) => {
+                let (left, top) = rect.to_layer(video, (*x, *y));
+                Some(Overlay {
+                    width: cursor.width,
+                    height: cursor.height,
+                    left: left.round() - cursor.hotspot.0 as f64,
+                    top: top.round() - cursor.hotspot.1 as f64,
+                    rgba: Arc::clone(&cursor.rgba),
+                })
+            }
+            _ => None,
+        };
         let scene = Scene {
             size: self.window,
-            picture: self.placement().map(|(rect, _)| PixelRect {
+            picture: placed.map(|(rect, _)| PixelRect {
                 left: rect.left,
                 top: rect.top,
                 width: rect.width,
                 height: rect.height,
             }),
-            overlay: None,
+            overlay,
         };
         self.submitter.submit(picture, scene);
+    }
+
+    /// Draws `cursor`, the host's cursor at the size it is shown, at its
+    /// position on the host's monitor, or stops drawing it with `None`.
+    pub(crate) fn draw_cursor(&mut self, cursor: Option<((f64, f64), ScaledCursor)>) {
+        let drew = self.cursor.is_some();
+        self.cursor = cursor;
+        if drew || self.cursor.is_some() {
+            self.submit(None);
+        }
     }
 
     /// Takes the window's new size, in pixels, and redraws.
@@ -104,6 +135,8 @@ pub(crate) struct WindowsPresenter {
     stage: SharedStage,
     /// When the pictures drawn reached the screen.
     presentations: Presentations,
+    /// The display's refresh timing as of the last picture, if known.
+    display_timing: Option<DisplayTiming>,
 }
 
 impl WindowsPresenter {
@@ -113,6 +146,7 @@ impl WindowsPresenter {
         Self {
             stage,
             presentations,
+            display_timing: None,
         }
     }
 }
@@ -124,7 +158,12 @@ impl Presenter for WindowsPresenter {
             frame_number: info.frame_number,
         };
         lock(&self.stage).submit(Some((frame, id)));
+        self.display_timing = qdp_desktop::display_timing();
         Ok(())
+    }
+
+    fn display_timing(&mut self) -> Option<DisplayTiming> {
+        self.display_timing
     }
 
     fn presentation_timing(&self) -> PresentationTiming {
