@@ -20,15 +20,18 @@ struct SettingsView: View {
                 Toggle("Show Statistics", isOn: $showStats)
             }
             #if os(iOS)
-            Section {
-                Picker("Touch", selection: $touchMode) {
-                    ForEach(TouchMode.allCases) { Text($0.label).tag($0) }
+            // A Mac running the iPhone and iPad app has no touchscreen.
+            if TouchSource.current == .touchscreen {
+                Section {
+                    Picker("Touch", selection: $touchMode) {
+                        ForEach(TouchMode.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("Touch")
+                } footer: {
+                    Text(touchMode.explanation)
                 }
-                .pickerStyle(.segmented)
-            } header: {
-                Text("Touch")
-            } footer: {
-                Text(touchMode.explanation)
             }
             #endif
             Section {
