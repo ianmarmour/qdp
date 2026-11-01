@@ -181,11 +181,16 @@ pub struct DirectoryConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Enrollment {
-    /// Only an administrator enrolls secrets, with `qdp-gateway totp enroll`.
+    /// A user without a secret enrolls one the first time they sign in with
+    /// their directory password: the client shows them a QR code for their
+    /// authenticator app, and the first code from it keeps the secret. From
+    /// then on, every sign-in asks for a code.
     #[default]
-    AdminOnly,
-    /// A user without a secret enrolls one the first time they sign in.
     FirstLogin,
+    /// Only an administrator enrolls secrets, with `qdp-gateway totp enroll`,
+    /// for organizations that will not let a password alone choose the
+    /// second factor; a user without a secret cannot sign in.
+    AdminOnly,
 }
 
 /// TOTP settings.
@@ -692,6 +697,20 @@ mod tests {
             "",
         );
         assert!(parse(&open).is_err());
+    }
+
+    #[test]
+    fn lets_users_enroll_on_first_sign_in_by_default() {
+        let without = EXAMPLE.replace("[totp]\n        enrollment = \"first-login\"", "");
+        assert_eq!(
+            parse(&without).unwrap().totp.enrollment,
+            Enrollment::FirstLogin
+        );
+        let strict = EXAMPLE.replace("\"first-login\"", "\"admin-only\"");
+        assert_eq!(
+            parse(&strict).unwrap().totp.enrollment,
+            Enrollment::AdminOnly
+        );
     }
 
     #[test]
