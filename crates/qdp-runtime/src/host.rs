@@ -39,7 +39,7 @@ use crate::host_passthrough::{
     self, FeatureRequest, PassthroughDevice, PassthroughLink, PassthroughPolicy,
 };
 use crate::layout::VideoLayout;
-use crate::media::{CursorState, FrameSource, MonitorPlacement};
+use crate::media::{CursorState, DesktopScale, FrameSource, MonitorPlacement};
 use crate::rate_control::{QueueDetector, RateControl};
 use crate::send_stats::{SendStats, decode_window, queue_delay};
 use crate::stream_ids::StreamIds;
@@ -212,6 +212,9 @@ struct ActiveHost {
     /// Where the captured monitor is in the desktop, and its size, as the
     /// injector was last told.
     placement: Option<(MonitorPlacement, (usize, usize))>,
+    /// The captured monitor's interface scale, as the injector was last
+    /// told.
+    desktop_scale: DesktopScale,
     /// The session's statistics.
     summary: HostSummary,
     /// The statistics logged every second.
@@ -370,8 +373,6 @@ async fn serve_session(
         mut injector,
         lock,
     } = open().await?;
-    let desktop_scale = source.desktop_scale().unwrap_or_default();
-    injector.set_desktop_scale(desktop_scale);
     let worker = clipboard
         .map(|shared| ClipboardWorker::spawn(shared.clipboard))
         .transpose()
@@ -431,6 +432,9 @@ async fn serve_session(
             );
         }
     }
+    // Matching can change the monitor's scale, so it is read after.
+    let desktop_scale = source.desktop_scale().unwrap_or_default();
+    injector.set_desktop_scale(desktop_scale);
     let placement = source
         .monitor_placement()
         .map(|placement| (placement, source.size()));
@@ -527,6 +531,7 @@ async fn serve_session(
         decoder_lag: DecoderLag::default(),
         frame_sent_at: None,
         placement,
+        desktop_scale,
         summary: HostSummary::default(),
         outputs: DeviceOutputs::default(),
         cursor: HostCursor::default(),
@@ -1162,6 +1167,25 @@ impl ActiveHost {
             if let Some((placement, capture)) = placement {
                 info!(?placement, "the captured monitor's place in the desktop");
                 self.injector.set_monitor_placement(placement, capture);
+            }
+        }
+        if let Some(scale) = output
+            .desktop_scale
+            .filter(|scale| *scale != self.desktop_scale)
+        {
+            self.desktop_scale = scale;
+            self.injector.set_desktop_scale(scale);
+            if output.capture_size == self.display.layout().capture {
+                // Only the scale changed: a new configuration tells the
+                // client.
+                let change = self.display.rescaled(scale, &mut self.stream_ids)?;
+                self.reconfigure(change)?;
+                if change == StreamChange::Replaced {
+                    return Ok(());
+                }
+            } else {
+                // The new size's configuration, below, carries it.
+                self.display.set_scale(scale);
             }
         }
         if output.job.stream_id != self.display.stream_id() {

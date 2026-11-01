@@ -9,11 +9,15 @@
 //! Where the desktop supports it, the pointer comes as PipeWire metadata
 //! beside the frames rather than drawn into them, so that the client can draw
 //! it without latency (Section 9.1).
+//!
+//! When the host is asked to, the captured monitor takes the client's
+//! display: its mode and interface scale change for the session.
 
 use std::os::fd::OwnedFd;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ashpd::desktop::CreateSessionOptions;
 use ashpd::desktop::PersistMode;
@@ -26,12 +30,13 @@ use pw::spa::buffer::meta::MetaCursor;
 use qdp_codec::{Rgb32Order, Yuv420Frame};
 use qdp_runtime::{
     CursorShape, CursorState, DesktopScale, FrameSource, LayoutRect, MonitorPlacement,
-    PointerPosition, RuntimeError,
+    PointerPosition, RuntimeError, WantedDisplay,
 };
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use super::desktop_layout;
+use super::monitor_matching::MonitorMatching;
 use crate::latest_frame::LatestFrame;
 
 /// The name of the thread that holds the portal session.
@@ -42,6 +47,13 @@ const PIPEWIRE_THREAD: &str = "qdp-pipewire";
 
 /// How long to wait for the first frame.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the monitor may take to send frames of its new size after its
+/// mode changes.
+const MODE_CHANGE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How often the newest frame is checked for the new size.
+const MODE_CHANGE_POLL: Duration = Duration::from_millis(20);
 
 /// The largest frame dimension offered to PipeWire.
 const MAX_DIMENSION: u32 = 8192;
@@ -136,6 +148,10 @@ pub struct ScreenCapture {
     desktop_size: Option<(i32, i32)>,
     /// Where the monitor is in the desktop, if known.
     placement: Option<MonitorPlacement>,
+    /// The monitor's name, as the compositor knows it, if known.
+    monitor_name: Option<String>,
+    /// Brings the monitor to the client's display, if the host was asked to.
+    matching: Option<MonitorMatching>,
 }
 
 impl std::fmt::Debug for ScreenCapture {
@@ -158,10 +174,9 @@ impl ScreenCapture {
         capture.portal = Some(portal);
         capture.restore_token = stream.restore_token;
         capture.desktop_size = stream.desktop_size;
-        capture.placement = stream
-            .desktop_position
-            .zip(stream.desktop_size)
-            .and_then(|(position, size)| portal_placement(position, size));
+        if let Some((position, size)) = stream.desktop_position.zip(stream.desktop_size) {
+            (capture.monitor_name, capture.placement) = portal_monitor(position, size);
+        }
         if stream.cursor_mode == CursorMode::Hidden {
             if let Ok(mut cursor) = capture.cursor.lock() {
                 cursor.state = Some(CursorState {
@@ -222,7 +237,65 @@ impl ScreenCapture {
             restore_token: None,
             desktop_size: None,
             placement: None,
+            monitor_name: None,
+            matching: None,
         })
+    }
+
+    /// Has the monitor take the client's display when the host asks it to,
+    /// saving its own settings at `saved_path` while they are changed.
+    /// Fails if the monitor's name is not known, as the compositor's display
+    /// settings need it.
+    pub fn match_displays(&mut self, saved_path: PathBuf) -> Result<(), String> {
+        let name = self
+            .monitor_name
+            .clone()
+            .ok_or_else(|| "the captured monitor's name is not known".to_owned())?;
+        info!(monitor = name, "the monitor will take the client's display");
+        self.matching = Some(MonitorMatching::new(name, saved_path)?);
+        Ok(())
+    }
+
+    /// Waits until the monitor sends frames of `size`, in either orientation,
+    /// or [`MODE_CHANGE_TIMEOUT`] passes, and returns whether it did.
+    fn wait_for_size(&mut self, size: (usize, usize)) -> bool {
+        let deadline = Instant::now() + MODE_CHANGE_TIMEOUT;
+        loop {
+            if let Ok(frame) = self.wait_for_frame(MODE_CHANGE_POLL) {
+                self.size = (frame.width(), frame.height());
+            }
+            if self.size == size || self.size == (size.1, size.0) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(MODE_CHANGE_POLL);
+        }
+    }
+
+    /// Reads the monitor's size and place in the desktop again, which its
+    /// mode and scale change.
+    fn refresh_layout(&mut self) {
+        let Some(name) = &self.monitor_name else {
+            return;
+        };
+        let outputs = match desktop_layout::outputs() {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                debug!(%error, "the desktop's monitors cannot be listed");
+                return;
+            }
+        };
+        let Some(output) = outputs.iter().find(|output| output.name == *name) else {
+            return;
+        };
+        let size = (
+            i32::try_from(output.rect.width).unwrap_or(i32::MAX),
+            i32::try_from(output.rect.height).unwrap_or(i32::MAX),
+        );
+        self.desktop_size = Some(size);
+        self.placement = desktop_layout::placement(output.rect, &outputs);
     }
 
     /// Waits for the first frame and takes the monitor's size from it.
@@ -280,23 +353,64 @@ impl FrameSource for ScreenCapture {
     fn monitor_placement(&self) -> Option<MonitorPlacement> {
         self.placement
     }
+
+    /// Changes the monitor's mode and interface scale to come as close to
+    /// `display` as it can, if the host was asked to, and waits for frames
+    /// of its new size. Returns whether its size is now the client's.
+    fn match_display(&mut self, display: &WantedDisplay) -> bool {
+        let Some(matching) = self.matching.as_mut() else {
+            return false;
+        };
+        let settings = match matching.apply(display) {
+            Ok(settings) => settings,
+            Err(error) => {
+                warn!(%error, "the monitor cannot take the client's display");
+                return false;
+            }
+        };
+        let size = (settings.mode.width as usize, settings.mode.height as usize);
+        if !self.wait_for_size(size) {
+            warn!(
+                width = size.0,
+                height = size.1,
+                "the monitor did not send frames of its new size in time"
+            );
+        }
+        self.refresh_layout();
+        (display.width as usize, display.height as usize) == size
+    }
 }
 
-/// Returns where the monitor the portal described, at `position` and of
-/// `size` in the desktop's coordinates, is among the desktop's monitors.
-fn portal_placement(position: (i32, i32), size: (i32, i32)) -> Option<MonitorPlacement> {
+/// Returns the name of the monitor the portal described, at `position` and
+/// of `size` in the desktop's coordinates, and where it is among the
+/// desktop's monitors, as far as they are known.
+fn portal_monitor(
+    position: (i32, i32),
+    size: (i32, i32),
+) -> (Option<String>, Option<MonitorPlacement>) {
+    let (Ok(width), Ok(height)) = (u32::try_from(size.0), u32::try_from(size.1)) else {
+        return (None, None);
+    };
     let monitor = LayoutRect {
         x: position.0,
         y: position.1,
-        width: u32::try_from(size.0).ok()?,
-        height: u32::try_from(size.1).ok()?,
+        width,
+        height,
     };
-    let outputs = desktop_layout::outputs()
-        .inspect_err(|error| debug!(%error, "the desktop's monitors cannot be listed"))
-        .ok()?;
-    let placement = desktop_layout::placement(monitor, &outputs)?;
-    info!(?placement, "the captured monitor's place in the desktop");
-    Some(placement)
+    let outputs = match desktop_layout::outputs() {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            debug!(%error, "the desktop's monitors cannot be listed");
+            return (None, None);
+        }
+    };
+    let name = outputs
+        .iter()
+        .find(|output| (output.rect.x, output.rect.y) == (monitor.x, monitor.y))
+        .map(|output| output.name.clone());
+    let placement = desktop_layout::placement(monitor, &outputs);
+    info!(monitor = ?name, ?placement, "the captured monitor's place in the desktop");
+    (name, placement)
 }
 
 impl Drop for ScreenCapture {

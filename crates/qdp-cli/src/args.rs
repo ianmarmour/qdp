@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use qdp_codec::CodecPreference;
 use qdp_desktop::DeviceSelector;
+use qdp_desktop::DisplayMatching;
 use qdp_desktop::Microphone;
 use qdp_quic::KeyPin;
 use qdp_runtime::{ClipboardDirections, PassthroughPolicy};
@@ -33,6 +34,11 @@ Serve options:
   --source KIND        auto, screen or test-pattern (default auto: the screen,
                        or the test pattern if it cannot be captured)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
+  --match-display on|off
+                       Change the streamed monitor's resolution and scale to
+                       the client's display for each session, as close as
+                       its modes allow, and back afterwards; on KDE Plasma
+                       (default off: the host scales its frames instead)
   --fps N              Frames per second (default 60)
   --encoder KIND       auto, hardware or software (default auto: the GPU's
                        encoder when it has one, otherwise software)
@@ -175,6 +181,8 @@ pub struct ServeArgs {
     pub source: SourceKind,
     /// The size of the test pattern.
     pub size: (usize, usize),
+    /// Whether the streamed monitor takes the client's display.
+    pub match_display: DisplayMatching,
     /// The frame rate.
     pub fps: u32,
     /// Whether to encode in hardware or software.
@@ -439,6 +447,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         client_keys: Vec::new(),
         user: None,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        match_display: DisplayMatching::Off,
         fps: DEFAULT_FPS,
         source: SourceKind::Auto,
         encoder: CodecPreference::Auto,
@@ -493,6 +502,17 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     )));
                 }
                 serve.resumption = (seconds > 0).then(|| Duration::from_secs(seconds));
+            }
+            "--match-display" => {
+                serve.match_display = match value("--match-display", &mut arguments)?.as_str() {
+                    "on" => DisplayMatching::On,
+                    "off" => DisplayMatching::Off,
+                    other => {
+                        return Err(error(format!(
+                            "--match-display must be on or off, not {other}"
+                        )));
+                    }
+                }
             }
             "--lock" => {
                 serve.lock = match value("--lock", &mut arguments)?.as_str() {
@@ -711,6 +731,13 @@ mod tests {
         };
         assert_eq!(serve.lock, LockPolicy::Leave);
         assert!(parse_line("serve --token abc --lock maybe").is_err());
+        assert_eq!(serve.match_display, DisplayMatching::Off);
+        let Command::Serve(serve) = parse_line("serve --token abc --match-display on").unwrap()
+        else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.match_display, DisplayMatching::On);
+        assert!(parse_line("serve --token abc --match-display maybe").is_err());
         assert!(parse_line("serve").is_err());
         let pin = "ab".repeat(PIN_HEX_LENGTH / 2);
         let Command::Serve(serve) = parse_line(&format!("serve --client-key {pin}")).unwrap()

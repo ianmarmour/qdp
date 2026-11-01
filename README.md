@@ -63,8 +63,19 @@ at a large or full-screen window, `--resolution 1920x1080` asks for that size
 instead, whatever the window's, and the client stretches the picture to fill
 it, keeping its shape: the picture is softer, but the host encodes and the
 client decodes far fewer pixels. The client then asks for an interface scale as
-much smaller as the picture is stretched, rounded to 25 %, so that a virtual
-monitor's text shows at the size the client's own would.
+much smaller as the picture is stretched, rounded to 25 %, so that the host's
+text shows at the size the client's own would when the host matches it.
+
+By default the host keeps its monitor as it is and scales its frames to the
+client's display. With `qdp serve --match-display on`, the host instead
+changes the streamed monitor's resolution and interface scale to the client's
+for each session, so that the stream needs no scaling: the monitor takes the
+mode closest to the client's display, by shape and then by size, at the
+nearest refresh rate, and the client's scale. When the session ends the
+monitor gets its own mode and scale back; they are saved in the identity
+directory while changed, so a host that stops without putting them back does
+when it next starts. This works on KDE Plasma so far, through KWin's display
+settings, as System Settings changes them.
 
 With `--headless` the client opens no window and only logs statistics, and
 `--output session.y4m` also writes the decoded video to a YUV4MPEG2 file, which

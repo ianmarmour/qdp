@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qdp_codec::DecoderCommand;
+use qdp_desktop::DisplayMatching;
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
@@ -254,7 +255,16 @@ async fn serve(args: ServeArgs) -> CliResult {
     let clipboard_directions = args.clipboard;
     let audio_setting = args.audio;
     let lock_policy = args.lock;
+    let match_display = args.match_display;
     let state_directory = Arc::new(args.identity.clone());
+    if match_display == DisplayMatching::On {
+        // A host that stopped without putting the monitor back left its
+        // settings saved.
+        let directory = Arc::clone(&state_directory);
+        tokio::task::spawn_blocking(move || qdp_desktop::restore_monitor_settings(&directory))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     // What the host can inject is found once, before any client connects,
     // so that no input device exists for a client that has not
     // authenticated; each session opens its own injector once its client
@@ -309,6 +319,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                                 (width, height),
                                 state_directory,
                                 lock_policy,
+                                match_display,
                             ))
                         }),
                     };
@@ -376,8 +387,9 @@ async fn open_desktop(
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
     lock: LockPolicy,
+    matching: DisplayMatching,
 ) -> Result<OpenedDesktop, RuntimeError> {
-    let (source, streamed) = open_source(kind, size, state_directory)
+    let (source, streamed) = open_source(kind, size, state_directory, matching)
         .await
         .map_err(RuntimeError::Capture)?;
     let (width, height) = source.size();
@@ -409,13 +421,15 @@ enum Streamed {
     TestPattern,
 }
 
-/// Opens what a session streams: the screen, or a `size` test pattern.
-/// Capturing the screen can wait for the user to choose a monitor, so it runs
-/// on a blocking thread.
+/// Opens what a session streams: the screen, which takes the client's
+/// display if `matching` says, or a `size` test pattern. Capturing the screen
+/// can wait for the user to choose a monitor, so it runs on a blocking
+/// thread.
 async fn open_source(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
+    matching: DisplayMatching,
 ) -> Result<(Box<dyn FrameSource>, Streamed), String> {
     let test_pattern = || {
         let pattern = Box::new(TestPattern::new(size.0, size.1)) as Box<dyn FrameSource>;
@@ -424,9 +438,10 @@ async fn open_source(
     if kind == SourceKind::TestPattern {
         return Ok(test_pattern());
     }
-    let screen = tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory))
-        .await
-        .map_err(|error| error.to_string())?;
+    let screen =
+        tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory, matching))
+            .await
+            .map_err(|error| error.to_string())?;
     match (screen, kind) {
         (Ok(screen), _) => Ok((screen, Streamed::Screen)),
         (Err(error), SourceKind::Auto) => {
