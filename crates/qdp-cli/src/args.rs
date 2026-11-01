@@ -174,6 +174,10 @@ pub enum Command {
     /// `--decoder-process on`, on standard input and output. Not for
     /// people to run.
     Decoder,
+    /// Serve a host's requests in this desktop session, on standard input
+    /// and output, for a host streaming the console from outside any
+    /// session, which starts it. Not for people to run.
+    SessionHelper,
     /// Print the key pin of the host's or the client's identity.
     Pin {
         /// The directory of the identity.
@@ -541,6 +545,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
         Some("serve") => parse_serve(arguments).map(Command::Serve),
         Some("connect") => parse_connect(arguments).map(Command::Connect),
         Some(DECODER_COMMAND) => Ok(Command::Decoder),
+        Some(qdp_desktop::SESSION_HELPER_COMMAND) => Ok(Command::SessionHelper),
         Some("pin") => {
             let mut identity = None;
             let mut role = Role::Host;

@@ -23,7 +23,7 @@ pub enum Urgency {
 pub struct Notification {
     /// The platform's notification.
     #[cfg(all(target_os = "linux", feature = "notifications"))]
-    inner: crate::linux::notifications::Notification,
+    inner: LinuxNotification,
     /// The banner.
     #[cfg(all(windows, feature = "notifications"))]
     inner: crate::win32::Notice,
@@ -32,12 +32,26 @@ pub struct Notification {
     inner: crate::macos::notifications::Notification,
 }
 
+/// A notification on Linux: this session's, or the console's session's,
+/// shown by its helper.
+#[cfg(all(target_os = "linux", feature = "notifications"))]
+#[derive(Debug)]
+enum LinuxNotification {
+    /// This session's.
+    Desktop(crate::linux::notifications::Notification),
+    /// The console's session's.
+    Helper(crate::linux::HelperNotification),
+}
+
 impl Notification {
     /// Takes the notification away, where the system allows: Notification
     /// Center keeps it until the user clears it.
     pub async fn close(self) {
         #[cfg(all(target_os = "linux", feature = "notifications"))]
-        self.inner.close().await;
+        match self.inner {
+            LinuxNotification::Desktop(notification) => notification.close().await,
+            LinuxNotification::Helper(notification) => notification.close(),
+        }
         #[cfg(all(any(windows, target_os = "macos"), feature = "notifications"))]
         self.inner.close();
     }
@@ -59,9 +73,20 @@ pub async fn notify(
 ) -> Result<Notification, String> {
     #[cfg(all(target_os = "linux", feature = "notifications"))]
     {
+        // A host following the console's session notifies there, through
+        // its helper.
+        if let Some(helper) = crate::linux::console_helper() {
+            return helper?
+                .notify(summary, body, lifetime, urgency)
+                .map(|notification| Notification {
+                    inner: LinuxNotification::Helper(notification),
+                });
+        }
         crate::linux::notifications::notify(summary, body, lifetime, urgency)
             .await
-            .map(|inner| Notification { inner })
+            .map(|notification| Notification {
+                inner: LinuxNotification::Desktop(notification),
+            })
     }
     #[cfg(all(windows, feature = "notifications"))]
     {
