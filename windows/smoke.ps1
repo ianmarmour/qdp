@@ -186,7 +186,21 @@ Wait-Stream $app 'no-stream'
 Start-Sleep -Seconds 4
 Save-Screen 'app-stream'
 
-# Brought back, the app says how the stream goes, and disconnects it.
+# Launched again, the app hands over to the one running, which comes back
+# from where it stepped back to.
+$again = Start-Process -FilePath (Join-Path $publish 'QDP.exe') -PassThru
+if (-not $again.WaitForExit(30000)) {
+    $again.Kill()
+    throw 'launched again, the app opened a second one'
+}
+Start-Sleep -Seconds 1
+$state = $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Current.WindowVisualState
+if ($state -eq [System.Windows.Automation.WindowVisualState]::Minimized) {
+    Save-Screen 'not-forward'
+    throw 'launched again, the app did not come back'
+}
+
+# Back, the app says how the stream goes, and disconnects it.
 Stop-Stream $app $window 'app-streaming'
 
 # The host streamed is kept, its token in the Credential Locker, and its

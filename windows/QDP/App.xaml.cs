@@ -31,4 +31,16 @@ public partial class App : Application
         window = new MainWindow(problem);
         window.Activate();
     }
+
+    /// <summary>
+    /// Brings the main window forward, restored, as when QDP is launched
+    /// again; from any thread.
+    /// </summary>
+    internal void BringForward()
+    {
+        if (window is { } main)
+        {
+            main.DispatcherQueue.TryEnqueue(main.ComeBack);
+        }
+    }
 }
