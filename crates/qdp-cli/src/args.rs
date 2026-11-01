@@ -26,6 +26,12 @@ Usage:
   qdp clients remove WHICH [--identity DIR]
                                Forget a paired client, by its name or the
                                start of its key pin
+  qdp service install [serve options]
+                               Run the host as a system service from boot,
+                               streaming the console, the login screen
+                               included (Linux, as root)
+  qdp service uninstall        Stop and remove the service
+  qdp service status           Show whether the service runs
   qdp help                     Show this help
 
 Serve options:
@@ -181,8 +187,25 @@ pub enum Command {
         /// What to do.
         action: ClientsAction,
     },
+    /// Install, remove or describe the host's system service.
+    Service(ServiceAction),
     /// Show the usage text.
     Help,
+}
+
+/// What `qdp service` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceAction {
+    /// Installs the service, serving with `options` as `qdp serve` takes
+    /// them, and starts it.
+    Install {
+        /// The options of `qdp serve`, after the service's own.
+        options: Vec<String>,
+    },
+    /// Stops and removes the service.
+    Uninstall,
+    /// Shows whether the service runs.
+    Status,
 }
 
 /// What `qdp clients` does.
@@ -553,8 +576,41 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
             }
             Ok(Command::Clients { identity, action })
         }
+        Some("service") => parse_service(arguments).map(Command::Service),
         Some("help" | "--help" | "-h") | None => Ok(Command::Help),
         Some(other) => Err(error(format!("unknown command: {other}"))),
+    }
+}
+
+/// Parses `qdp service`'s action, and the `qdp serve` options an install
+/// passes on, which are checked here so that a mistake shows now rather
+/// than in the service's log.
+fn parse_service(mut arguments: impl Iterator<Item = String>) -> Result<ServiceAction, ArgsError> {
+    match arguments.next().as_deref() {
+        Some("install") => {
+            let options: Vec<String> = arguments.collect();
+            if options.iter().any(|option| option == "--identity") {
+                return Err(error(
+                    "the service keeps its key in its own directory, so takes no --identity",
+                ));
+            }
+            parse_serve(options.iter().cloned())?;
+            Ok(ServiceAction::Install { options })
+        }
+        Some("uninstall") => no_more(arguments).map(|()| ServiceAction::Uninstall),
+        Some("status") => no_more(arguments).map(|()| ServiceAction::Status),
+        Some(other) => Err(error(format!(
+            "qdp service takes install, uninstall or status, not {other}"
+        ))),
+        None => Err(error("qdp service takes install, uninstall or status")),
+    }
+}
+
+/// Fails if any argument is left.
+fn no_more(mut arguments: impl Iterator<Item = String>) -> Result<(), ArgsError> {
+    match arguments.next() {
+        Some(extra) => Err(error(format!("unexpected argument: {extra}"))),
+        None => Ok(()),
     }
 }
 
@@ -1191,5 +1247,39 @@ mod tests {
         assert_eq!(parse_line("").unwrap(), Command::Help);
         assert_eq!(parse_line("help").unwrap(), Command::Help);
         assert!(parse_line("bogus").is_err());
+    }
+
+    /// `service install` passes its `serve` options on once they parse,
+    /// and the other actions take none.
+    #[test]
+    fn service() {
+        assert_eq!(
+            parse_line("service install --lock off --fps 120").unwrap(),
+            Command::Service(ServiceAction::Install {
+                options: ["--lock", "off", "--fps", "120"]
+                    .map(str::to_owned)
+                    .to_vec()
+            })
+        );
+        assert_eq!(
+            parse_line("service install").unwrap(),
+            Command::Service(ServiceAction::Install {
+                options: Vec::new()
+            })
+        );
+        assert!(parse_line("service install --fps fast").is_err());
+        assert!(parse_line("service install --pairing off").is_err());
+        assert!(parse_line("service install --identity /tmp/qdp").is_err());
+        assert_eq!(
+            parse_line("service uninstall").unwrap(),
+            Command::Service(ServiceAction::Uninstall)
+        );
+        assert_eq!(
+            parse_line("service status").unwrap(),
+            Command::Service(ServiceAction::Status)
+        );
+        assert!(parse_line("service status now").is_err());
+        assert!(parse_line("service").is_err());
+        assert!(parse_line("service restart").is_err());
     }
 }

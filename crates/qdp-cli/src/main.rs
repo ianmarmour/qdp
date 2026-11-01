@@ -11,6 +11,7 @@ mod color;
 #[cfg(feature = "window")]
 mod identity;
 mod paired;
+mod service;
 mod sink;
 #[cfg(feature = "window")]
 mod window;
@@ -130,6 +131,7 @@ fn main() -> ExitCode {
         }
         Command::Pin { identity, role } => print_pin(&identity, role),
         Command::Clients { identity, action } => clients(&identity, action),
+        Command::Service(action) => service::run(action),
         Command::Serve(args) => {
             adopt_session_display();
             run_async(serve(args))

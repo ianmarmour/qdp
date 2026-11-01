@@ -24,7 +24,8 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/source"
 cp "$binary" "$work/source/qdp"
-cp "$here/60-qdp.rules" "$here/qdp-modules.conf" "$root/LICENSE" "$root/README.md" "$work/source/"
+cp "$here/60-qdp.rules" "$here/qdp-modules.conf" "$here/qdp.service" "$root/LICENSE" "$root/README.md" \
+  "$work/source/"
 
 rpmbuild -bb "$here/qdp.spec" \
   --define "_topdir $work/rpmbuild" \
