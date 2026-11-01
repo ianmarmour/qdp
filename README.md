@@ -326,6 +326,16 @@ identity directory before the service first starts:
 sudo install -d -m 700 /var/lib/qdp && sudo cp -a qdp-identity/. /var/lib/qdp/
 ```
 
+On macOS, `qdp service install` runs the host as a LaunchAgent instead: it
+starts at every login, in the user's session where macOS lets it capture the
+screen, restarts if it fails, and is never throttled as background work. macOS
+asks to allow Screen Recording and Accessibility for `qdp` the first time a
+device connects. The agent keeps the host's key in
+`~/Library/Application Support/qdp` and logs to `~/Library/Logs/qdp.log`;
+`qdp service status` and `qdp service uninstall` show and remove it. It serves
+only while someone is logged in: streaming the login window needs a signed
+app, which QDP does not have yet.
+
 ## Android client
 
 The Android app in [`android`](android) streams from a host to phones,
