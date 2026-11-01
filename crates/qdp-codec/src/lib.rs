@@ -22,8 +22,6 @@
 
 mod audio;
 mod backend;
-// Only the VA-API encoder writes headers itself.
-#[cfg(target_os = "linux")]
 mod bits;
 mod decoder;
 #[cfg(target_os = "linux")]

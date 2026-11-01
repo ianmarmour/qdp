@@ -2,6 +2,7 @@
 //! that must be told a stream's format before its first frame, and building
 //! the AV1 codec configuration record (`av1C`) such decoders take.
 
+use crate::bits::BitReader;
 use crate::{CodecError, ObuType, parse_obus};
 
 /// The first byte of an `av1C` record: `marker` 1 and `version` 1.
@@ -9,9 +10,6 @@ const AV1C_MARKER_AND_VERSION: u8 = 0x81;
 
 /// The `seq_level_idx` above which a tier bit follows.
 const MAX_LEVEL_WITHOUT_TIER: u64 = 7;
-
-/// `seq_force_screen_content_tools` meaning "chosen per frame".
-const SELECT_SCREEN_CONTENT_TOOLS: u64 = 2;
 
 /// `color_primaries` of BT.709.
 const PRIMARIES_BT709: u64 = 1;
@@ -24,53 +22,6 @@ const MATRIX_IDENTITY: u64 = 0;
 
 /// The values used when no colour description is present: unspecified.
 const COLOR_UNSPECIFIED: u64 = 2;
-
-/// Reads values most significant bit first, as AV1's `f(n)` descriptor does.
-struct BitReader<'a> {
-    /// The bytes being read.
-    bytes: &'a [u8],
-    /// The number of bits read.
-    position: usize,
-}
-
-impl<'a> BitReader<'a> {
-    /// Starts reading at the first bit of `bytes`.
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
-    }
-
-    /// Reads one bit.
-    fn bit(&mut self) -> Result<bool, CodecError> {
-        let byte = self
-            .bytes
-            .get(self.position / 8)
-            .ok_or(CodecError::MalformedBitstream("truncated sequence header"))?;
-        let set = byte & (0x80 >> (self.position % 8)) != 0;
-        self.position += 1;
-        Ok(set)
-    }
-
-    /// Reads `count` bits: AV1's `f(count)`.
-    fn bits(&mut self, count: u32) -> Result<u64, CodecError> {
-        let mut value = 0;
-        for _ in 0..count {
-            value = (value << 1) | u64::from(self.bit()?);
-        }
-        Ok(value)
-    }
-
-    /// Reads a variable-length unsigned value: AV1's `uvlc()`.
-    fn uvlc(&mut self) -> Result<u64, CodecError> {
-        let mut leading_zeros = 0;
-        while !self.bit()? {
-            leading_zeros += 1;
-            if leading_zeros >= 32 {
-                return Ok(u64::from(u32::MAX));
-            }
-        }
-        Ok(self.bits(leading_zeros)? + (1 << leading_zeros) - 1)
-    }
-}
 
 /// The parts of an AV1 sequence header that describe a stream's format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,8 +55,103 @@ pub struct SequenceHeader {
     pub superres: bool,
     /// Whether frames may carry film grain (`film_grain_params_present`).
     pub film_grain: bool,
+    /// The coding tools frames may use, which their headers depend on.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) coding: SequenceCoding,
     /// The whole sequence header OBU.
     obu: Vec<u8>,
+}
+
+/// Whether a coding tool is off, on, or chosen by each frame's header.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum ToolChoice {
+    /// Off for every frame.
+    Off,
+    /// On for every frame.
+    On,
+    /// Chosen by each frame's header.
+    #[default]
+    PerFrame,
+}
+
+/// The fields of a sequence header that frame headers depend on (AV1
+/// specification, Section 5.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SequenceCoding {
+    /// `reduced_still_picture_header`.
+    pub(crate) reduced_still_picture_header: bool,
+    /// The decoder model, if `decoder_model_info_present_flag` is set.
+    pub(crate) decoder_model: Option<DecoderModel>,
+    /// The bits of `frame_width_minus_1`.
+    pub(crate) frame_width_bits: u32,
+    /// The bits of `frame_height_minus_1`.
+    pub(crate) frame_height_bits: u32,
+    /// The lengths of frame IDs, if `frame_id_numbers_present_flag` is set.
+    pub(crate) frame_ids: Option<FrameIdLengths>,
+    /// `use_128x128_superblock`.
+    pub(crate) use_128x128_superblock: bool,
+    /// `enable_filter_intra`.
+    pub(crate) enable_filter_intra: bool,
+    /// `enable_intra_edge_filter`.
+    pub(crate) enable_intra_edge_filter: bool,
+    /// `enable_interintra_compound`.
+    pub(crate) enable_interintra_compound: bool,
+    /// `enable_masked_compound`.
+    pub(crate) enable_masked_compound: bool,
+    /// `enable_warped_motion`.
+    pub(crate) enable_warped_motion: bool,
+    /// `enable_dual_filter`.
+    pub(crate) enable_dual_filter: bool,
+    /// `enable_jnt_comp`.
+    pub(crate) enable_jnt_comp: bool,
+    /// `enable_ref_frame_mvs`.
+    pub(crate) enable_ref_frame_mvs: bool,
+    /// `seq_force_screen_content_tools`.
+    pub(crate) screen_content_tools: ToolChoice,
+    /// `seq_force_integer_mv`.
+    pub(crate) integer_mv: ToolChoice,
+    /// `OrderHintBits`: the bits of `order_hint`, 0 if `enable_order_hint` is
+    /// not set.
+    pub(crate) order_hint_bits: u32,
+    /// `enable_cdef`.
+    pub(crate) enable_cdef: bool,
+    /// `enable_restoration`.
+    pub(crate) enable_restoration: bool,
+    /// `separate_uv_delta_q`.
+    pub(crate) separate_uv_delta_q: bool,
+}
+
+/// The decoder model's fields that frame headers depend on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DecoderModel {
+    /// `equal_picture_interval` of the timing info.
+    pub(crate) equal_picture_interval: bool,
+    /// The bits of `buffer_removal_time`.
+    pub(crate) buffer_removal_time_bits: u32,
+    /// The bits of `frame_presentation_time`.
+    pub(crate) frame_presentation_time_bits: u32,
+    /// `operating_point_idc` of the operating points that have decoder model
+    /// parameters (`decoder_model_present_for_this_op`).
+    pub(crate) modelled_operating_points: Vec<u16>,
+}
+
+/// The lengths of frame IDs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FrameIdLengths {
+    /// `idLen`: the bits of `current_frame_id`.
+    pub(crate) frame_id_bits: u32,
+    /// The bits of `delta_frame_id_minus_1`.
+    pub(crate) delta_frame_id_bits: u32,
+}
+
+/// The first operating point's level and tier, and the decoder model.
+struct OperatingPoints {
+    /// `seq_level_idx` of the first operating point.
+    level: u64,
+    /// `seq_tier` of the first operating point.
+    tier: u64,
+    /// The decoder model, if present.
+    decoder_model: Option<DecoderModel>,
 }
 
 /// The colour code points of a stream, from H.273.
@@ -154,54 +200,70 @@ impl SequenceHeader {
         let profile = reader.bits(3)?;
         reader.bit()?; // still_picture
         let reduced_still_picture_header = reader.bit()?;
-        let (level, tier) = if reduced_still_picture_header {
-            (reader.bits(5)?, 0)
+        let points = if reduced_still_picture_header {
+            OperatingPoints {
+                level: reader.bits(5)?,
+                tier: 0,
+                decoder_model: None,
+            }
         } else {
-            Self::skip_to_first_operating_point(&mut reader)?
+            Self::parse_operating_points(&mut reader)?
         };
-        let width_bits = reader.bits(4)? as u32 + 1;
-        let height_bits = reader.bits(4)? as u32 + 1;
-        let max_width = reader.bits(width_bits)? + 1;
-        let max_height = reader.bits(height_bits)? + 1;
-        let frame_id_numbers_present = !reduced_still_picture_header && reader.bit()?;
-        if frame_id_numbers_present {
-            reader.bits(4)?; // delta_frame_id_length_minus_2
-            reader.bits(3)?; // additional_frame_id_length_minus_1
-        }
-        reader.bit()?; // use_128x128_superblock
-        reader.bit()?; // enable_filter_intra
-        reader.bit()?; // enable_intra_edge_filter
+        let frame_width_bits = reader.bits32(4)? + 1;
+        let frame_height_bits = reader.bits32(4)? + 1;
+        let max_width = reader.bits(frame_width_bits)? + 1;
+        let max_height = reader.bits(frame_height_bits)? + 1;
+        let frame_ids = if !reduced_still_picture_header && reader.bit()? {
+            let delta_frame_id_bits = reader.bits32(4)? + 2;
+            let additional_bits = reader.bits32(3)? + 1;
+            Some(FrameIdLengths {
+                frame_id_bits: delta_frame_id_bits + additional_bits,
+                delta_frame_id_bits,
+            })
+        } else {
+            None
+        };
+        let mut coding = SequenceCoding {
+            reduced_still_picture_header,
+            decoder_model: points.decoder_model,
+            frame_width_bits,
+            frame_height_bits,
+            frame_ids,
+            use_128x128_superblock: reader.bit()?,
+            enable_filter_intra: reader.bit()?,
+            enable_intra_edge_filter: reader.bit()?,
+            ..SequenceCoding::default()
+        };
         if !reduced_still_picture_header {
-            reader.bit()?; // enable_interintra_compound
-            reader.bit()?; // enable_masked_compound
-            reader.bit()?; // enable_warped_motion
-            reader.bit()?; // enable_dual_filter
+            coding.enable_interintra_compound = reader.bit()?;
+            coding.enable_masked_compound = reader.bit()?;
+            coding.enable_warped_motion = reader.bit()?;
+            coding.enable_dual_filter = reader.bit()?;
             let enable_order_hint = reader.bit()?;
             if enable_order_hint {
-                reader.bit()?; // enable_jnt_comp
-                reader.bit()?; // enable_ref_frame_mvs
+                coding.enable_jnt_comp = reader.bit()?;
+                coding.enable_ref_frame_mvs = reader.bit()?;
             }
-            let force_screen_content_tools = if reader.bit()? {
-                SELECT_SCREEN_CONTENT_TOOLS
+            coding.screen_content_tools = Self::parse_choice(&mut reader)?;
+            coding.integer_mv = if coding.screen_content_tools == ToolChoice::Off {
+                ToolChoice::PerFrame
             } else {
-                reader.bits(1)?
+                Self::parse_choice(&mut reader)?
             };
-            if force_screen_content_tools > 0 && !reader.bit()? {
-                reader.bit()?; // seq_force_integer_mv
-            }
             if enable_order_hint {
-                reader.bits(3)?; // order_hint_bits_minus_1
+                coding.order_hint_bits = reader.bits32(3)? + 1;
             }
         }
         let superres = reader.bit()?;
-        reader.bit()?; // enable_cdef
-        reader.bit()?; // enable_restoration
+        coding.enable_cdef = reader.bit()?;
+        coding.enable_restoration = reader.bit()?;
         let color = ColorConfig::parse(&mut reader, profile)?;
+        coding.separate_uv_delta_q = color.separate_uv_delta_q;
         let film_grain = reader.bit()?;
         Ok(Self {
             profile: profile as u8,
-            level: level as u8,
-            tier: tier as u8,
+            level: points.level as u8,
+            tier: points.tier as u8,
             bit_depth: color.bit_depth,
             monochrome: color.monochrome,
             subsampling_x: color.subsampling_x,
@@ -213,52 +275,76 @@ impl SequenceHeader {
             full_range: color.full_range,
             superres,
             film_grain,
+            coding,
             obu,
         })
     }
 
-    /// Reads the timing, decoder model and operating point fields, returning
-    /// the first operating point's level and tier.
-    fn skip_to_first_operating_point(reader: &mut BitReader<'_>) -> Result<(u64, u64), CodecError> {
+    /// Reads a `seq_choose_*` flag and, if it is not set, the `seq_force_*`
+    /// value.
+    fn parse_choice(reader: &mut BitReader<'_>) -> Result<ToolChoice, CodecError> {
+        Ok(if reader.bit()? {
+            ToolChoice::PerFrame
+        } else if reader.bit()? {
+            ToolChoice::On
+        } else {
+            ToolChoice::Off
+        })
+    }
+
+    /// Reads the timing, decoder model and operating point fields.
+    fn parse_operating_points(reader: &mut BitReader<'_>) -> Result<OperatingPoints, CodecError> {
         let timing_info_present = reader.bit()?;
-        let mut decoder_model_info_present = false;
+        let mut decoder_model = None;
         let mut buffer_delay_length = 0;
         if timing_info_present {
             reader.bits(32)?; // num_units_in_display_tick
             reader.bits(32)?; // time_scale
-            if reader.bit()? {
+            let equal_picture_interval = reader.bit()?;
+            if equal_picture_interval {
                 reader.uvlc()?; // num_ticks_per_picture_minus_1
             }
-            decoder_model_info_present = reader.bit()?;
-            if decoder_model_info_present {
-                buffer_delay_length = reader.bits(5)? as u32 + 1;
+            if reader.bit()? {
+                buffer_delay_length = reader.bits32(5)? + 1;
                 reader.bits(32)?; // num_units_in_decoding_tick
-                reader.bits(5)?; // buffer_removal_time_length_minus_1
-                reader.bits(5)?; // frame_presentation_time_length_minus_1
+                decoder_model = Some(DecoderModel {
+                    equal_picture_interval,
+                    buffer_removal_time_bits: reader.bits32(5)? + 1,
+                    frame_presentation_time_bits: reader.bits32(5)? + 1,
+                    modelled_operating_points: Vec::new(),
+                });
             }
         }
         let initial_display_delay_present = reader.bit()?;
         let operating_points = reader.bits(5)? + 1;
         let mut first = None;
         for _ in 0..operating_points {
-            reader.bits(12)?; // operating_point_idc
+            let idc = reader.bits(12)? as u16;
             let level = reader.bits(5)?;
             let tier = if level > MAX_LEVEL_WITHOUT_TIER {
                 reader.bits(1)?
             } else {
                 0
             };
-            if decoder_model_info_present && reader.bit()? {
-                reader.bits(buffer_delay_length)?; // decoder_buffer_delay
-                reader.bits(buffer_delay_length)?; // encoder_buffer_delay
-                reader.bit()?; // low_delay_mode_flag
+            if let Some(model) = decoder_model.as_mut() {
+                if reader.bit()? {
+                    model.modelled_operating_points.push(idc);
+                    reader.bits(buffer_delay_length)?; // decoder_buffer_delay
+                    reader.bits(buffer_delay_length)?; // encoder_buffer_delay
+                    reader.bit()?; // low_delay_mode_flag
+                }
             }
             if initial_display_delay_present && reader.bit()? {
                 reader.bits(4)?; // initial_display_delay_minus_1
             }
             first.get_or_insert((level, tier));
         }
-        first.ok_or(CodecError::MalformedBitstream("no operating points"))
+        let (level, tier) = first.ok_or(CodecError::MalformedBitstream("no operating points"))?;
+        Ok(OperatingPoints {
+            level,
+            tier,
+            decoder_model,
+        })
     }
 
     /// Returns the sequence header OBU.
@@ -305,6 +391,8 @@ struct ColorConfig {
     description: Option<ColorDescription>,
     /// Whether samples use the full range.
     full_range: bool,
+    /// `separate_uv_delta_q`.
+    separate_uv_delta_q: bool,
 }
 
 impl ColorConfig {
@@ -346,6 +434,7 @@ impl ColorConfig {
             chroma_sample_position: 0,
             description,
             full_range: false,
+            separate_uv_delta_q: false,
         };
         if monochrome {
             config.full_range = reader.bit()?; // color_range
@@ -374,7 +463,7 @@ impl ColorConfig {
                 config.chroma_sample_position = reader.bits(2)? as u8;
             }
         }
-        reader.bit()?; // separate_uv_delta_q
+        config.separate_uv_delta_q = reader.bit()?;
         Ok(config)
     }
 }
@@ -408,6 +497,26 @@ mod tests {
         );
         assert!(!header.full_range && !header.superres && !header.film_grain);
         assert_eq!(header.obu(), SEQUENCE_HEADER_1080P);
+    }
+
+    /// The fields frame headers depend on are read too: the VA-API
+    /// encoder's stream has 8-bit order hints and CDEF, and no other tool.
+    #[test]
+    fn reads_the_coding_tools() {
+        let coding = SequenceHeader::parse(&SEQUENCE_HEADER_1080P)
+            .unwrap()
+            .coding;
+        assert_eq!(coding.order_hint_bits, 8);
+        assert_eq!(
+            (coding.frame_width_bits, coding.frame_height_bits),
+            (11, 11)
+        );
+        assert!(coding.enable_cdef && !coding.enable_restoration);
+        assert_eq!(coding.screen_content_tools, ToolChoice::Off);
+        assert_eq!(coding.integer_mv, ToolChoice::PerFrame);
+        assert!(!coding.use_128x128_superblock && !coding.reduced_still_picture_header);
+        assert!(!coding.enable_ref_frame_mvs && !coding.separate_uv_delta_q);
+        assert_eq!((coding.decoder_model, coding.frame_ids), (None, None));
     }
 
     /// The configuration record is the four header bytes and the OBU.
