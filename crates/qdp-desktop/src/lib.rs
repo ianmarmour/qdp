@@ -59,10 +59,10 @@ pub use lock_keys::lock_keys;
 pub use passthrough::{DeviceSelector, PassthroughCapture};
 pub use touchpad::TouchpadCapture;
 
+#[cfg(all(target_os = "linux", feature = "screen-capture"))]
+pub use linux::ScreenCapture;
 #[cfg(target_os = "linux")]
 pub use linux::UinputInjector;
-#[cfg(all(target_os = "linux", feature = "screen-capture"))]
-pub use linux::{ScreenCapture, VirtualMonitor};
 #[cfg(target_os = "macos")]
 pub use macos::{MacScreenCapture, QuartzInjector};
 #[cfg(windows)]
@@ -106,19 +106,6 @@ pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, Stri
 #[cfg(windows)]
 pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, String> {
     Ok(Box::new(DesktopDuplication::open()?))
-}
-
-/// Adds a virtual monitor to the desktop, made at the client's display once
-/// the client tells it, and streams it: on KDE Plasma, through KWin.
-#[cfg(all(target_os = "linux", feature = "screen-capture"))]
-pub fn open_virtual_monitor() -> Result<Box<dyn FrameSource>, String> {
-    Ok(Box::new(VirtualMonitor::open()?))
-}
-
-/// Adds a virtual monitor to the desktop; this platform cannot yet.
-#[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
-pub fn open_virtual_monitor() -> Result<Box<dyn FrameSource>, String> {
-    Err("virtual monitors are not supported on this platform yet".to_owned())
 }
 
 /// Starts capturing the screen; this platform cannot yet.

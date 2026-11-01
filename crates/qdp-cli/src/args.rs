@@ -30,10 +30,8 @@ Serve options:
   --client-key HEX     Accept clients presenting the key HEX, from their
                        `qdp pin --client` (repeatable)
   --user NAME          Accept NAME with the password in QDP_PASSWORD
-  --source KIND        auto, screen, virtual or test-pattern (default auto: the
-                       screen, or the test pattern if it cannot be captured;
-                       virtual adds a monitor at the client's display and
-                       streams it, on KDE Plasma)
+  --source KIND        auto, screen or test-pattern (default auto: the screen,
+                       or the test pattern if it cannot be captured)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
   --fps N              Frames per second (default 60)
   --encoder KIND       auto, hardware or software (default auto: the GPU's
@@ -158,8 +156,6 @@ pub enum SourceKind {
     Screen,
     /// A moving test pattern.
     TestPattern,
-    /// A virtual monitor at the client's display.
-    Virtual,
 }
 
 /// The options of `qdp serve`.
@@ -470,10 +466,9 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     "auto" => SourceKind::Auto,
                     "screen" => SourceKind::Screen,
                     "test-pattern" => SourceKind::TestPattern,
-                    "virtual" => SourceKind::Virtual,
                     other => {
                         return Err(error(format!(
-                            "--source must be auto, screen, virtual or test-pattern, not {other}"
+                            "--source must be auto, screen or test-pattern, not {other}"
                         )));
                     }
                 }
@@ -670,11 +665,6 @@ mod tests {
             panic!("expected serve");
         };
         assert_eq!(serve.source, SourceKind::TestPattern);
-        let Command::Serve(serve) = parse_line("serve --token abc --source virtual").unwrap()
-        else {
-            panic!("expected serve");
-        };
-        assert_eq!(serve.source, SourceKind::Virtual);
         assert!(parse_line("serve --token abc --source camera").is_err());
         let Command::Serve(serve) = parse_line("serve --token abc --encoder software").unwrap()
         else {

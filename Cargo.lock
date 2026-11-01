@@ -2318,7 +2318,6 @@ dependencies = [
  "tracing",
  "wayland-client",
  "wayland-protocols",
- "wayland-protocols-plasma",
  "windows",
  "wl-clipboard-rs",
  "x11rb",
