@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{CursorShape, CursorState, FrameSource, PointerPosition, RuntimeError};
+use qdp_runtime::{
+    CapturedFrame, CursorShape, CursorState, FrameSource, PointerPosition, RuntimeError,
+};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
@@ -429,7 +431,7 @@ impl FrameSource for DesktopDuplication {
         self.size
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         self.acquire(0).map_err(RuntimeError::Capture)?;
         // A display that changes mode is duplicated again at its new size,
         // which the host follows with a new stream.
@@ -447,6 +449,7 @@ impl FrameSource for DesktopDuplication {
         }
         self.frame
             .clone()
+            .map(CapturedFrame::Memory)
             .ok_or_else(|| RuntimeError::Capture("the screen image is unreadable".to_owned()))
     }
 

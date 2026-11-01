@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use qdp::message::{
     BLOCK_SIZE, BlockGrid, BlockSet, CursorImage, FrameNumber, PointerMode, StreamId,
 };
+#[cfg(target_os = "linux")]
+use qdp_codec::DmaBufFrame;
 use qdp_codec::Yuv420Frame;
 
 use tokio::sync::Notify;
@@ -259,6 +261,60 @@ pub struct WantedDisplay {
     pub scale_percent: u32,
 }
 
+/// A frame a source captured: in memory, or held by the GPU.
+#[derive(Debug, Clone)]
+pub enum CapturedFrame {
+    /// A frame in memory.
+    Memory(Arc<Yuv420Frame>),
+    /// A frame the GPU holds, which hardware encoders read where it is.
+    #[cfg(target_os = "linux")]
+    DmaBuf(Arc<DmaBufFrame>),
+}
+
+impl CapturedFrame {
+    /// Returns the width and height in pixels.
+    pub fn size(&self) -> (usize, usize) {
+        match self {
+            Self::Memory(frame) => (frame.width(), frame.height()),
+            #[cfg(target_os = "linux")]
+            Self::DmaBuf(frame) => (frame.width(), frame.height()),
+        }
+    }
+
+    /// Returns the frame in memory, if it is in memory.
+    pub fn in_memory(&self) -> Option<&Arc<Yuv420Frame>> {
+        match self {
+            Self::Memory(frame) => Some(frame),
+            #[cfg(target_os = "linux")]
+            Self::DmaBuf(_) => None,
+        }
+    }
+
+    /// Returns whether `other` is this very frame, shared, as a source that
+    /// holds an unchanged screen returns it.
+    pub fn is_same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Memory(frame), Self::Memory(other)) => Arc::ptr_eq(frame, other),
+            #[cfg(target_os = "linux")]
+            (Self::DmaBuf(frame), Self::DmaBuf(other)) => Arc::ptr_eq(frame, other),
+            #[cfg(target_os = "linux")]
+            _ => false,
+        }
+    }
+}
+
+impl From<Arc<Yuv420Frame>> for CapturedFrame {
+    fn from(frame: Arc<Yuv420Frame>) -> Self {
+        Self::Memory(frame)
+    }
+}
+
+impl From<Yuv420Frame> for CapturedFrame {
+    fn from(frame: Yuv420Frame) -> Self {
+        Self::Memory(Arc::new(frame))
+    }
+}
+
 /// Produces the frames a host streams, such as a screen capture.
 pub trait FrameSource: Send {
     /// Returns the width and height of the frames, in pixels.
@@ -268,7 +324,13 @@ pub trait FrameSource: Send {
     /// take the new size, and [`FrameSource::size`] returns it from then on.
     /// A source that holds the newest frame returns it again, shared rather
     /// than copied, while the screen does not change.
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError>;
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError>;
+
+    /// Asks the source for frames in memory from now on, as the encoder
+    /// cannot read the frames the GPU holds that it captured. The next
+    /// capture returns a frame in memory, waiting for one if it must.
+    /// Sources whose frames are always in memory need do nothing.
+    fn use_memory_frames(&mut self) {}
 
     /// Returns the pointer as of the last capture, for sources that capture
     /// it apart from the frames, which then do not show it; the client draws
@@ -405,10 +467,10 @@ impl FrameSource for TestPattern {
         (self.width, self.height)
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         let frame = Self::frame(self.width, self.height, self.next_index);
         self.next_index += 1;
-        Ok(Arc::new(frame))
+        Ok(frame.into())
     }
 }
 
@@ -679,7 +741,10 @@ mod tests {
     fn source_advances() {
         let mut source = TestPattern::new(128, 64);
         assert_eq!(source.size(), (128, 64));
-        assert_eq!(*source.capture().unwrap(), TestPattern::frame(128, 64, 0));
-        assert_eq!(*source.capture().unwrap(), TestPattern::frame(128, 64, 1));
+        for index in 0..2 {
+            let captured = source.capture().unwrap();
+            let frame = captured.in_memory().unwrap();
+            assert_eq!(**frame, TestPattern::frame(128, 64, index));
+        }
     }
 }

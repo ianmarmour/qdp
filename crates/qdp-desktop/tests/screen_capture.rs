@@ -15,8 +15,12 @@ use qdp_runtime::FrameSource;
 fn check_frames(mut capture: ScreenCapture) {
     let (width, height) = capture.size();
     assert!(width > 0 && height > 0);
-    let frame = capture.capture().unwrap();
-    assert_eq!((frame.width(), frame.height()), (width, height));
+    let captured = capture.capture().unwrap();
+    assert_eq!(captured.size(), (width, height));
+    let Some(frame) = captured.in_memory() else {
+        // Frames the GPU holds cannot be read here.
+        return;
+    };
     if std::env::var("QDP_TEST_SCREEN_COLOUR").as_deref() == Ok("red") {
         let centre = (height / 2) * width + width / 2;
         let chroma = (height / 4) * frame.chroma_width() + width / 4;

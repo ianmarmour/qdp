@@ -1,7 +1,11 @@
 //! Capture and encoding on a dedicated thread, so that the host's network loop
 //! keeps answering feedback, retransmission requests and clock pings while a
 //! frame is being encoded. Captured frames are scaled to the size of the
-//! stream they are encoded for.
+//! stream they are encoded for: by the processor for frames in memory, and
+//! by the encoder itself for frames the GPU holds.
+//!
+//! When the encoder cannot read the frames the GPU holds, the thread asks the
+//! source for frames in memory instead, for the rest of the session.
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -9,16 +13,21 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use qdp::message::{BlockGrid, BlockSet, StreamId};
+#[cfg(target_os = "linux")]
+use qdp_codec::CodecError;
 use qdp_codec::{
     CodecPreference, EncodedFrame, EncoderSettings, KeyFrameRequest, VideoEncoder, Yuv420Frame,
     open_encoder,
 };
 use tokio::sync::{Notify, oneshot};
 use tracing::info;
+#[cfg(target_os = "linux")]
+use tracing::warn;
 
 use crate::RuntimeError;
 use crate::media::{
-    CursorState, DesktopScale, FrameSource, MonitorPlacement, WantedDisplay, changed_blocks,
+    CapturedFrame, CursorState, DesktopScale, FrameSource, MonitorPlacement, WantedDisplay,
+    changed_blocks,
 };
 
 /// The name of the encoder thread, as debuggers and profilers show it.
@@ -212,7 +221,7 @@ fn run(
     ready: &Notify,
 ) {
     let mut stream = None;
-    let mut previous: Option<Arc<Yuv420Frame>> = None;
+    let mut previous: Option<CapturedFrame> = None;
     let mut last_capture = None;
     let mut next_input_index = 0;
     while let Ok(job) = jobs.recv() {
@@ -235,14 +244,20 @@ fn run(
         .map(|captured| {
             let input_index = next_input_index;
             next_input_index += 1;
-            let changed = previous
-                .as_ref()
-                .map(|previous| changed_blocks(previous, &captured.frame, grid));
             // A source holding an unchanged screen returns the same frame,
             // shared.
             let repeated = previous
                 .as_ref()
-                .is_some_and(|previous| Arc::ptr_eq(previous, &captured.frame));
+                .is_some_and(|previous| previous.is_same(&captured.frame));
+            // Frames the GPU holds are not compared; all their blocks are
+            // taken to have changed, unless the frame is a repeat.
+            let changed = match (&previous, &captured.frame) {
+                (Some(_), _) if repeated => Some(BlockSet::empty(grid.len())),
+                (Some(CapturedFrame::Memory(previous)), CapturedFrame::Memory(current)) => {
+                    Some(changed_blocks(previous, current, grid))
+                }
+                _ => None,
+            };
             previous = Some(captured.frame);
             captured
                 .encoded
@@ -289,8 +304,8 @@ fn run(
 
 /// The output of [`encode_one`].
 struct Encoded {
-    /// The frame as encoded, after scaling.
-    frame: Arc<Yuv420Frame>,
+    /// The frame as encoded: after scaling, for a frame in memory.
+    frame: CapturedFrame,
     /// The size it was captured at.
     capture_size: (usize, usize),
     /// The pointer, if the source reports it.
@@ -335,6 +350,33 @@ fn encode_one(
     opened.encoder.set_quantizer(job.quantizer);
     let capture_started_at = Instant::now();
     let captured = source.capture()?;
+    #[cfg(target_os = "linux")]
+    let captured = match captured {
+        CapturedFrame::DmaBuf(frame) => {
+            match encode_dma_buf(&mut *opened.encoder, &frame, job.request)? {
+                Some(encoded) => {
+                    let capture_size = (frame.width(), frame.height());
+                    return Ok(Encoded {
+                        frame: CapturedFrame::DmaBuf(frame),
+                        capture_size,
+                        cursor: source.cursor(),
+                        placement: source.monitor_placement(),
+                        desktop_scale: source.desktop_scale(),
+                        scale_time: capture_started_at.elapsed(),
+                        encoded,
+                    });
+                }
+                None => {
+                    source.use_memory_frames();
+                    source.capture()?
+                }
+            }
+        }
+        captured => captured,
+    };
+    let captured = captured.in_memory().cloned().ok_or_else(|| {
+        RuntimeError::Capture("the screen sent no frame in memory when asked to".to_owned())
+    })?;
     let capture_size = (captured.width(), captured.height());
     let size = (job.settings.width, job.settings.height);
     let frame = match last {
@@ -360,7 +402,7 @@ fn encode_one(
     let scale_time = capture_started_at.elapsed();
     let encoded = opened.encoder.encode(&frame, job.request)?;
     Ok(Encoded {
-        frame,
+        frame: CapturedFrame::Memory(frame),
         capture_size,
         cursor,
         placement,
@@ -368,6 +410,34 @@ fn encode_one(
         scale_time,
         encoded,
     })
+}
+
+/// Encodes a frame the GPU holds, if the encoder can read it. Returns
+/// `None` if it cannot, after which the source must send frames in memory.
+#[cfg(target_os = "linux")]
+fn encode_dma_buf(
+    encoder: &mut dyn VideoEncoder,
+    frame: &qdp_codec::DmaBufFrame,
+    request: KeyFrameRequest,
+) -> Result<Option<Vec<EncodedFrame>>, RuntimeError> {
+    if !encoder.takes_dma_bufs() {
+        info!(
+            encoder = encoder.description(),
+            "the encoder reads frames in memory only; capturing the screen into memory"
+        );
+        return Ok(None);
+    }
+    match encoder.encode_dma_buf(frame, request) {
+        Ok(encoded) => Ok(Some(encoded)),
+        Err(CodecError::DmaBufUnsupported(reason)) => {
+            warn!(
+                reason,
+                "the encoder cannot read the screen's GPU frames; capturing it into memory"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -451,5 +521,95 @@ mod tests {
             (header.max_width, header.max_height),
             (half.width as u32, half.height as u32)
         );
+    }
+
+    /// A source that captures frames the GPU holds until it is asked for
+    /// frames in memory.
+    #[cfg(target_os = "linux")]
+    struct GpuSource {
+        /// The frames in memory, once asked for.
+        pattern: TestPattern,
+        /// Whether it was asked for frames in memory, shared with the test.
+        in_memory: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl FrameSource for GpuSource {
+        fn size(&self) -> (usize, usize) {
+            self.pattern.size()
+        }
+
+        fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
+            if self.in_memory.load(std::sync::atomic::Ordering::Acquire) {
+                return self.pattern.capture();
+            }
+            let (width, height) = self.pattern.size();
+            // Any descriptor stands in for a DMA-BUF the encoder never reads.
+            let descriptor = std::fs::File::open("/dev/null").unwrap();
+            let layout = qdp_codec::DmaBufLayout {
+                width,
+                height,
+                order: qdp_codec::Rgb32Order::Bgr,
+                modifier: qdp_codec::DRM_FORMAT_MOD_LINEAR,
+                offset: 0,
+                pitch: (width * 4) as u32,
+            };
+            let frame = qdp_codec::DmaBufFrame::new(descriptor.into(), layout).unwrap();
+            Ok(CapturedFrame::DmaBuf(Arc::new(frame)))
+        }
+
+        fn use_memory_frames(&mut self) {
+            self.in_memory
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// An encoder that cannot read frames the GPU holds has the source send
+    /// frames in memory, and the frame that found it out is still encoded.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn falls_back_to_frames_in_memory() {
+        let (width, height) = (128, 64);
+        let settings = EncoderSettings {
+            width,
+            height,
+            frame_rate: 60,
+            speed: 10,
+            quantizer: 100,
+            threads: 1,
+        };
+        let in_memory = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = GpuSource {
+            pattern: TestPattern::new(width, height),
+            in_memory: Arc::clone(&in_memory),
+        };
+        let (thread, _) = EncoderThread::spawn(
+            Box::new(source),
+            None,
+            settings,
+            CodecPreference::Software,
+            Arc::new(Notify::new()),
+        )
+        .await
+        .unwrap();
+        thread
+            .request(EncodeJob {
+                request: KeyFrameRequest::Force,
+                recovery: false,
+                stream_id: StreamId(VarInt::from_u32(1)),
+                settings,
+                quantizer: settings.quantizer,
+                display: None,
+            })
+            .unwrap();
+        let output = loop {
+            if let Some(result) = thread.try_result() {
+                break result.unwrap();
+            }
+            std::thread::yield_now();
+        };
+        assert!(in_memory.load(std::sync::atomic::Ordering::Acquire));
+        assert!(output.frame.is_key_frame);
+        assert_eq!(output.capture_size, (width, height));
     }
 }
