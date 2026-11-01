@@ -1229,6 +1229,9 @@ impl ActiveHost {
             now.saturating_duration_since(output.captured_at),
             output.scale_time,
         );
+        if !output.repeated {
+            self.stats.new_screen();
+        }
         self.rate.frame_sent(
             output.frame.temporal_unit.len(),
             output.frame.is_key_frame,
