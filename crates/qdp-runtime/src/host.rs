@@ -51,9 +51,8 @@ use crate::{HostAuthenticator, RuntimeError, close_on_error, is_normal_close};
 /// The bit depth of the streams this host sends.
 pub(crate) const BIT_DEPTH: u8 = 8;
 
-/// The interface scale the host reports, in percent, for the cursor images it
-/// sends: they are at the captured monitor's pixel size, the size of its
-/// video, whatever the desktop's own scale (Section 9.2).
+/// An interface scale of one, in percent: a cursor image's Scale before the
+/// captured monitor's own replaces it (Section 9.2).
 pub(crate) const SCALE_PERCENT: u32 = 100;
 
 /// The most devices the host accepts at once: at least 16 (Section 8.2.4).
@@ -1023,10 +1022,13 @@ impl ActiveHost {
     /// streams of their own, and `CURSOR_SET` and `CURSOR_WARP` messages.
     fn send_cursor(&mut self, state: &CursorState, now: Instant) -> Result<(), RuntimeError> {
         let layout = self.display.layout();
+        // A captured cursor is drawn at the captured monitor's scale, as the
+        // rest of the capture is.
+        let monitor_scale = VarInt::from_u32(self.display.scale().percent());
         for update in self.cursor.update(state, now) {
             match update {
                 CursorUpdate::Image(mut image) => {
-                    image.scale = layout.cursor_scale(image.scale);
+                    image.scale = layout.cursor_scale(monitor_scale);
                     let stream = [StreamHeader::CursorImage.to_bytes(), image.to_bytes()].concat();
                     self.driver.connection().send_stream(stream);
                 }
