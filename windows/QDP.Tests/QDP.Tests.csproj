@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tests of the app's logic that needs no window or core: the lines the
+    core tells, and the list of hosts. The files are the app's own,
+    compiled here as they are there.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Qdp.Tests</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\QDP\Core\HostRows.cs" Link="App\HostRows.cs" />
+    <Compile Include="..\QDP\Core\Models.cs" Link="App\Models.cs" />
+    <Compile Include="..\QDP\Core\SessionEvent.cs" Link="App\SessionEvent.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+</Project>
