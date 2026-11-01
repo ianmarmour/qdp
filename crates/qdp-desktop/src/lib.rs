@@ -259,15 +259,16 @@ fn warn_unmatched(matching: DisplayMatching) {
 
 /// Starts capturing the console: what the graphics card shows on a display,
 /// whatever shows it, from the login screen to a desktop, delivering frames
-/// as `frames` says. Needs root. Blocks until the first frame is read.
+/// and matching the client's display as `options` says. Needs root. Blocks
+/// until the first frame is read.
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
-pub fn open_console(frames: FrameMemory) -> Result<Box<dyn FrameSource>, String> {
-    Ok(Box::new(ConsoleCapture::open(frames)?))
+pub fn open_console(options: ScreenOptions) -> Result<Box<dyn FrameSource>, String> {
+    Ok(Box::new(ConsoleCapture::open(options)?))
 }
 
 /// Starts capturing the console; only Linux hosts can.
 #[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
-pub fn open_console(_frames: FrameMemory) -> Result<Box<dyn FrameSource>, String> {
+pub fn open_console(_options: ScreenOptions) -> Result<Box<dyn FrameSource>, String> {
     Err("console capture is only available on Linux".to_owned())
 }
 

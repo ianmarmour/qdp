@@ -10,7 +10,9 @@
 //!
 //! Frames stay in GPU memory, for a hardware encoder that reads them there,
 //! and the pointer, which the card shows on a plane of its own, is read
-//! apart from them (Section 9.1).
+//! apart from them (Section 9.1). When asked to, the display takes the
+//! client's mode and scale, through the desktop session's helper, which
+//! asks the compositor, and gets its own back when the session ends.
 
 mod device;
 
@@ -28,7 +30,7 @@ use qdp_codec::{
 };
 use qdp_runtime::{
     CapturedFrame, CursorShape, CursorState, FrameArrivals, FrameSource, PointerPosition,
-    RuntimeError,
+    RuntimeError, WantedDisplay,
 };
 use tracing::{debug, info, warn};
 
@@ -36,7 +38,9 @@ use self::device::{
     Card, ConnectorName, ExportedFramebuffer, MODIFIER_IMPLICIT, PlaneAccess, PlaneKind,
 };
 use super::dma_buf_map::{MappedDmaBuf, PIXEL_BYTES, read_linear};
-use crate::FrameMemory;
+#[cfg(feature = "notifications")]
+use super::session_helper::SessionHelper;
+use crate::{DisplayMatching, FrameMemory, ScreenOptions};
 
 /// Returns the DRM four-character code `code`, as `fourcc_code` builds it.
 const fn fourcc(code: [u8; 4]) -> u32 {
@@ -77,6 +81,11 @@ const DISPLAY_WAIT: Duration = Duration::from_secs(10);
 
 /// How often a capture that waits for a display looks again.
 const DISPLAY_POLL: Duration = Duration::from_millis(50);
+
+/// How long a display that took the client's mode has to show frames of
+/// its new size.
+#[cfg(feature = "notifications")]
+const MATCH_WAIT: Duration = Duration::from_secs(5);
 
 /// How long a pointer image read from its buffer is kept before it is read
 /// again, for compositors that draw a new image into the same buffer.
@@ -162,13 +171,19 @@ pub struct ConsoleCapture {
     pointer: Option<PointerImage>,
     /// The thread that tells the host about new frames, once asked.
     watcher: Option<Watcher>,
+    /// Whether the display takes the client's mode and scale.
+    matching: DisplayMatching,
+    /// The helper that changed the display, which puts it back when the
+    /// capture ends.
+    #[cfg(feature = "notifications")]
+    matched: Option<Arc<SessionHelper>>,
 }
 
 impl ConsoleCapture {
     /// Starts capturing the first display that shows a picture, on the
-    /// first card that has one, delivering frames as `frames` says. Blocks
-    /// until the first frame is read.
-    pub fn open(frames: FrameMemory) -> Result<Self, String> {
+    /// first card that has one, delivering frames and matching the client's
+    /// display as `options` says. Blocks until the first frame is read.
+    pub fn open(options: ScreenOptions) -> Result<Self, String> {
         let cards = Card::open_all();
         if cards.is_empty() {
             return Err("no graphics card can be opened in /dev/dri".to_owned());
@@ -197,11 +212,14 @@ impl ConsoleCapture {
                 card: Arc::new(card),
                 access,
                 target: Arc::new(Mutex::new(target)),
-                frames,
+                frames: options.frames,
                 last: None,
                 size: (0, 0),
                 pointer: None,
                 watcher: None,
+                matching: options.matching,
+                #[cfg(feature = "notifications")]
+                matched: None,
             };
             capture.capture().map_err(|error| error.to_string())?;
             return Ok(capture);
@@ -349,6 +367,61 @@ impl FrameSource for ConsoleCapture {
         })
     }
 
+    /// Has the display take `display`'s mode and scale, as close as its
+    /// modes allow, if the host was asked to, through the helper of the
+    /// desktop session shown, and waits for frames of its new size. Returns
+    /// whether its size is now the client's.
+    #[cfg(feature = "notifications")]
+    fn match_display(&mut self, display: &WantedDisplay) -> bool {
+        if self.matching == DisplayMatching::Off {
+            return false;
+        }
+        let helper = match super::console_helper() {
+            Some(Ok(helper)) => helper,
+            Some(Err(error)) => {
+                warn!(%error, "the display keeps its mode; the host scales its frames");
+                return false;
+            }
+            None => return false,
+        };
+        let monitor = self.target().name.to_string();
+        let (width, height) = match helper.match_display(&monitor, display) {
+            Ok(size) => size,
+            Err(error) => {
+                warn!(%error, "the display cannot take the client's mode");
+                return false;
+            }
+        };
+        self.matched = Some(helper);
+        let size = (width as usize, height as usize);
+        let deadline = Instant::now() + MATCH_WAIT;
+        while self.size != size && Instant::now() < deadline {
+            if self.capture().is_err() {
+                std::thread::sleep(DISPLAY_POLL);
+            }
+            if self.size != size {
+                std::thread::sleep(DISPLAY_POLL);
+            }
+        }
+        if self.size != size {
+            warn!(
+                width,
+                height, "the display did not show its new size in time"
+            );
+        }
+        (display.width, display.height) == (width, height)
+    }
+
+    /// Leaves the display's mode as it is: without notifications, this
+    /// build has no session helper to ask the compositor through.
+    #[cfg(not(feature = "notifications"))]
+    fn match_display(&mut self, _display: &WantedDisplay) -> bool {
+        if self.matching == DisplayMatching::On {
+            warn!("this build cannot change the display's mode; the host scales its frames");
+        }
+        false
+    }
+
     /// Watches the display refresh, telling the host each time its picture
     /// or pointer changed.
     fn watch_frames(&mut self, arrivals: Arc<FrameArrivals>) -> bool {
@@ -375,6 +448,17 @@ impl FrameSource for ConsoleCapture {
                 warn!(%error, "cannot watch the display; capturing on a timer");
                 false
             }
+        }
+    }
+}
+
+impl Drop for ConsoleCapture {
+    /// Gives the display its own mode and scale back, if the client's were
+    /// taken.
+    fn drop(&mut self) {
+        #[cfg(feature = "notifications")]
+        if let Some(helper) = self.matched.take() {
+            helper.restore_display();
         }
     }
 }
