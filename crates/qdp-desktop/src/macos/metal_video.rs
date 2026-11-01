@@ -10,10 +10,20 @@
 //! draws is a second, blended quad. A display link declares the frame rates the video
 //! wants, since a ProMotion display otherwise may not refresh faster than
 //! 60 Hz for it.
+//!
+//! At most one drawing waits to reach the screen. A picture that arrives
+//! while one waits is drawn once it is shown, rather than waiting for a free
+//! drawable on the main thread, which also reads the user's input: drawing
+//! it at once would show it no sooner.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+use block2::RcBlock;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -137,6 +147,13 @@ const PLANE_SETS: usize = 3;
 /// drawings a layer has in flight.
 const PIXEL_BUFFER_PICTURES: usize = PLANE_SETS + 1;
 
+/// The drawings that may wait to reach the screen at once.
+const WAITING_DRAWINGS: usize = 1;
+
+/// How long a drawing may wait to reach the screen before the next is drawn
+/// regardless, should macOS never say that it was shown.
+const PRESENT_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// The luma plane of an NV12 pixel buffer.
 const LUMA_PLANE: usize = 0;
 
@@ -250,6 +267,58 @@ impl FrameRateDemand {
     }
 }
 
+/// What became of a drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drawing {
+    /// The picture was drawn, and goes to the screen.
+    Drawn,
+    /// A drawing still waits to reach the screen: the window is woken to
+    /// draw the picture once it has.
+    Deferred,
+}
+
+/// The drawings committed but not yet on the screen, shared with the
+/// handlers Metal calls once each is shown.
+struct Presents {
+    /// How many wait to reach the screen.
+    waiting: AtomicUsize,
+    /// Whether a drawing was put off until one reaches the screen.
+    deferred: AtomicBool,
+    /// Wakes the window to draw what was put off.
+    wake: Box<dyn Fn() + Send + Sync>,
+}
+
+impl Presents {
+    /// Notes that a drawing reached the screen, or was passed over for a
+    /// newer one, and wakes the window if a drawing was put off.
+    fn presented(&self) {
+        let _ = self
+            .waiting
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |waiting| {
+                waiting.checked_sub(1)
+            });
+        if self.deferred.swap(false, Ordering::AcqRel) {
+            (self.wake)();
+        }
+    }
+
+    /// Returns whether a drawing must wait for one already waiting to reach
+    /// the screen, noting that the window is to be woken if so.
+    fn must_wait(&self) -> bool {
+        if self.waiting.load(Ordering::Acquire) < WAITING_DRAWINGS {
+            return false;
+        }
+        self.deferred.store(true, Ordering::Release);
+        // The drawing may have reached the screen meanwhile, its handler
+        // finding nothing put off.
+        if self.waiting.load(Ordering::Acquire) < WAITING_DRAWINGS {
+            self.deferred.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+}
+
 /// Draws a client's video into a window's view with Metal.
 pub struct MetalVideo {
     /// The view's own layer, which the drawing layer is kept to the size of.
@@ -288,6 +357,10 @@ pub struct MetalVideo {
     frame_rate_link: Option<Retained<CADisplayLink>>,
     /// The link's target, kept while the link is.
     _frame_rate_target: Option<Retained<FrameRateDemand>>,
+    /// The drawings waiting to reach the screen.
+    presents: Arc<Presents>,
+    /// When the last drawing was committed.
+    committed_at: Option<Instant>,
 }
 
 impl std::fmt::Debug for MetalVideo {
@@ -298,13 +371,18 @@ impl std::fmt::Debug for MetalVideo {
 
 impl MetalVideo {
     /// Draws into the view `ns_view` points to, a window's `NSView`, whose
-    /// pixels are `scale` times its points.
+    /// pixels are `scale` times its points, calling `wake`, from any thread,
+    /// to have the window draw again a picture it put off.
     ///
     /// # Safety
     ///
     /// `ns_view` must point to a live `NSView`, and this must be called and
     /// the result used on the main thread, while the view lives.
-    pub unsafe fn attach(ns_view: NonNull<c_void>, scale: f64) -> Result<Self, String> {
+    pub unsafe fn attach(
+        ns_view: NonNull<c_void>,
+        scale: f64,
+        wake: Box<dyn Fn() + Send + Sync>,
+    ) -> Result<Self, String> {
         let main_thread = MainThreadMarker::new()
             .ok_or_else(|| "Metal drawing needs the main thread".to_owned())?;
         // SAFETY: the caller promises a live NSView.
@@ -368,7 +446,37 @@ impl MetalVideo {
             overlay_texture: None,
             frame_rate_link,
             _frame_rate_target: frame_rate_target,
+            presents: Arc::new(Presents {
+                waiting: AtomicUsize::new(0),
+                deferred: AtomicBool::new(false),
+                wake,
+            }),
+            committed_at: None,
         })
+    }
+
+    /// Returns when a drawing put off is drawn regardless, should macOS
+    /// never say that the one before it reached the screen.
+    pub fn retry_at(&self) -> Option<Instant> {
+        self.presents
+            .deferred
+            .load(Ordering::Acquire)
+            .then_some(self.committed_at?)
+            .map(|committed_at| committed_at + PRESENT_TIMEOUT)
+    }
+
+    /// Returns whether the next drawing must wait for the one waiting to
+    /// reach the screen, unless that has waited too long to count on.
+    fn must_wait(&self) -> bool {
+        let overdue = self
+            .committed_at
+            .is_some_and(|committed_at| committed_at.elapsed() >= PRESENT_TIMEOUT);
+        if overdue {
+            self.presents.waiting.store(0, Ordering::Release);
+            self.presents.deferred.store(false, Ordering::Release);
+            return false;
+        }
+        self.presents.must_wait()
     }
 
     /// Takes `picture` as the one drawn from now on: drawn from its pixel
@@ -458,14 +566,18 @@ impl MetalVideo {
 
     /// Draws the picture at `picture` and `overlay` over it in a drawable of
     /// `size` pixels, `scale` of them to a point of the window, black around
-    /// them, and presents it.
+    /// them, and presents it; or puts the drawing off while the one before
+    /// it waits to reach the screen.
     pub fn draw(
         &mut self,
         size: (u32, u32),
         scale: f64,
         picture: Option<PixelRect>,
         overlay: Option<Overlay<'_>>,
-    ) -> Result<(), String> {
+    ) -> Result<Drawing, String> {
+        if self.must_wait() {
+            return Ok(Drawing::Deferred);
+        }
         fit_layer(&self.root, &self.layer, scale);
         let drawable_size = CGSize::new(f64::from(size.0), f64::from(size.1));
         if self.layer.drawableSize() != drawable_size {
@@ -560,9 +672,18 @@ impl MetalVideo {
         }
         encoder.endEncoding();
         let drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
+        let presents = Arc::clone(&self.presents);
+        let presented = RcBlock::new(move |_drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
+            presents.presented();
+        });
+        self.presents.waiting.fetch_add(1, Ordering::AcqRel);
+        // SAFETY: the block is valid for the call, which copies it, and the
+        // drawable is not presented yet.
+        unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&presented)) };
         commands.presentDrawable(drawable);
         commands.commit();
-        Ok(())
+        self.committed_at = Some(Instant::now());
+        Ok(Drawing::Drawn)
     }
 
     /// Uploads `overlay`'s image, if it is not the one uploaded already.

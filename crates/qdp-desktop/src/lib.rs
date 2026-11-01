@@ -67,7 +67,7 @@ pub use linux::ScreenCapture;
 #[cfg(target_os = "linux")]
 pub use linux::UinputInjector;
 #[cfg(target_os = "macos")]
-pub use macos::{MacScreenCapture, MetalVideo, Overlay, PixelRect, QuartzInjector};
+pub use macos::{Drawing, MacScreenCapture, MetalVideo, Overlay, PixelRect, QuartzInjector};
 #[cfg(windows)]
 pub use win32::{DesktopDuplication, SendInputInjector, WindowPen};
 
