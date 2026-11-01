@@ -23,7 +23,7 @@ use qdp_gateway::directory::{Directory, DirectoryError, DirectoryUser};
 use qdp_gateway::keys::GatewayKeys;
 use qdp_gateway::server::Gateway;
 use qdp_gateway::totp_store::TotpStore;
-use qdp_quic::{HostVerification, KeyPin, TlsIdentity};
+use qdp_quic::{ClientEndpoint, GatewayClient, HostVerification, KeyPin, SignIn, TlsIdentity};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use tokio::net::UdpSocket;
 
@@ -84,8 +84,9 @@ fn state_directory(test: &str) -> PathBuf {
 }
 
 /// Starts an echo host, and a gateway with its state in `directory` that
-/// lists it as `echo` and routes to it by address.
-async fn start(directory: &Path) -> Running {
+/// lists it as `echo` and routes to it by address, configured with `extra`
+/// besides.
+async fn start(directory: &Path, extra: &str) -> Running {
     let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let echo_port = echo.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -125,6 +126,8 @@ async fn start(directory: &Path) -> Running {
         networks = ["127.0.0.0/8"]
         ports = [{echo_port}]
         groups = ["QDP Users"]
+
+        {extra}
     "#,
             state = directory.display()
         ),
@@ -319,7 +322,7 @@ async fn sign_in_enrolling(
 #[tokio::test]
 async fn signs_in_enrolls_and_tunnels_with_an_assertion() {
     let directory = state_directory("tunnel");
-    let gateway = start(&directory).await;
+    let gateway = start(&directory, "").await;
     let identity = TlsIdentity::generate_self_signed(vec!["qdp-client".to_owned()]).unwrap();
     let mut client = Client::connect(&gateway, &identity).await;
     let (secret, _) = sign_in_enrolling(&mut client, "Alice", "wonderland").await;
@@ -376,7 +379,7 @@ async fn signs_in_enrolls_and_tunnels_with_an_assertion() {
 #[tokio::test]
 async fn reconnects_with_its_token_and_opens_hosts_by_address() {
     let directory = state_directory("token");
-    let gateway = start(&directory).await;
+    let gateway = start(&directory, "").await;
     let identity = TlsIdentity::generate_self_signed(vec!["qdp-client".to_owned()]).unwrap();
     let mut first = Client::connect(&gateway, &identity).await;
     let (_, token) = sign_in_enrolling(&mut first, "bob", "builder").await;
@@ -410,7 +413,7 @@ async fn reconnects_with_its_token_and_opens_hosts_by_address() {
 #[tokio::test]
 async fn refuses_wrong_passwords_and_hosts_the_policy_does_not_allow() {
     let directory = state_directory("refusals");
-    let gateway = start(&directory).await;
+    let gateway = start(&directory, "").await;
     let identity = TlsIdentity::generate_self_signed(vec!["qdp-client".to_owned()]).unwrap();
 
     let mut client = Client::connect(&gateway, &identity).await;
@@ -460,5 +463,127 @@ async fn refuses_wrong_passwords_and_hosts_the_policy_does_not_allow() {
         };
         assert_eq!(failed.code, OpenFailure::UNKNOWN_HOST);
     }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Starts a QUIC host speaking QDP's ALPN with a key of its own, which echoes
+/// every datagram, and returns its address and key pin.
+async fn start_quic_host() -> (SocketAddr, KeyPin) {
+    let identity = TlsIdentity::generate_self_signed(vec!["qdp-host".to_owned()]).unwrap();
+    let pin = identity.key_pin().unwrap();
+    let endpoint = Endpoint::server(
+        qdp_quic::host_config(identity).unwrap(),
+        (Ipv4Addr::LOCALHOST, 0).into(),
+    )
+    .unwrap();
+    let address = endpoint.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            tokio::spawn(async move {
+                let connection = incoming.await.unwrap();
+                while let Ok(datagram) = connection.read_datagram().await {
+                    let _ = connection.send_datagram(datagram);
+                }
+            });
+        }
+    });
+    (address, pin)
+}
+
+#[tokio::test]
+async fn carries_a_quic_connection_to_a_host_end_to_end() {
+    let directory = state_directory("quic");
+    let (host, host_pin) = start_quic_host().await;
+    let gateway = start(
+        &directory,
+        &format!(
+            "[[host]]\nid = \"desk\"\nname = \"Desk\"\naddress = \"{host}\"\npin = \"{}\"\ngroups = [\"QDP Users\"]\n",
+            host_pin.to_hex()
+        ),
+    )
+    .await;
+    let identity = TlsIdentity::generate_self_signed(vec!["qdp-client".to_owned()]).unwrap();
+    let mut client = GatewayClient::connect(
+        gateway.address,
+        "qdp-gateway",
+        HostVerification::PinnedKeys(vec![gateway.pin]),
+        Some(identity.clone_key()),
+        "test",
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.gateway_name(), "Example Corp");
+    let SignIn::NextFactor(next) = client
+        .sign_in_with_password("alice", "wonderland")
+        .await
+        .unwrap()
+    else {
+        panic!("expected the next factor");
+    };
+    let uri = next.enrollment.unwrap();
+    let secret = uri
+        .split(['?', '&'])
+        .find_map(|field| field.strip_prefix("secret="))
+        .map(|secret| TotpSecret::from_base32(secret).unwrap())
+        .unwrap();
+    let code = String::from_utf8(code(&secret)).unwrap();
+    assert_eq!(
+        client.sign_in_with_code(&code).await.unwrap(),
+        SignIn::SignedIn
+    );
+    let hosts = client.hosts().await.unwrap();
+    assert!(hosts.iter().any(|host| host.host_id == "desk"));
+    let token = client.take_session_token().expect("a session token");
+    let opened = client.open("desk").await.unwrap().unwrap();
+    assert_eq!(opened.host_pin, Some(host_pin.0));
+
+    // The client's QDP connection runs inside the gateway connection, and
+    // verifies the host's own key, end to end.
+    let (endpoint, peer): (ClientEndpoint, SocketAddr) = client.into_tunnel().unwrap();
+    let inner = endpoint
+        .connect(
+            peer,
+            &opened.server_name,
+            HostVerification::PinnedKeys(vec![KeyPin(opened.host_pin.unwrap())]),
+        )
+        .await
+        .unwrap();
+    let payload = vec![0x42; 900];
+    inner.send_datagram(payload.clone()).unwrap();
+    let echoed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        inner.quic().read_datagram(),
+    )
+    .await
+    .expect("no echo through the tunnel")
+    .unwrap();
+    assert_eq!(echoed.as_ref(), payload.as_slice());
+
+    // Through the gateway as directly, a host is refused unless its key
+    // matches: here a client signed in again with its session token, without
+    // a code, pins the wrong key.
+    let mut again = GatewayClient::connect(
+        gateway.address,
+        "qdp-gateway",
+        HostVerification::PinnedKeys(vec![gateway.pin]),
+        Some(identity.clone_key()),
+        "test",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        again.sign_in_with_token(&token.token).await.unwrap(),
+        SignIn::SignedIn
+    );
+    again.open("desk").await.unwrap().unwrap();
+    let (endpoint, peer) = again.into_tunnel().unwrap();
+    let refused = endpoint
+        .connect(
+            peer,
+            "qdp-host",
+            HostVerification::PinnedKeys(vec![KeyPin([0; 32])]),
+        )
+        .await;
+    assert!(refused.is_err());
     let _ = std::fs::remove_dir_all(directory);
 }

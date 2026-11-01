@@ -21,6 +21,7 @@ mod congestion;
 mod connection;
 mod driver;
 mod endpoint;
+mod gateway;
 mod identity;
 mod streams;
 mod verify;
@@ -34,6 +35,7 @@ pub use config::{
 pub use connection::{PathStats, QdpConnection, peer_key_pin};
 pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDriver};
 pub use endpoint::{ClientEndpoint, HostEndpoint, IncomingConnection};
+pub use gateway::{GatewayClient, SignIn};
 pub use identity::{IdentityFiles, IdentityOrigin, KeyPin, TlsIdentity};
 pub use streams::{
     OutgoingStream, ReceivedStream, StreamChunk, StreamFailure, StreamLimit, StreamPolicy,
