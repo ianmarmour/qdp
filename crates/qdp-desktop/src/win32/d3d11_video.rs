@@ -56,7 +56,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::core::{BOOL, Interface, PCSTR, s};
 
-use crate::video_scene::{Fate, Overlay, PixelRect, Scene};
+use crate::video_scene::{Fate, OVERLAY_LAYERS, Overlay, PixelRect, Scene};
 
 /// The render thread's name.
 const RENDER_THREAD: &str = "qdp-d3d11-render";
@@ -478,8 +478,8 @@ struct Renderer {
     planes: Option<PlaneTextures>,
     /// The picture drawn.
     current: Option<Current>,
-    /// The overlay's texture, once one was drawn.
-    overlay_texture: Option<OverlayTexture>,
+    /// The textures of the layers over the picture, once each was drawn.
+    overlay_textures: [Option<OverlayTexture>; OVERLAY_LAYERS],
 }
 
 // SAFETY: Direct3D 11 devices, their objects and DXGI swap chains may be used
@@ -598,7 +598,7 @@ impl Renderer {
             copy_target: None,
             planes: None,
             current: None,
-            overlay_texture: None,
+            overlay_textures: [None, None],
         };
         info!(?sync, tearing, "drawing the video with Direct3D 11");
         Ok(renderer)
@@ -662,8 +662,10 @@ impl Renderer {
                 };
             self.draw_quad(rect, shader, &views, extent);
         }
-        if let Some(overlay) = &scene.overlay {
-            self.draw_overlay(overlay)?;
+        for (layer, overlay) in scene.layers().into_iter().enumerate() {
+            if let Some(overlay) = overlay {
+                self.draw_overlay(layer, overlay)?;
+            }
         }
         // SAFETY: the target was drawn into; unbinding leaves the decoder's
         // textures unbound while it decodes into them.
@@ -713,34 +715,33 @@ impl Renderer {
         }
     }
 
-    /// Draws the overlay, uploading its image if it changed.
-    fn draw_overlay(&mut self, overlay: &Overlay) -> Result<(), String> {
+    /// Draws `overlay` as layer `layer` over the picture, uploading its
+    /// image if it changed.
+    fn draw_overlay(&mut self, layer: usize, overlay: &Overlay) -> Result<(), String> {
         if overlay.width == 0 || overlay.height == 0 {
             return Ok(());
         }
-        let stale = self.overlay_texture.as_ref().is_none_or(|texture| {
+        let slot = &mut self.overlay_textures[layer];
+        let stale = slot.as_ref().is_none_or(|texture| {
             texture.size != (overlay.width, overlay.height)
                 || !Arc::ptr_eq(&texture.rgba, &overlay.rgba)
         });
         if stale {
             let size = (overlay.width, overlay.height);
-            let reusable = self
-                .overlay_texture
-                .take()
-                .filter(|texture| texture.size == size);
+            let reusable = slot.take().filter(|texture| texture.size == size);
             let (texture, view) = match reusable {
                 Some(texture) => (texture.texture, texture.view),
                 None => dynamic_texture(&self.device, size, DXGI_FORMAT_R8G8B8A8_UNORM)?,
             };
             self.upload(&texture, &overlay.rgba, overlay.width * 4, overlay.height)?;
-            self.overlay_texture = Some(OverlayTexture {
+            self.overlay_textures[layer] = Some(OverlayTexture {
                 size,
                 texture,
                 view,
                 rgba: Arc::clone(&overlay.rgba),
             });
         }
-        let Some(texture) = &self.overlay_texture else {
+        let Some(texture) = &self.overlay_textures[layer] else {
             return Ok(());
         };
         let rect = PixelRect {

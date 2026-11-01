@@ -159,6 +159,7 @@ impl Stage {
                 height: rect.height,
             }),
             overlay,
+            badge: None,
         }
     }
 

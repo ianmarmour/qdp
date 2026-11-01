@@ -1129,6 +1129,7 @@ fn gpu_scene(
             top: y.round() - cursor.hotspot.1 as f64,
             rgba: cursor.rgba,
         }),
+        badge: None,
     }
 }
 
