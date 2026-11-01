@@ -8,6 +8,10 @@ import android.graphics.Color
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.text.Editable
+import android.text.InputFilter
+import android.text.InputType
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
@@ -26,8 +30,10 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.min
@@ -41,9 +47,13 @@ import kotlin.math.roundToInt
  *
  * Back, or Select, Start and both bumpers together, opens a menu with the
  * on-screen keyboard, the touch mode, statistics and disconnecting.
+ *
+ * A stream that pairs asks for the code the host shows, and keeps the host
+ * once paired, connecting to it with the device's key from then on.
  */
 class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
     private lateinit var settings: Settings
+    private lateinit var target: StreamTarget
     private lateinit var root: FrameLayout
     private lateinit var videoFrame: FrameLayout
     private lateinit var surfaceView: SurfaceView
@@ -55,6 +65,9 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
     private lateinit var touch: TouchInput
     private var wifiLock: WifiManager.WifiLock? = null
     private var events: Thread? = null
+
+    /** The dialog asking for a pairing code, while one is open. */
+    private var codeDialog: AlertDialog? = null
 
     /** Whether the event thread keeps waiting for events. */
     @Volatile
@@ -77,6 +90,10 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         super.onCreate(savedInstanceState)
         Native.init(applicationContext)
         settings = Settings.load(this)
+        target = StreamTarget.from(intent) ?: run {
+            finish()
+            return
+        }
         statsShown = settings.showStats
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val fastest = fastestMode()
@@ -166,9 +183,11 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val error = Native.connect(
             surface,
-            settings.host,
-            settings.pin,
-            settings.token,
+            target.address,
+            target.authentication,
+            target.pin,
+            target.token,
+            deviceName(),
             width,
             height,
             refreshMillihertz,
@@ -180,7 +199,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             return
         }
         streaming = true
-        status("Connecting to ${settings.host}…")
+        status("Connecting to ${target.name}…")
         listening = true
         events = thread(name = "qdp-events", isDaemon = true) { listen() }
         gamepads.start()
@@ -194,6 +213,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         }
         streaming = false
         listening = false
+        codeDialog?.dismiss()
+        codeDialog = null
         events?.join()
         events = null
         touch.cancel()
@@ -222,7 +243,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             return
         }
         when (event) {
-            SessionEvent.Connecting -> status("Connecting to ${settings.host}…")
+            SessionEvent.Connecting -> status("Connecting to ${target.name}…")
             SessionEvent.Connected -> status("Starting the stream…")
             is SessionEvent.Reconnecting -> status("Connection lost; reconnecting…")
             is SessionEvent.Video -> {
@@ -247,6 +268,14 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
                         .format(it.latencyMillis, it.toFirstFragmentMillis, it.transferMillis, it.queuedMillis, it.decodeMillis)
                 } ?: summary
             }
+            is SessionEvent.PairingCode -> askForCode(event.retry)
+            is SessionEvent.Paired -> {
+                // From now on the host is reached with the device's key,
+                // also when the stream connects again.
+                PairedHosts.keep(this, PairedHost(target.name, target.address, event.pin))
+                target = target.copy(authentication = Native.AUTH_PAIRED, pin = event.pin)
+                Toast.makeText(this, "Paired with ${target.name}", Toast.LENGTH_SHORT).show()
+            }
             SessionEvent.Ended -> {
                 stop()
                 finish()
@@ -257,6 +286,71 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
             }
         }
     }
+
+    /**
+     * Asks for the code the host shows, answering the core once all its
+     * digits are typed, or declining if the dialog is closed; [retry] after
+     * a code that did not work.
+     */
+    private fun askForCode(retry: Boolean) {
+        codeDialog?.dismiss()
+        status("Pairing with ${target.name}…")
+        val field = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            filters = arrayOf(InputFilter.LengthFilter(CODE_LENGTH))
+            gravity = Gravity.CENTER
+            hint = "0".repeat(CODE_LENGTH)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, CODE_TEXT_SIZE)
+            letterSpacing = CODE_LETTER_SPACING
+        }
+        val frame = FrameLayout(this).apply {
+            val padding = (24 * resources.displayMetrics.density).roundToInt()
+            setPadding(padding, 0, padding, 0)
+            addView(field, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        val message = if (retry) {
+            "That code did not work. Type the new code ${target.name} shows."
+        } else {
+            "Type the four-digit code ${target.name} shows. Run qdp serve there if it shows none."
+        }
+        var answered = false
+        fun answer(code: String?) {
+            if (!answered) {
+                answered = true
+                Native.pairingCode(code)
+            }
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Pair with ${target.name}")
+            .setMessage(message)
+            .setView(frame)
+            .setNegativeButton(android.R.string.cancel) { _, _ -> answer(null) }
+            .setOnDismissListener { answer(null) }
+            .create()
+        field.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) {}
+
+            override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) {}
+
+            override fun afterTextChanged(text: Editable) {
+                if (text.length == CODE_LENGTH) {
+                    answer(text.toString())
+                    dialog.dismiss()
+                    status("Pairing with ${target.name}…")
+                }
+            }
+        })
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        codeDialog = dialog
+        dialog.show()
+        field.requestFocus()
+    }
+
+    /** Returns the device's name, which a host shows when pairing. */
+    private fun deviceName(): String =
+        android.provider.Settings.Global.getString(contentResolver, android.provider.Settings.Global.DEVICE_NAME)
+            ?.takeIf { it.isNotBlank() }
+            ?: Build.MODEL
 
     /** Shows [error] and leaves the stream once it is read. */
     private fun fail(error: String) {
@@ -584,6 +678,15 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         const val FALLBACK_HEIGHT = 1080
 
         const val WIFI_LOCK_TAG = "qdp:stream"
+
+        /** The digits of a pairing code. */
+        const val CODE_LENGTH = 4
+
+        /** The size of a pairing code's digits, in scaled pixels. */
+        const val CODE_TEXT_SIZE = 32f
+
+        /** The space between a pairing code's digits, in ems. */
+        const val CODE_LETTER_SPACING = 0.5f
 
         const val MENU_KEYBOARD = 0
         const val MENU_TOUCH = 1

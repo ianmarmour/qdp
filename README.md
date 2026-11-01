@@ -293,8 +293,12 @@ connected with USB debugging:
 cd android && ANDROID_HOME=~/Android/Sdk ./gradlew installRelease
 ```
 
-The app asks for the host's address, its pin and the token, and streams full
-screen. A handheld's built-in controls and connected controllers are sent as
+The app lists the hosts on the local network, as `qdp serve` advertises them,
+and the hosts it paired with. Tapping a new host pairs with it: the host prints
+a four-digit code, which the app asks for, and from then on tapping it
+connects at once. Holding a paired host forgets it. A host the app does not
+find can be paired with by its address, or reached with its pin and a token.
+The app streams full screen. A handheld's built-in controls and connected controllers are sent as
 gamepads, with rumble. Touching the screen works as a trackpad by default: one
 finger moves the pointer, a tap clicks, two fingers right-click or scroll, and
 a press held still drags; the menu switches to sending touches as the host's

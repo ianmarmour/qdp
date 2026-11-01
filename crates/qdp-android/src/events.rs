@@ -15,19 +15,24 @@
 //! | `pointer absolute\|relative` | The host's pointer mode changed. |
 //! | `rumble <slot> <low> <high>` | A gamepad's rumble, each motor from 0 to 65535. |
 //! | `stats <fps> <latency_ms\|-> <decode_ms> <worst>` | The last second's video. |
+//! | `pair first\|retry` | Pairing needs the code the host shows; `retry` after a code that did not work. |
+//! | `paired <pin>` | Pairing succeeded with the host whose key pin is `<pin>`, in hexadecimal. |
+//! | `ended` | The session ended normally. |
+//! | `failed <error>` | The session failed. |
 //!
 //! A `stats` line's `<worst>` is the slowest frame's latency, then the stages
 //! it went through: capture to its first fragment, transfer, waiting for the
 //! decoder and decoding, each in milliseconds; or five `-` when no frame's
-//! latency is known.
-//! | `ended` | The session ended normally. |
-//! | `failed <error>` | The session failed. |
+//! latency is known. The app answers a `pair` line with `Native.pairingCode`.
 
 use std::fmt;
 use std::time::Duration;
 
 use qdp::message::PointerKind;
+use qdp_quic::KeyPin;
 use qdp_runtime::{LatencyStages, WarpKind};
+
+use crate::settings::format_pin;
 
 /// Something the app is told.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,8 +80,22 @@ pub enum Event {
     },
     /// The last second's video.
     Stats(VideoStats),
+    /// Pairing needs the code the host shows (Section 4.4.9).
+    PairingCode(CodeRequest),
+    /// Pairing succeeded with the host whose key this is, which the app
+    /// keeps to connect with from then on.
+    Paired(KeyPin),
     /// The session ended.
     Ended(Ending),
+}
+
+/// Why the app is asked for a pairing code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CodeRequest {
+    /// The host shows a code for the first time.
+    First,
+    /// The last code did not work, and the host shows a new one.
+    Retry,
 }
 
 /// How a session ended.
@@ -165,6 +184,11 @@ impl fmt::Display for Event {
                     milliseconds(stats.decode)
                 )
             }
+            Self::PairingCode(request) => formatter.write_str(match request {
+                CodeRequest::First => "pair first",
+                CodeRequest::Retry => "pair retry",
+            }),
+            Self::Paired(pin) => write!(formatter, "paired {}", format_pin(*pin)),
             Self::Ended(Ending::Normal) => formatter.write_str("ended"),
             Self::Ended(Ending::Failed(error)) => write!(formatter, "failed {error}"),
         }
@@ -240,6 +264,8 @@ mod tests {
                 }),
                 "stats 0 - 0.0 - - - - -",
             ),
+            (Event::PairingCode(CodeRequest::First), "pair first"),
+            (Event::PairingCode(CodeRequest::Retry), "pair retry"),
             (Event::Ended(Ending::Normal), "ended"),
             (
                 Event::Ended(Ending::Failed("closed by peer".to_owned())),
@@ -249,5 +275,9 @@ mod tests {
         for (event, line) in lines {
             assert_eq!(event.to_string(), line);
         }
+        assert_eq!(
+            Event::Paired(KeyPin([0xab; 32])).to_string(),
+            format!("paired {}", "ab".repeat(32))
+        );
     }
 }

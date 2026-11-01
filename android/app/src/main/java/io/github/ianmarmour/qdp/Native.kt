@@ -36,6 +36,15 @@ object Native {
     /** A touch ended without effect. */
     const val TOUCH_CANCEL = 3
 
+    /** [connect] presents a token. */
+    const val AUTH_TOKEN = 0
+
+    /** [connect] reaches a host the device paired with, which accepts the device's key. */
+    const val AUTH_PAIRED = 1
+
+    /** [connect] pairs with the code the host shows, asking for it with a `pair` event. */
+    const val AUTH_PAIR = 2
+
     /** The left pointer button. */
     const val BUTTON_LEFT = 0
 
@@ -51,21 +60,29 @@ object Native {
     /** The forward pointer button. */
     const val BUTTON_FORWARD = 4
 
-    /** Sets up logging and gives the core the app's context, once. */
-    @JvmStatic external fun init(context: Context)
+    /** Sets up logging, and gives the core the app's context and its files directory for the device's key. */
+    fun init(context: Context) {
+        init(context, context.filesDir.absolutePath)
+    }
+
+    @JvmStatic private external fun init(context: Context, filesDirectory: String)
 
     /**
      * Starts a session with [host] (an address or name, with or without a
-     * port), whose key pin is [pin], with [token], showing it in [surface] on
-     * a display of [width] × [height] pixels refreshing at
+     * port), authenticating as [authentication], one of the `AUTH_` values,
+     * says: with the host's key pin [pin] and [token], or the device's name
+     * [deviceName] for pairing. It shows the session in [surface] on a
+     * display of [width] × [height] pixels refreshing at
      * [refreshMillihertz]. Returns `null` once it has started, or why it
      * could not.
      */
     @JvmStatic external fun connect(
         surface: Surface,
         host: String,
+        authentication: Int,
         pin: String,
         token: String,
+        deviceName: String,
         width: Int,
         height: Int,
         refreshMillihertz: Int,
@@ -145,6 +162,12 @@ object Native {
 
     /** Releases every key and button held. */
     @JvmStatic external fun releaseAll()
+
+    /** Answers a `pair` event with the [code] the user typed, or `null` if they declined, which ends the session. */
+    @JvmStatic external fun pairingCode(code: String?)
+
+    /** Returns the device's key pin, for `qdp serve --client-key`, or `null` if its key cannot be kept. */
+    @JvmStatic external fun clientPin(): String?
 
     /** Returns whether [pin] is a key pin. */
     @JvmStatic external fun isPin(pin: String): Boolean

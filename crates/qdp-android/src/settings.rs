@@ -63,6 +63,11 @@ pub fn parse_pin(text: &str) -> Result<KeyPin, String> {
     Ok(KeyPin(pin))
 }
 
+/// Returns `pin` as 64 lower-case hexadecimal digits, as `qdp pin` prints it.
+pub fn format_pin(pin: KeyPin) -> String {
+    pin.0.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Returns the display a session asks the host for: `width × height`
 /// pixels refreshing at `refresh_millihertz`, each side kept to what hosts
 /// accept.
@@ -111,6 +116,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(parse_pin(&grouped).unwrap(), pin);
+        assert_eq!(format_pin(pin), digits);
         assert!(parse_pin("c867").is_err());
         assert!(parse_pin(&"zz".repeat(32)).is_err());
     }
