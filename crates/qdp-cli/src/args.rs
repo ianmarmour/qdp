@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use qdp_codec::CodecPreference;
+use qdp_desktop::DeviceSelector;
 use qdp_desktop::Microphone;
-use qdp_desktop::{DeviceSelector, RealMonitors};
 use qdp_quic::KeyPin;
 use qdp_runtime::{ClipboardDirections, PassthroughPolicy};
 
@@ -56,10 +56,6 @@ Serve options:
   --lock on|off        Lock this machine's desktop when a session ends other
                        than by its client disconnecting, as when the network
                        drops (default on)
-  --real-monitors on|off
-                       With --source virtual, keep this machine's monitors on
-                       beside the virtual one, or turn them off for the
-                       session so that its windows move to it (default off)
 
 Connect options:
   --pin HEX            The host's key pin, from `qdp pin` (required)
@@ -203,8 +199,6 @@ pub struct ServeArgs {
     /// What happens to the desktop when a session ends other than by its
     /// client disconnecting.
     pub lock: LockPolicy,
-    /// What becomes of the real monitors while a virtual one is streamed.
-    pub real_monitors: RealMonitors,
 }
 
 /// What a host does with its desktop when a session ends other than by its
@@ -459,7 +453,6 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         passthrough: PassthroughPolicy::GameControllers,
         resumption: Some(qdp_runtime::DEFAULT_RESUMPTION_LIFETIME),
         lock: LockPolicy::Lock,
-        real_monitors: RealMonitors::Off,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -511,17 +504,6 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     "on" => LockPolicy::Lock,
                     "off" => LockPolicy::Leave,
                     other => return Err(error(format!("--lock must be on or off, not {other}"))),
-                }
-            }
-            "--real-monitors" => {
-                serve.real_monitors = match value("--real-monitors", &mut arguments)?.as_str() {
-                    "on" => RealMonitors::On,
-                    "off" => RealMonitors::Off,
-                    other => {
-                        return Err(error(format!(
-                            "--real-monitors must be on or off, not {other}"
-                        )));
-                    }
                 }
             }
             other => return Err(error(format!("unknown option: {other}"))),
@@ -739,13 +721,6 @@ mod tests {
         };
         assert_eq!(serve.lock, LockPolicy::Leave);
         assert!(parse_line("serve --token abc --lock maybe").is_err());
-        assert_eq!(serve.real_monitors, RealMonitors::Off);
-        let Command::Serve(serve) = parse_line("serve --token abc --real-monitors on").unwrap()
-        else {
-            panic!("expected serve");
-        };
-        assert_eq!(serve.real_monitors, RealMonitors::On);
-        assert!(parse_line("serve --token abc --real-monitors maybe").is_err());
         assert!(parse_line("serve").is_err());
         let pin = "ab".repeat(PIN_HEX_LENGTH / 2);
         let Command::Serve(serve) = parse_line(&format!("serve --client-key {pin}")).unwrap()
