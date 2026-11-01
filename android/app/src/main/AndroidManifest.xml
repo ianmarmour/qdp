@@ -15,10 +15,10 @@
 
     <application
         android:appCategory="game"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
         android:isGame="true"
         android:label="@string/app_name"
-        android:theme="@android:style/Theme.DeviceDefault">
+        android:theme="@style/Theme.Qdp">
 
         <activity
             android:name=".MainActivity"
@@ -44,7 +44,7 @@
             android:exported="false"
             android:resizeableActivity="true"
             android:screenOrientation="sensorLandscape"
-            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:theme="@style/Theme.Qdp.Stream"
             android:windowSoftInputMode="adjustNothing|stateHidden" />
     </application>
 </manifest>

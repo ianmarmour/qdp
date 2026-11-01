@@ -1,6 +1,7 @@
 package io.github.ianmarmour.qdp
 
 import android.content.Context
+import androidx.core.content.edit
 
 /**
  * The display the app asks the host for: the screen's own size, or a height
@@ -30,6 +31,15 @@ enum class TouchMode(val label: String) {
     DIRECT("Touchscreen"),
 }
 
+/** Where the app's colors come from. */
+enum class ColorSource {
+    /** The wallpaper's colors, on Android 12 and later; Ember before. */
+    WALLPAPER,
+
+    /** QDP's own Ember palette. */
+    EMBER,
+}
+
 /** What the app connects with, kept between launches. */
 data class Settings(
     val host: String = "",
@@ -40,19 +50,21 @@ data class Settings(
     val touchMode: TouchMode = TouchMode.TRACKPAD,
     val showStats: Boolean = false,
     val microphone: Boolean = false,
+    val colorSource: ColorSource = ColorSource.WALLPAPER,
 ) {
     /** Keeps the settings for the next launch. */
     fun save(context: Context) {
-        preferences(context).edit()
-            .putString(HOST, host)
-            .putString(PIN, pin)
-            .putString(TOKEN, token)
-            .putString(RESOLUTION, resolution.name)
-            .putString(DECODER, decoder.name)
-            .putString(TOUCH_MODE, touchMode.name)
-            .putBoolean(SHOW_STATS, showStats)
-            .putBoolean(MICROPHONE, microphone)
-            .apply()
+        preferences(context).edit {
+            putString(HOST, host)
+            putString(PIN, pin)
+            putString(TOKEN, token)
+            putString(RESOLUTION, resolution.name)
+            putString(DECODER, decoder.name)
+            putString(TOUCH_MODE, touchMode.name)
+            putBoolean(SHOW_STATS, showStats)
+            putBoolean(MICROPHONE, microphone)
+            putString(COLOR_SOURCE, colorSource.name)
+        }
     }
 
     companion object {
@@ -65,6 +77,7 @@ data class Settings(
         private const val TOUCH_MODE = "touch_mode"
         private const val SHOW_STATS = "show_stats"
         private const val MICROPHONE = "microphone"
+        private const val COLOR_SOURCE = "color_source"
 
         private fun preferences(context: Context) =
             context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
@@ -82,6 +95,7 @@ data class Settings(
                 touchMode = enumOr(stored.getString(TOUCH_MODE, null), defaults.touchMode),
                 showStats = stored.getBoolean(SHOW_STATS, defaults.showStats),
                 microphone = stored.getBoolean(MICROPHONE, defaults.microphone),
+                colorSource = enumOr(stored.getString(COLOR_SOURCE, null), defaults.colorSource),
             )
         }
 

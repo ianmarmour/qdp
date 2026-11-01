@@ -92,7 +92,7 @@ class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : Inpu
 
     override fun onInputDeviceAdded(deviceId: Int) {
         val device = InputDevice.getDevice(deviceId) ?: return
-        if (!isGamepad(device) || pads.containsKey(deviceId)) {
+        if (!Gamepads.isGamepad(device) || pads.containsKey(deviceId)) {
             return
         }
         val own = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -231,15 +231,5 @@ class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : Inpu
 
         /** The length of one repetition of a rumble's pattern. */
         const val RUMBLE_PERIOD_MILLIS = 1000L
-
-        /** Returns whether [device] is a gamepad or joystick. */
-        fun isGamepad(device: InputDevice): Boolean {
-            if (device.isVirtual) {
-                return false
-            }
-            val sources = device.sources
-            return sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
-                sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
-        }
     }
 }
