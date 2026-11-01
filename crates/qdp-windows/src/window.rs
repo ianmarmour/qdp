@@ -95,6 +95,44 @@ impl LocalAction {
     }
 }
 
+/// The video size the user chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Resolution {
+    /// The window's own size, pixel for pixel.
+    Window,
+    /// This many rows, in the window's shape, scaled to fit it; or the
+    /// window's own size where it has no more rows.
+    Rows(u32),
+    /// Exactly this width and height, scaled to fit the window.
+    Exact(u32, u32),
+}
+
+impl Resolution {
+    /// Returns the video size to ask for in a window of `window` pixels, or
+    /// `None` for the window's own.
+    fn in_window(self, window: PhysicalSize<u32>) -> Option<(u32, u32)> {
+        match self {
+            Self::Window => None,
+            Self::Rows(rows) if rows >= window.height || window.width == 0 => None,
+            Self::Rows(rows) => {
+                let width = f64::from(rows) * f64::from(window.width) / f64::from(window.height);
+                // Encoders want even sides.
+                Some((((width / 2.0).round() as u32 * 2).max(2), rows))
+            }
+            Self::Exact(width, height) => Some((width, height)),
+        }
+    }
+
+    /// Returns the shape a window, not full screen, opens in, if the
+    /// resolution has one of its own.
+    fn shape(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Window | Self::Rows(_) => None,
+            Self::Exact(width, height) => Some((width, height)),
+        }
+    }
+}
+
 /// How the stream window shows the video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Screen {
@@ -114,9 +152,8 @@ pub(crate) struct WindowChoices {
     pub(crate) screen: Screen,
     /// How the video meets the display's refresh.
     pub(crate) sync: SyncMode,
-    /// The video size to ask for, in pixels, whatever the window's size, if
-    /// the user chose one: the picture is scaled to fit the window.
-    pub(crate) resolution: Option<(u32, u32)>,
+    /// The video size to ask for: the picture is scaled to fit the window.
+    pub(crate) resolution: Resolution,
     /// The app's window, whose monitor the stream window opens on, if
     /// given.
     pub(crate) owner: Option<isize>,
@@ -415,7 +452,7 @@ impl StreamWindow {
             video.submitter(),
             (size.width, size.height),
         )));
-        config.display = display_size(&window, choices.resolution);
+        config.display = display_size(&window, choices.resolution.in_window(size));
         info!(
             width = config.display.width,
             height = config.display.height,
@@ -867,7 +904,7 @@ impl StreamWindow {
         }
         self.send(UserInput::Display(display_size(
             &self.window,
-            self.choices.resolution,
+            self.choices.resolution.in_window(size),
         )));
     }
 
@@ -1040,7 +1077,7 @@ fn attributes(
         return attributes.with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))));
     }
     let area = monitor.size();
-    let size = windowed_size((area.width, area.height), choices.resolution);
+    let size = windowed_size((area.width, area.height), choices.resolution.shape());
     let origin = monitor.position();
     attributes
         .with_inner_size(PhysicalSize::new(size.0, size.1))
@@ -1051,9 +1088,9 @@ fn attributes(
 }
 
 /// Returns the size a window, not full screen, opens at on a `monitor` of
-/// that many pixels: the chosen `resolution`'s shape, or 16:9, as large as
-/// fits in [`WINDOWED_SHARE`] of the monitor, and never larger than the
-/// resolution chosen.
+/// that many pixels: the shape of the `resolution` chosen, or 16:9, as
+/// large as fits in [`WINDOWED_SHARE`] of the monitor, and never larger than
+/// the resolution chosen.
 fn windowed_size(monitor: (u32, u32), resolution: Option<(u32, u32)>) -> (u32, u32) {
     let (most_width, most_height) = (
         f64::from(monitor.0) * WINDOWED_SHARE,
@@ -1154,5 +1191,31 @@ mod tests {
         );
         assert_eq!(windowed_size((1920, 1200), Some((3840, 2160))), (1536, 864));
         assert_eq!(windowed_size((1080, 1920), None), (864, 486));
+    }
+
+    /// Rows keep the window's shape and never exceed its own; exact sizes
+    /// are asked for whatever the window.
+    #[test]
+    fn asks_for_resolutions() {
+        let ultrawide = PhysicalSize::new(3440, 1440);
+        assert_eq!(Resolution::Window.in_window(ultrawide), None);
+        assert_eq!(
+            Resolution::Rows(1080).in_window(ultrawide),
+            Some((2580, 1080))
+        );
+        assert_eq!(Resolution::Rows(1440).in_window(ultrawide), None);
+        assert_eq!(Resolution::Rows(2160).in_window(ultrawide), None);
+        assert_eq!(
+            Resolution::Rows(720).in_window(PhysicalSize::new(1920, 1200)),
+            Some((1152, 720))
+        );
+        assert_eq!(
+            Resolution::Exact(1920, 1080).in_window(ultrawide),
+            Some((1920, 1080))
+        );
+        assert_eq!(
+            Resolution::Rows(720).in_window(PhysicalSize::new(0, 0)),
+            None
+        );
     }
 }

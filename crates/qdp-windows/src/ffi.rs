@@ -28,7 +28,7 @@ use qdp_runtime::{DisplaySize, Microphone};
 use tracing::{info, warn};
 
 use crate::events::EventQueue;
-use crate::window::{Command, Screen, SessionMessage, Start, WindowChoices, send};
+use crate::window::{Command, Resolution, Screen, SessionMessage, Start, WindowChoices, send};
 
 /// The product name the app sends hosts in `CLIENT_HELLO`.
 const CLIENT_NAME: &str = concat!("qdp-windows/", env!("CARGO_PKG_VERSION"));
@@ -101,9 +101,10 @@ pub struct QdpConfig {
     owner_window: isize,
     /// A `QdpAuthentication` value.
     authentication: i32,
-    /// The width of the video to ask for, in pixels, or 0 for the window's.
+    /// The width of the video to ask for, in pixels: 0 for the window's
+    /// shape, or with a height of 0 its own size.
     width: u32,
-    /// Its height, or 0 for the window's.
+    /// Its height, or 0 for the window's own size.
     height: u32,
     /// A `QdpDecoder` value.
     decoder: i32,
@@ -306,8 +307,11 @@ unsafe fn start(config: *const QdpConfig) -> Result<QdpSession, String> {
         .cloned()
         .ok_or("qdp_init was not called")?;
     let side = |pixels: u32| pixels.clamp(MIN_DISPLAY_SIDE, MAX_DISPLAY_SIDE);
-    let resolution =
-        (config.width > 0 && config.height > 0).then(|| (side(config.width), side(config.height)));
+    let resolution = match (config.width, config.height) {
+        (_, 0) => Resolution::Window,
+        (0, rows) => Resolution::Rows(side(rows)),
+        (width, height) => Resolution::Exact(side(width), side(height)),
+    };
     let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
     let queue = Arc::new(EventQueue::default());
     let start = Start {
@@ -455,4 +459,60 @@ pub unsafe extern "C" fn qdp_string_free(string: *mut c_char) {
             drop(unsafe { CString::from_raw(string) });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::{offset_of, size_of};
+
+    use super::*;
+
+    /// `QdpConfig` is laid out as `include/qdp_windows.h` declares it, as
+    /// a C compiler lays that out for 64-bit Windows.
+    #[test]
+    fn config_matches_the_header() {
+        assert_eq!(size_of::<QdpConfig>(), 88);
+        assert_eq!(offset_of!(QdpConfig, owner_window), 48);
+        assert_eq!(offset_of!(QdpConfig, authentication), 56);
+        assert_eq!(offset_of!(QdpConfig, width), 60);
+        assert_eq!(offset_of!(QdpConfig, sync), 80);
+    }
+
+    /// The version the app shows is the crate's, NUL-terminated.
+    #[test]
+    fn reports_the_version() {
+        // SAFETY: the version is a static NUL-terminated string.
+        let version = unsafe { CStr::from_ptr(qdp_version()) };
+        assert_eq!(version.to_str(), Ok(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// A configuration without a host's key pin is refused at once, saying
+    /// why.
+    #[test]
+    fn refuses_configurations_without_a_pin() {
+        let config = QdpConfig {
+            host: c"host.local".as_ptr(),
+            pin: ptr::null(),
+            token: ptr::null(),
+            device_name: ptr::null(),
+            title: ptr::null(),
+            icon_path: ptr::null(),
+            owner_window: 0,
+            authentication: AUTH_PAIRED,
+            width: 0,
+            height: 0,
+            decoder: 0,
+            microphone: 0,
+            screen: 0,
+            sync: 0,
+        };
+        let mut error = ptr::null_mut();
+        // SAFETY: the configuration's strings are static or null, and the
+        // error is writable.
+        let session = unsafe { qdp_session_start(&config, &mut error) };
+        assert!(session.is_null());
+        assert!(!error.is_null());
+        // SAFETY: the core returned the error, which is freed once.
+        unsafe { qdp_string_free(error) };
+    }
 }
