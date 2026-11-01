@@ -32,6 +32,7 @@
                 Grid.Column="1"
                 VerticalAlignment="Center"
                 Style="{StaticResource AccentButtonStyle}"
+                AutomationProperties.Name="Add computer"
                 Click="OnAddClicked">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <FontIcon Glyph="&#xE710;" FontSize="14" />

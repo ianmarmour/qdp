@@ -40,35 +40,50 @@ function Find-Named($window, [string] $name) {
     throw "the app shows no '$name'"
 }
 
-# The app: its window opens on the computers, and shows its settings.
-$app = Start-Process -FilePath (Join-Path $publish 'QDP.exe') -PassThru
-$deadline = (Get-Date).AddSeconds(60)
-while ($app.MainWindowHandle -eq [IntPtr]::Zero) {
-    if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
-    if ((Get-Date) -gt $deadline) { throw 'the app opened no window' }
-    Start-Sleep -Milliseconds 500
-    $app.Refresh()
+# Invokes the element named NAME in WINDOW.
+function Invoke-Named($window, [string] $name) {
+    $element = Find-Named $window $name
+    $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
 }
-$window = [System.Windows.Automation.AutomationElement]::FromHandle($app.MainWindowHandle)
-Find-Named $window 'Computers' | Out-Null
-Start-Sleep -Seconds 3
-Save-Screen 'computers'
-$settings = Find-Named $window 'Settings'
-try {
-    $settings.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
-} catch {
-    $settings.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+
+# Types VALUE into the text box named NAME in WINDOW.
+function Set-Named($window, [string] $name, [string] $value) {
+    $element = Find-Named $window $name
+    $pattern = $null
+    if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref] $pattern)) {
+        try {
+            $pattern.SetValue($value)
+            return
+        } catch {
+            # Password boxes take only typing.
+        }
+    }
+    $element.SetFocus()
+    [System.Windows.Forms.SendKeys]::SendWait($value)
 }
-Find-Named $window 'Resolution' | Out-Null
-Start-Sleep -Seconds 2
-Save-Screen 'settings'
-if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
-$app.CloseMainWindow() | Out-Null
-if (-not $app.WaitForExit(15000)) {
-    $app.Kill()
-    throw 'the app did not close'
+
+# Selects the element named NAME in WINDOW, as a navigation item or a radio
+# button.
+function Select-Named($window, [string] $name) {
+    $element = Find-Named $window $name
+    try {
+        $element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    } catch {
+        $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
 }
-Write-Host 'the app opened, showed its pages and closed'
+
+# Returns the app's top-level window whose name starts with PREFIX, or null.
+function Find-AppWindow([int] $processId, [string] $prefix) {
+    $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $processId)
+    $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+        [System.Windows.Automation.TreeScope]::Children, $condition)
+    foreach ($candidate in $windows) {
+        if ($candidate.Current.Name -like "$prefix*") { return $candidate }
+    }
+    return $null
+}
 
 # A host on this machine, streaming its test pattern.
 $qdp = Join-Path $root 'target\release\qdp.exe'
@@ -86,6 +101,78 @@ $server = Start-Process -FilePath $qdp -PassThru -NoNewWindow `
         '--token', $token, '--source', 'test-pattern', '--pairing', 'off',
         '--advertise', 'off', '--lock', 'off', '--audio', 'off')
 Start-Sleep -Seconds 3
+
+# The app streams in a window, with its statistics, as its settings say.
+$appData = Join-Path $env:LOCALAPPDATA 'QDP'
+New-Item -ItemType Directory -Force $appData | Out-Null
+Set-Content -Path (Join-Path $appData 'settings.json') -Value (
+    '{ "fullScreen": false, "shareClipboard": false, "showStatistics": true }')
+
+# The app: its window opens on the computers, and shows its settings.
+$app = Start-Process -FilePath (Join-Path $publish 'QDP.exe') -PassThru
+$deadline = (Get-Date).AddSeconds(60)
+while ($app.MainWindowHandle -eq [IntPtr]::Zero) {
+    if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
+    if ((Get-Date) -gt $deadline) { throw 'the app opened no window' }
+    Start-Sleep -Milliseconds 500
+    $app.Refresh()
+}
+$window = [System.Windows.Automation.AutomationElement]::FromHandle($app.MainWindowHandle)
+Find-Named $window 'Add computer' | Out-Null
+Start-Sleep -Seconds 3
+Save-Screen 'computers'
+Select-Named $window 'Settings'
+Find-Named $window 'Resolution' | Out-Null
+Start-Sleep -Seconds 2
+Save-Screen 'settings'
+
+# The app streams the host it is given the address, key pin and token of.
+Select-Named $window 'Computers'
+Invoke-Named $window 'Add computer'
+Set-Named $window 'Address' '127.0.0.1:4433'
+Set-Named $window 'Name (optional)' 'Smoke host'
+Select-Named $window "The computer's key pin and a token"
+Set-Named $window 'Key pin' $pin
+Set-Named $window 'Token' $token
+Start-Sleep -Seconds 1
+Save-Screen 'add-computer'
+Invoke-Named $window 'Connect'
+$deadline = (Get-Date).AddSeconds(60)
+$stream = $null
+while ($null -eq $stream) {
+    if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
+    if ((Get-Date) -gt $deadline) {
+        Save-Screen 'no-stream'
+        throw 'the stream window never opened'
+    }
+    Start-Sleep -Milliseconds 500
+    $stream = Find-AppWindow $app.Id 'Smoke host'
+}
+# Long enough for a second's statistics.
+Start-Sleep -Seconds 4
+Save-Screen 'app-stream'
+
+# Brought back, the app says how the stream goes, and disconnects it.
+$window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).SetWindowVisualState(
+    [System.Windows.Automation.WindowVisualState]::Normal)
+Start-Sleep -Seconds 2
+Save-Screen 'app-streaming'
+Invoke-Named $window 'Disconnect'
+$deadline = (Get-Date).AddSeconds(30)
+while ($null -ne (Find-AppWindow $app.Id 'Smoke host')) {
+    if ((Get-Date) -gt $deadline) { throw 'the stream window did not close' }
+    Start-Sleep -Milliseconds 500
+}
+Start-Sleep -Seconds 1
+Save-Screen 'app-after'
+if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
+$app.CloseMainWindow() | Out-Null
+if (-not $app.WaitForExit(15000)) {
+    $app.Kill()
+    throw 'the app did not close'
+}
+Copy-Item (Join-Path $appData 'qdp.log') (Join-Path $shots 'app.log') -ErrorAction SilentlyContinue
+Write-Host 'the app showed its pages, streamed the host and disconnected'
 
 # The core, as the app calls it.
 Add-Type -TypeDefinition @'
