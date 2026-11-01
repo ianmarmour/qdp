@@ -40,10 +40,16 @@ mod headers;
 mod level;
 #[cfg(target_os = "android")]
 mod mediacodec;
+// NVENC's structures' tests run everywhere; the encoder is Windows'.
+#[cfg(any(windows, test))]
+mod nvenc;
 mod obu;
 mod picture;
 mod process_decoder;
 mod sequence;
+// Hardware encoders' streams are checked; the checks' tests run everywhere.
+#[cfg(any(windows, test))]
+mod stream_check;
 #[cfg(target_os = "linux")]
 mod vaapi;
 #[cfg(any(target_os = "macos", target_os = "ios"))]

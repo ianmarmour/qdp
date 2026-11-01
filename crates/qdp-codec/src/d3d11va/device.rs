@@ -93,8 +93,8 @@ fn create() -> Result<ID3D11Device, CodecError> {
     // The default adapter is the first.
     let decoding = hardware_adapters()
         .into_iter()
-        .filter(|(index, _, _)| *index != 0)
-        .filter_map(|(_, adapter, name)| Some((create_on(Some(&adapter)).ok()?, name)))
+        .filter(|adapter| adapter.index != 0)
+        .filter_map(|adapter| Some((create_on(Some(&adapter.adapter)).ok()?, adapter.name)))
         .find(|(device, _)| decodes_av1(device));
     match decoding {
         Some((device, name)) => {
@@ -105,9 +105,33 @@ fn create() -> Result<ID3D11Device, CodecError> {
     }
 }
 
-/// Returns the hardware adapters, with their indices, the default's 0, and
-/// their names.
-fn hardware_adapters() -> Vec<(u32, IDXGIAdapter, String)> {
+/// Makes a device on the first hardware adapter of the PCI vendor `vendor`,
+/// as an encoder of that vendor's needs, returning it and the adapter's
+/// name.
+pub(crate) fn create_for_vendor(vendor: u32) -> Result<(ID3D11Device, String), CodecError> {
+    let adapter = hardware_adapters()
+        .into_iter()
+        .find(|adapter| adapter.vendor == vendor)
+        .ok_or_else(|| {
+            CodecError::HardwareUnavailable(format!("no GPU of PCI vendor {vendor:#06x}"))
+        })?;
+    Ok((create_on(Some(&adapter.adapter))?, adapter.name))
+}
+
+/// A hardware adapter.
+struct HardwareAdapter {
+    /// Its index, the default adapter's 0.
+    index: u32,
+    /// The adapter.
+    adapter: IDXGIAdapter,
+    /// Its name.
+    name: String,
+    /// Its PCI vendor.
+    vendor: u32,
+}
+
+/// Returns the hardware adapters, the default first.
+fn hardware_adapters() -> Vec<HardwareAdapter> {
     // SAFETY: the call has no contract.
     let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
         return Vec::new();
@@ -131,8 +155,12 @@ fn hardware_adapters() -> Vec<(u32, IDXGIAdapter, String)> {
             .position(|&unit| unit == 0)
             .unwrap_or(description.Description.len());
         if let Ok(adapter) = adapter.cast::<IDXGIAdapter>() {
-            let name = String::from_utf16_lossy(&description.Description[..length]);
-            adapters.push((index, adapter, name));
+            adapters.push(HardwareAdapter {
+                index,
+                adapter,
+                name: String::from_utf16_lossy(&description.Description[..length]),
+                vendor: description.VendorId,
+            });
         }
     }
     adapters

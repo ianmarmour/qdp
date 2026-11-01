@@ -239,8 +239,15 @@ fn open_hardware_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncod
     Ok(Box::new(crate::VaapiEncoder::new(settings)?))
 }
 
+/// Opens the platform's hardware encoder: NVENC on Windows, on NVIDIA GPUs
+/// that encode AV1.
+#[cfg(windows)]
+fn open_hardware_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>, CodecError> {
+    Ok(Box::new(crate::nvenc::NvencEncoder::new(settings)?))
+}
+
 /// Opens the platform's hardware encoder; this platform has none yet.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn open_hardware_encoder(_settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>, CodecError> {
     Err(CodecError::Encoder(
         "hardware encoding is not supported on this platform yet".to_owned(),
