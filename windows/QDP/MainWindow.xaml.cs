@@ -266,8 +266,11 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>Brings the window back once the stream ended.</summary>
-    private void ComeBack()
+    /// <summary>
+    /// Brings the window back, restored and in front: once a stream ended,
+    /// while one reconnects, or as QDP is launched again.
+    /// </summary>
+    internal void ComeBack()
     {
         if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
         {
