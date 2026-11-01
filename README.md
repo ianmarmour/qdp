@@ -49,7 +49,7 @@ Android app list it (through Avahi on Linux; `--advertise off` stops it):
 
 On the client, pair with the host the first time: connect with `--pair`, and
 type the four-digit code the host shows (Section 4.4.9 of the spec): it prints
-the code, and on Linux and Windows shows it on the screen too. Add
+the code, and on Linux, macOS and Windows shows it on the screen too. Add
 `:PORT` to the address for another port, and `--name` to choose the name the
 host keeps for this device. The stream opens in a window, and closing the
 window disconnects:
@@ -125,11 +125,12 @@ dropped, a newer session replaced it or the host stopped, the host locks its
 desktop so that it is not left unlocked: through logind on Linux, which GNOME,
 KDE and `swayidle` lock for, and with the system's own lock on macOS and
 Windows. `qdp serve --lock off` leaves the desktop as it is. While a session
-streams the screen, a notice on Linux and Windows hosts says that a device sees
-and controls it, so that whoever is at the machine knows; it goes when the
-session ends. On Linux it is a desktop notification; on Windows a banner at the
-top of the main display, over every window, which screen captures leave out, so
-that the stream does not show it.
+streams the screen, a notice says that a device sees and controls it, so that
+whoever is at the machine knows. On Linux it is a desktop notification, and on
+Windows a banner at the top of the main display, over every window, which screen
+captures leave out, so that the stream does not show it; both go when the
+session ends. On macOS it is a notification in Notification Center, which shows
+it as the user's settings say.
 
 On Linux the host encodes on the GPU through VA-API when the GPU can encode
 AV1 (AMD RDNA 3 or newer, Intel Arc or newer), and otherwise falls back to

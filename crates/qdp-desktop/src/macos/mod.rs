@@ -1,5 +1,6 @@
 //! macOS desktop integration: ScreenCaptureKit for the screen, AppKit and
-//! Quartz for the pointer, and Quartz events for input.
+//! Quartz for the pointer, Quartz events for input, and Notification Center
+//! for notifications.
 //!
 //! Both are Objective-C or C interfaces, so this module uses `unsafe`: each
 //! block states the contract it relies on, from Apple's documentation.
@@ -12,6 +13,8 @@ mod capture;
 mod cursor;
 mod input;
 mod keycodes;
+#[cfg(feature = "notifications")]
+pub(crate) mod notifications;
 mod pen;
 
 #[cfg(feature = "audio")]
