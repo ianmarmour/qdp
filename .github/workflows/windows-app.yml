@@ -71,12 +71,19 @@ jobs:
             qdp-gateway-windows-x64.msi
           if-no-files-found: error
 
+      # The service's log, beside msiexec's: artifacts are uploaded from
+      # the workspace's drive.
+      - name: Collect the logs
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:ProgramData 'qdp-gateway\gateway.log'
+          if (Test-Path $log) { Copy-Item $log gateway-service.log }
+
       # Not released: only artifacts named qdp-* are.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: installer-logs-windows-gateway
-          path: |
-            *.log
-            C:\ProgramData\qdp-gateway\gateway.log
+          path: '*.log'
           if-no-files-found: ignore
