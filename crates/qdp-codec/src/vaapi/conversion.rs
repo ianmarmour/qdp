@@ -18,7 +18,7 @@ use super::ffi::{
     ProcPipelineParameters, SurfaceAttrib, VaId, Zeroed,
 };
 use super::{Display, PictureBuffers};
-use crate::{BufferIdentity, CodecError, DmaBufFrame, DmaBufLayout, Rgb32Order};
+use crate::{BufferIdentity, CodecError, DmaBufFrame, DmaBufLayout, PixelDepth, Rgb32Order};
 
 /// The most imported buffers kept. Compositors share a screen through a
 /// few buffers they reuse, so this keeps all of them, and bounds the
@@ -35,12 +35,50 @@ const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 /// `DRM_FORMAT_XBGR8888`: red, green, blue and an unused byte in memory.
 const DRM_FORMAT_XBGR8888: u32 = u32::from_le_bytes(*b"XB24");
 
-/// The VA and DRM formats of 32-bit pixels whose colour bytes come in
-/// `order`, ignoring the fourth byte.
-fn formats(order: Rgb32Order) -> (u32, u32) {
-    match order {
-        Rgb32Order::Bgr => (ffi::FOURCC_BGRX, DRM_FORMAT_XRGB8888),
-        Rgb32Order::Rgb => (ffi::FOURCC_RGBX, DRM_FORMAT_XBGR8888),
+/// `DRM_FORMAT_XRGB2101010`: blue, green and red in ten bits each from the
+/// lowest, then two unused bits.
+const DRM_FORMAT_XRGB2101010: u32 = u32::from_le_bytes(*b"XR30");
+
+/// `DRM_FORMAT_XBGR2101010`: red, green and blue in ten bits each from the
+/// lowest, then two unused bits.
+const DRM_FORMAT_XBGR2101010: u32 = u32::from_le_bytes(*b"XB30");
+
+/// The formats a frame's pixels are imported as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImportFormats {
+    /// VA's four-character code.
+    fourcc: u32,
+    /// DRM's four-character code.
+    drm_format: u32,
+    /// The kind of surface.
+    rt_format: u32,
+}
+
+/// The formats of 32-bit pixels whose colours come in `order`, with
+/// `depth` bits each, ignoring the alpha or padding.
+fn formats(order: Rgb32Order, depth: PixelDepth) -> ImportFormats {
+    let (fourcc, drm_format, rt_format) = match (order, depth) {
+        (Rgb32Order::Bgr, PixelDepth::Eight) => {
+            (ffi::FOURCC_BGRX, DRM_FORMAT_XRGB8888, ffi::RT_FORMAT_RGB32)
+        }
+        (Rgb32Order::Rgb, PixelDepth::Eight) => {
+            (ffi::FOURCC_RGBX, DRM_FORMAT_XBGR8888, ffi::RT_FORMAT_RGB32)
+        }
+        (Rgb32Order::Bgr, PixelDepth::Ten) => (
+            ffi::FOURCC_X2R10G10B10,
+            DRM_FORMAT_XRGB2101010,
+            ffi::RT_FORMAT_RGB32_10,
+        ),
+        (Rgb32Order::Rgb, PixelDepth::Ten) => (
+            ffi::FOURCC_X2B10G10R10,
+            DRM_FORMAT_XBGR2101010,
+            ffi::RT_FORMAT_RGB32_10,
+        ),
+    };
+    ImportFormats {
+        fourcc,
+        drm_format,
+        rt_format,
     }
 }
 
@@ -309,7 +347,9 @@ fn bt709() -> ProcColorProperties {
 /// Returns the descriptor importing `frame`'s buffer.
 fn descriptor(frame: &DmaBufFrame) -> DrmPrimeSurfaceDescriptor {
     let layout = frame.layout();
-    let (fourcc, drm_format) = formats(layout.order);
+    let ImportFormats {
+        fourcc, drm_format, ..
+    } = formats(layout.order, frame.depth());
     let mut descriptor = DrmPrimeSurfaceDescriptor::zeroed();
     descriptor.fourcc = fourcc;
     descriptor.width = layout.width as u32;
@@ -363,7 +403,7 @@ fn import_surface(display: &Display, frame: &DmaBufFrame) -> Result<VaId, CodecE
     let status = unsafe {
         (display.va.create_surfaces)(
             display.handle,
-            ffi::RT_FORMAT_RGB32,
+            formats(frame.layout().order, frame.depth()).rt_format,
             width,
             height,
             &mut surface,
@@ -420,8 +460,41 @@ mod tests {
         assert_eq!(described.layers[0].num_planes, 1);
         assert_eq!(described.layers[0].offset[0], 256);
         assert_eq!(described.layers[0].pitch[0], 15_360);
-        let rgb = formats(Rgb32Order::Rgb);
-        assert_eq!(rgb, (ffi::FOURCC_RGBX, DRM_FORMAT_XBGR8888));
+        let rgb = formats(Rgb32Order::Rgb, PixelDepth::Eight);
+        assert_eq!(
+            (rgb.fourcc, rgb.drm_format, rgb.rt_format),
+            (ffi::FOURCC_RGBX, DRM_FORMAT_XBGR8888, ffi::RT_FORMAT_RGB32)
+        );
+    }
+
+    /// Ten-bit pixels are imported as ten-bit RGB surfaces, in the DRM and
+    /// VA formats of their colours' order, which match the kernel's and
+    /// libva's codes.
+    #[test]
+    fn describes_ten_bit_pixels() {
+        assert_eq!(DRM_FORMAT_XRGB2101010, 0x3033_5258);
+        assert_eq!(DRM_FORMAT_XBGR2101010, 0x3033_4258);
+        assert_eq!(ffi::FOURCC_X2R10G10B10, 0x3033_5258);
+        assert_eq!(ffi::FOURCC_X2B10G10R10, 0x3033_4258);
+        let file = File::open("/dev/null").unwrap();
+        let layout = DmaBufLayout {
+            width: 3840,
+            height: 2160,
+            order: Rgb32Order::Rgb,
+            modifier: DRM_FORMAT_MOD_LINEAR,
+            offset: 0,
+            pitch: 15_360,
+        };
+        let frame = DmaBufFrame::new(OwnedFd::from(file), layout)
+            .unwrap()
+            .with_depth(PixelDepth::Ten);
+        let described = descriptor(&frame);
+        assert_eq!(described.fourcc, ffi::FOURCC_X2B10G10R10);
+        assert_eq!(described.layers[0].drm_format, DRM_FORMAT_XBGR2101010);
+        assert_eq!(
+            formats(Rgb32Order::Bgr, PixelDepth::Ten).rt_format,
+            ffi::RT_FORMAT_RGB32_10
+        );
     }
 
     /// The planes a modifier adds, such as a display's compression

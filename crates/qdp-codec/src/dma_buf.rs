@@ -49,6 +49,18 @@ pub struct DmaBufPlane {
 /// planes at most.
 pub const MAX_EXTRA_PLANES: usize = 3;
 
+/// How many bits each colour of a frame's 32-bit pixels has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PixelDepth {
+    /// Eight bits a colour, and eight of alpha or padding.
+    #[default]
+    Eight,
+    /// Ten bits a colour, and two of alpha or padding, in a little-endian
+    /// word whose lowest bits are the first colour of the order, as the
+    /// displays of desktops that show deeper colour scan out.
+    Ten,
+}
+
 /// Which buffer a DMA-BUF descriptor refers to: the same for every
 /// descriptor of one buffer, and different for every other buffer that
 /// exists at the same time.
@@ -78,6 +90,8 @@ pub struct DmaBufFrame {
     identity: BufferIdentity,
     /// The planes the modifier adds to the pixels', in the same buffer.
     extra_planes: Vec<DmaBufPlane>,
+    /// The bits each colour has.
+    depth: PixelDepth,
 }
 
 impl DmaBufFrame {
@@ -116,7 +130,19 @@ impl DmaBufFrame {
                 inode: metadata.ino(),
             },
             extra_planes: Vec::new(),
+            depth: PixelDepth::Eight,
         })
+    }
+
+    /// Returns the frame with colours of `depth` bits.
+    pub fn with_depth(mut self, depth: PixelDepth) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Returns how many bits each colour has.
+    pub fn depth(&self) -> PixelDepth {
+        self.depth
     }
 
     /// Returns the frame with the planes its modifier adds to the pixels',

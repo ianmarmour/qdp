@@ -117,6 +117,18 @@ pub(super) const FOURCC_BGRX: u32 = u32::from_le_bytes(*b"BGRX");
 /// `VA_FOURCC_RGBX`: red, green, blue and an unused byte.
 pub(super) const FOURCC_RGBX: u32 = u32::from_le_bytes(*b"RGBX");
 
+/// `VA_RT_FORMAT_RGB32_10`: surfaces of 32-bit RGB pixels, ten bits a
+/// colour.
+pub(super) const RT_FORMAT_RGB32_10: u32 = 0x0020_0000;
+
+/// `VA_FOURCC_X2R10G10B10`: blue, green and red in ten bits each from the
+/// lowest, then two unused bits.
+pub(super) const FOURCC_X2R10G10B10: u32 = u32::from_le_bytes(*b"XR30");
+
+/// `VA_FOURCC_X2B10G10R10`: red, green and blue in ten bits each from the
+/// lowest, then two unused bits.
+pub(super) const FOURCC_X2B10G10R10: u32 = u32::from_le_bytes(*b"XB30");
+
 /// `VASurfaceAttribPixelFormat`.
 pub(super) const SURFACE_ATTRIB_PIXEL_FORMAT: c_int = 1;
 

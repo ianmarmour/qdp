@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use qdp_codec::{DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout, DmaBufPlane, Rgb32Order};
+use qdp_codec::{
+    DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout, DmaBufPlane, PixelDepth, Rgb32Order,
+};
 use qdp_runtime::{
     CapturedFrame, CursorShape, CursorState, FrameArrivals, FrameSource, PointerPosition,
     RuntimeError,
@@ -49,6 +51,18 @@ const FORMAT_ARGB8888: u32 = fourcc(*b"AR24");
 const FORMAT_XBGR8888: u32 = fourcc(*b"XB24");
 /// `DRM_FORMAT_ABGR8888`: red, green, blue and alpha bytes.
 const FORMAT_ABGR8888: u32 = fourcc(*b"AB24");
+/// `DRM_FORMAT_XRGB2101010`: blue, green and red in ten bits each, then
+/// padding.
+const FORMAT_XRGB2101010: u32 = fourcc(*b"XR30");
+/// `DRM_FORMAT_ARGB2101010`: blue, green and red in ten bits each, then
+/// alpha.
+const FORMAT_ARGB2101010: u32 = fourcc(*b"AR30");
+/// `DRM_FORMAT_XBGR2101010`: red, green and blue in ten bits each, then
+/// padding.
+const FORMAT_XBGR2101010: u32 = fourcc(*b"XB30");
+/// `DRM_FORMAT_ABGR2101010`: red, green and blue in ten bits each, then
+/// alpha, as desktops showing deeper colour scan out.
+const FORMAT_ABGR2101010: u32 = fourcc(*b"AB30");
 
 /// The name of the thread that watches the display refresh.
 const WATCHER_THREAD: &str = "qdp-console";
@@ -599,7 +613,7 @@ struct ReadFrame {
 /// Makes a frame of an exported framebuffer, if its pixels are a kind the
 /// encoders take.
 fn dma_buf_frame(exported: ExportedFramebuffer) -> Result<ReadFrame, RuntimeError> {
-    let order = pixel_order(exported.format).ok_or_else(|| {
+    let (order, depth) = pixel_format(exported.format).ok_or_else(|| {
         RuntimeError::Capture(format!(
             "the display's pixel format {} cannot be streamed yet",
             format_name(exported.format)
@@ -621,7 +635,8 @@ fn dma_buf_frame(exported: ExportedFramebuffer) -> Result<ReadFrame, RuntimeErro
         .collect();
     let frame = DmaBufFrame::new(exported.descriptor, layout)
         .map_err(|error| RuntimeError::Capture(error.to_string()))?
-        .with_extra_planes(&extra_planes);
+        .with_extra_planes(&extra_planes)
+        .with_depth(depth);
     Ok(ReadFrame { frame, buffer })
 }
 
@@ -633,13 +648,24 @@ fn buffer_identity(exported: &ExportedFramebuffer) -> Option<(u64, u64)> {
     Some((metadata.dev(), metadata.ino()))
 }
 
-/// Returns the order of the colour bytes of a 32-bit pixel format, if the
-/// encoders take it.
-fn pixel_order(format: u32) -> Option<Rgb32Order> {
+/// Returns the order of the colours of a 32-bit pixel format and their
+/// depth, if the encoders take it.
+fn pixel_format(format: u32) -> Option<(Rgb32Order, PixelDepth)> {
     match format {
-        FORMAT_XRGB8888 | FORMAT_ARGB8888 => Some(Rgb32Order::Bgr),
-        FORMAT_XBGR8888 | FORMAT_ABGR8888 => Some(Rgb32Order::Rgb),
+        FORMAT_XRGB8888 | FORMAT_ARGB8888 => Some((Rgb32Order::Bgr, PixelDepth::Eight)),
+        FORMAT_XBGR8888 | FORMAT_ABGR8888 => Some((Rgb32Order::Rgb, PixelDepth::Eight)),
+        FORMAT_XRGB2101010 | FORMAT_ARGB2101010 => Some((Rgb32Order::Bgr, PixelDepth::Ten)),
+        FORMAT_XBGR2101010 | FORMAT_ABGR2101010 => Some((Rgb32Order::Rgb, PixelDepth::Ten)),
         _ => None,
+    }
+}
+
+/// Returns the order of the colour bytes of an 8-bit 32-bit pixel format,
+/// as pointer images have, if it is one.
+fn pixel_order(format: u32) -> Option<Rgb32Order> {
+    match pixel_format(format)? {
+        (order, PixelDepth::Eight) => Some(order),
+        (_, PixelDepth::Ten) => None,
     }
 }
 
@@ -763,7 +789,16 @@ mod tests {
         assert_eq!(FORMAT_XBGR8888, 0x3432_4258);
         assert_eq!(FORMAT_ABGR8888, 0x3432_4241);
         assert_eq!(format_name(fourcc(*b"XR30")), "XR30");
-        assert_eq!(pixel_order(fourcc(*b"XR30")), None);
+        assert_eq!(
+            pixel_format(FORMAT_ABGR2101010),
+            Some((Rgb32Order::Rgb, PixelDepth::Ten))
+        );
+        assert_eq!(
+            pixel_format(FORMAT_XRGB2101010),
+            Some((Rgb32Order::Bgr, PixelDepth::Ten))
+        );
+        assert_eq!(pixel_order(FORMAT_ABGR2101010), None);
+        assert_eq!(pixel_format(fourcc(*b"NV12")), None);
     }
 
     /// A pointer's image is cut down to the pixels that show, with where

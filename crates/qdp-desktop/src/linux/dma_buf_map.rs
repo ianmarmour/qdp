@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::NonNull;
 
-use qdp_codec::{DRM_FORMAT_MOD_LINEAR, DmaBufFrame, Yuv420Frame};
+use qdp_codec::{DRM_FORMAT_MOD_LINEAR, DmaBufFrame, PixelDepth, Yuv420Frame};
 
 /// The bytes of one 32-bit pixel.
 pub(super) const PIXEL_BYTES: usize = 4;
@@ -96,11 +96,12 @@ impl Drop for MappedDmaBuf<'_> {
     }
 }
 
-/// Reads a frame in a linear DMA-BUF into memory, or returns `None` if it is
-/// not linear or cannot be mapped.
+/// Reads a frame of 8-bit colours in a linear DMA-BUF into memory, or
+/// returns `None` if it is not linear, has deeper colours, or cannot be
+/// mapped.
 pub(super) fn read_linear(frame: &DmaBufFrame) -> Option<Yuv420Frame> {
     let layout = frame.layout();
-    if layout.modifier != DRM_FORMAT_MOD_LINEAR {
+    if layout.modifier != DRM_FORMAT_MOD_LINEAR || frame.depth() != PixelDepth::Eight {
         return None;
     }
     let size = usize::try_from(frame.size()).ok()?;
