@@ -100,18 +100,6 @@ pub enum WindowMessage {
     SessionEnded,
 }
 
-/// What became of a drawing of the window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Showing {
-    /// The picture was handed to the display at the time.
-    Shown(Instant),
-    /// The picture is drawn once the drawing before it reaches the screen.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    Deferred,
-    /// The picture could not be drawn.
-    Failed,
-}
-
 /// A frame of a stream, as presentations name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FrameId {
@@ -319,7 +307,7 @@ enum Painter {
     Processor(Surface<Rc<Window>, Rc<Window>>),
     /// The GPU, with Metal.
     #[cfg(target_os = "macos")]
-    Metal(Box<qdp_desktop::MetalVideo>),
+    Metal(Box<qdp_desktop::MetalVideo<FrameId>>),
 }
 
 /// The application the window's event loop runs.
@@ -395,9 +383,6 @@ pub struct WindowApp {
     resolution: Option<(u32, u32)>,
     /// How fast the window draws the frames.
     draw_stats: DrawStats,
-    /// The newest frame taken from the slot, while its drawing is put off
-    /// until the one before reaches the screen.
-    undrawn: Option<FrameId>,
 }
 
 /// How fast the window draws new frames, over the last interval: frames
@@ -413,9 +398,9 @@ struct DrawStats {
     busy: Duration,
     /// The longest draw.
     longest: Duration,
-    /// The new frames whose drawing was put off until the one before
-    /// reached the screen.
-    deferred: u32,
+    /// The time spent waiting for a drawable to draw them into, on Metal's
+    /// render thread, which does not hold up the window.
+    waited: Duration,
 }
 
 impl DrawStats {
@@ -426,21 +411,17 @@ impl DrawStats {
             frames: 0,
             busy: Duration::ZERO,
             longest: Duration::ZERO,
-            deferred: 0,
+            waited: Duration::ZERO,
         }
     }
 
-    /// Counts a new frame whose drawing was put off.
-    fn deferred(&mut self) {
-        self.deferred += 1;
-    }
-
-    /// Counts a new frame drawn in `took`, and logs the interval once it
-    /// has ended at `now`.
-    fn drew(&mut self, took: Duration, now: Instant) {
+    /// Counts a new frame drawn in `took`, after `waited` for a drawable,
+    /// and logs the interval once it has ended at `now`.
+    fn drew(&mut self, took: Duration, waited: Duration, now: Instant) {
         self.frames += 1;
         self.busy += took;
         self.longest = self.longest.max(took);
+        self.waited += waited;
         let elapsed = now.saturating_duration_since(self.started);
         if elapsed < DRAW_STATS_INTERVAL {
             return;
@@ -450,7 +431,7 @@ impl DrawStats {
             drawn_fps = format!("{:.1}", f64::from(self.frames) / elapsed.as_secs_f64()),
             draw_ms = milliseconds(self.busy / self.frames),
             draw_max_ms = milliseconds(self.longest),
-            deferred = self.deferred,
+            wait_ms = milliseconds(self.waited / self.frames),
             "drawing"
         );
         *self = Self::new(now);
@@ -494,7 +475,6 @@ impl WindowApp {
         Self {
             resolution,
             draw_stats: DrawStats::new(Instant::now()),
-            undrawn: None,
             microphone,
             display_sender: Some(display_sender),
             title,
@@ -679,7 +659,7 @@ impl WindowApp {
         };
         let narrow = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
         match CustomCursor::from_rgba(
-            scaled.rgba.clone(),
+            scaled.rgba.to_vec(),
             narrow(scaled.width),
             narrow(scaled.height),
             narrow(scaled.hotspot.0),
@@ -731,10 +711,10 @@ impl WindowApp {
         }
     }
 
-    /// Draws a new frame, or one put off: at once with Metal, which never
-    /// waits for a drawable, rather than at the window's next redraw, which
-    /// may come a refresh later, after a newer frame replaced it; at the
-    /// next redraw otherwise.
+    /// Draws a new frame: at once with Metal, which hands it to its render
+    /// thread, rather than at the window's next redraw, which may come a
+    /// refresh later, after a newer frame replaced it; at the next redraw
+    /// otherwise.
     fn frame_ready(&mut self) {
         #[cfg(target_os = "macos")]
         if matches!(
@@ -745,16 +725,6 @@ impl WindowApp {
             return;
         }
         self.request_redraw();
-    }
-
-    /// Returns when a drawing put off is drawn regardless, should the one
-    /// before it never be said to reach the screen.
-    fn redraw_at(&self) -> Option<Instant> {
-        match self.display.as_ref().map(|display| &display.painter) {
-            #[cfg(target_os = "macos")]
-            Some(Painter::Metal(metal)) => metal.retry_at(),
-            _ => None,
-        }
     }
 
     /// Returns when the pending warp may be applied.
@@ -969,7 +939,7 @@ impl WindowApp {
             .map(Rc::new)
             .map_err(|error| format!("cannot open a window: {error}"))?;
         #[cfg(target_os = "macos")]
-        if let Some(metal) = attach_metal(&window, self.proxy.clone()) {
+        if let Some(metal) = attach_metal(&window, self.slot.clone()) {
             return Ok(Display {
                 window,
                 painter: Painter::Metal(Box::new(metal)),
@@ -1016,89 +986,103 @@ impl WindowApp {
     /// follows a device the client does not know.
     fn draw(&mut self) {
         let started = Instant::now();
-        let newest = self.slot.take().map(|(frame, id)| {
+        let newest = self.slot.take();
+        if let Some((frame, _)) = &newest {
             let size = frame.size();
             if self.picture != Some(size) {
                 self.cursor_stale = true;
             }
             self.picture = Some(size);
-            match self.display.as_mut().map(|display| &mut display.painter) {
-                Some(Painter::Processor(_)) | None => match frame.with_memory(yuv420_to_rgb) {
-                    Ok(rgb) => self.current = Some(rgb),
-                    Err(error) => warn!(%error, "cannot read the decoded picture"),
-                },
-                // A picture the GPU holds is drawn where it is.
-                #[cfg(target_os = "macos")]
-                Some(Painter::Metal(metal)) => metal.take(frame),
+        }
+        // A picture the GPU holds is drawn where it is, on Metal's render
+        // thread, which says when.
+        #[cfg(target_os = "macos")]
+        if matches!(
+            self.display.as_ref().map(|display| &display.painter),
+            Some(Painter::Metal(_))
+        ) {
+            self.show_with_metal(newest);
+            self.slot.set_display_timing(qdp_desktop::display_timing());
+            return;
+        }
+        let newest = newest.map(|(frame, id)| {
+            match frame.with_memory(yuv420_to_rgb) {
+                Ok(rgb) => self.current = Some(rgb),
+                Err(error) => warn!(%error, "cannot read the decoded picture"),
             }
             id
         });
+        let presented_at = self.show();
         if let Some(id) = newest {
-            // A frame put off and replaced before it was drawn never reached
-            // the screen.
-            if let Some(replaced) = self.undrawn.replace(id) {
-                self.slot.shown(replaced, None);
-            }
-        }
-        match self.show() {
-            Showing::Shown(presented_at) => {
-                if let Some(id) = self.undrawn.take() {
-                    self.slot.shown(id, Some(presented_at));
-                    self.draw_stats.drew(
-                        presented_at.saturating_duration_since(started),
-                        presented_at,
-                    );
-                }
-            }
-            Showing::Deferred => {
-                if newest.is_some() {
-                    self.draw_stats.deferred();
-                }
-            }
-            Showing::Failed => {
-                if let Some(id) = self.undrawn.take() {
-                    self.slot.shown(id, None);
-                }
+            self.slot.shown(id, presented_at);
+            if let Some(presented_at) = presented_at {
+                self.draw_stats.drew(
+                    presented_at.saturating_duration_since(started),
+                    Duration::ZERO,
+                    presented_at,
+                );
             }
         }
         self.slot.set_display_timing(qdp_desktop::display_timing());
     }
 
-    /// Draws the current picture, and the cursor where the window draws it,
-    /// saying when the picture was handed to the display, or that it is drawn
-    /// later.
-    fn show(&mut self) -> Showing {
-        let follow = match (self.follow, &self.scaled_cursor, self.placement()) {
+    /// Returns where the cursor the window draws goes, in the window's
+    /// pixels, and its image, if the window draws one.
+    fn followed_cursor(&self) -> Option<((f64, f64), ScaledCursor)> {
+        match (self.follow, &self.scaled_cursor, self.placement()) {
             (Some((x, y)), Some((_, cursor)), Some((placement, width, height))) => {
                 Some((placement.to_window(x, y, width, height), cursor.clone()))
             }
             _ => None,
-        };
-        #[cfg(target_os = "macos")]
-        let picture = self.placement().map(|(placement, _, _)| placement);
-        let Some(display) = self.display.as_mut() else {
-            return Showing::Failed;
-        };
+        }
+    }
+
+    /// Draws the current picture on the processor, and the cursor where the
+    /// window draws it, returning when the picture reached the screen, if it
+    /// did.
+    fn show(&mut self) -> Option<Instant> {
+        let follow = self.followed_cursor();
+        let display = self.display.as_mut()?;
         let size = display.window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
             // A minimized window has nothing to draw.
-            return Showing::Failed;
+            return None;
         };
         match &mut display.painter {
             Painter::Processor(surface) => {
                 draw_on_processor(surface, self.current.as_ref(), (width, height), follow)
-                    .map_or(Showing::Failed, Showing::Shown)
             }
             #[cfg(target_os = "macos")]
-            Painter::Metal(metal) => draw_with_metal(
-                metal,
-                (size.width, size.height),
-                display.window.scale_factor(),
-                picture,
-                follow,
-            ),
+            Painter::Metal(_) => None,
+        }
+    }
+
+    /// Hands `newest`, if there is a new frame, and the cursor where the
+    /// window draws it, to Metal's render thread.
+    #[cfg(target_os = "macos")]
+    fn show_with_metal(&mut self, newest: Option<(DecodedPicture, FrameId)>) {
+        let follow = self.followed_cursor();
+        let picture = self.placement().map(|(placement, _, _)| placement);
+        let Some(display) = self.display.as_mut() else {
+            return;
+        };
+        let size = display.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            // A minimized window has nothing to draw.
+            if let Some((_, id)) = newest {
+                self.slot.shown(id, None);
+            }
+            return;
+        }
+        let scale = display.window.scale_factor();
+        if let Painter::Metal(metal) = &mut display.painter {
+            metal.show(
+                newest,
+                metal_scene((size.width, size.height), picture, follow),
+                scale,
+            );
         }
     }
 }
@@ -1140,51 +1124,37 @@ fn draw_on_processor(
     }
 }
 
-/// Draws the uploaded picture at `picture`, and `follow`'s cursor at its
-/// position, with Metal into a drawable of `size` pixels, `scale` of them to
-/// a point, saying when the picture was handed to the display, or that it is
-/// drawn later.
+/// Returns what Metal draws in a drawable of `size` pixels: the picture at
+/// `picture`, and `follow`'s cursor at its position.
 #[cfg(target_os = "macos")]
-fn draw_with_metal(
-    metal: &mut qdp_desktop::MetalVideo,
+fn metal_scene(
     size: (u32, u32),
-    scale: f64,
     picture: Option<Placement>,
     follow: Option<((f64, f64), ScaledCursor)>,
-) -> Showing {
-    let picture = picture.map(|placement| qdp_desktop::PixelRect {
-        left: placement.left as f64,
-        top: placement.top as f64,
-        width: placement.width as f64,
-        height: placement.height as f64,
-    });
-    let overlay = follow
-        .as_ref()
-        .map(|((x, y), cursor)| qdp_desktop::Overlay {
+) -> qdp_desktop::Scene {
+    qdp_desktop::Scene {
+        size,
+        picture: picture.map(|placement| qdp_desktop::PixelRect {
+            left: placement.left as f64,
+            top: placement.top as f64,
+            width: placement.width as f64,
+            height: placement.height as f64,
+        }),
+        overlay: follow.map(|((x, y), cursor)| qdp_desktop::Overlay {
             width: cursor.width,
             height: cursor.height,
-            rgba: &cursor.rgba,
             left: x.round() - cursor.hotspot.0 as f64,
             top: y.round() - cursor.hotspot.1 as f64,
-        });
-    match metal.draw(size, scale, picture, overlay) {
-        Ok(qdp_desktop::Drawing::Drawn) => Showing::Shown(Instant::now()),
-        Ok(qdp_desktop::Drawing::Deferred) => Showing::Deferred,
-        Err(error) => {
-            warn!(%error, "cannot show the window's picture");
-            Showing::Failed
-        }
+            rgba: cursor.rgba,
+        }),
     }
 }
 
-/// Draws the window's picture with Metal, waking the window through `proxy`
-/// to draw a picture it put off, or returns `None`, saying why, so that the
-/// processor draws it instead.
+/// Draws the window's picture with Metal, telling `slot` when each frame
+/// reached the screen, or returns `None`, saying why, so that the processor
+/// draws it instead.
 #[cfg(target_os = "macos")]
-fn attach_metal(
-    window: &Window,
-    proxy: EventLoopProxy<WindowMessage>,
-) -> Option<qdp_desktop::MetalVideo> {
+fn attach_metal(window: &Window, slot: FrameSlot) -> Option<qdp_desktop::MetalVideo<FrameId>> {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
@@ -1192,12 +1162,22 @@ fn attach_metal(
     };
     // SAFETY: the view is the window's, which winit runs on the main thread,
     // and the painter is dropped before the window.
-    let wake = Box::new(move || {
-        let _ = proxy.send_event(WindowMessage::Frame);
+    let mut stats = DrawStats::new(Instant::now());
+    let report = Box::new(move |fate: qdp_desktop::Fate<FrameId>| match fate {
+        qdp_desktop::Fate::Shown {
+            tag,
+            at,
+            drew_in,
+            waited,
+        } => {
+            slot.shown(tag, Some(at));
+            stats.drew(drew_in, waited, at);
+        }
+        qdp_desktop::Fate::Unshown(tag) => slot.shown(tag, None),
     });
     #[allow(unsafe_code)]
     let attached =
-        unsafe { qdp_desktop::MetalVideo::attach(handle.ns_view, window.scale_factor(), wake) };
+        unsafe { qdp_desktop::MetalVideo::attach(handle.ns_view, window.scale_factor(), report) };
     match attached {
         Ok(metal) => {
             info!("drawing the video with Metal");
@@ -1243,19 +1223,9 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.update_cursor(event_loop);
-        let now = Instant::now();
-        self.apply_pending_warp(now);
-        let redraw_at = self.redraw_at();
-        if redraw_at.is_some_and(|redraw_at| now >= redraw_at) {
-            self.request_redraw();
-        }
-        let wake_at = self
-            .warp_allowed_at()
-            .into_iter()
-            .chain(redraw_at.filter(|&redraw_at| redraw_at > now))
-            .min();
-        event_loop.set_control_flow(match wake_at {
-            Some(wake_at) => ControlFlow::WaitUntil(wake_at),
+        self.apply_pending_warp(Instant::now());
+        event_loop.set_control_flow(match self.warp_allowed_at() {
+            Some(allowed) => ControlFlow::WaitUntil(allowed),
             None => ControlFlow::Wait,
         });
     }

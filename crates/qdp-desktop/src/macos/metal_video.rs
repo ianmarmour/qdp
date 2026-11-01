@@ -11,22 +11,19 @@
 //! wants, since a ProMotion display otherwise may not refresh faster than
 //! 60 Hz for it.
 //!
-//! A picture is drawn as soon as it arrives, unless all of a layer's
-//! drawables wait to reach the screen: then it is drawn once one is shown,
-//! rather than waiting for a free drawable on the main thread, which also
-//! reads the user's input. Putting pictures off sooner cost frames: macOS
-//! may take more than two refreshes to say a drawing was shown, and with
-//! one or two allowed to wait, a 120 Hz display showed as few as 40 or 80
-//! frames a second.
+//! Pictures are drawn on a thread of their own. Drawing waits for one of the
+//! layer's drawables to be free, often for most of a refresh at 120 Hz, and
+//! the main thread, which also reads the user's input, must not: it hands
+//! over the newest picture and what to draw over it, and the render thread
+//! draws the newest it has once a drawable is free. The main thread keeps
+//! the layer to the view's size, and the display link.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-
-use block2::RcBlock;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -52,6 +49,9 @@ use objc2_quartz_core::{
 };
 use qdp_codec::{DecodedPicture, PixelBufferPicture, Yuv420Frame};
 use tracing::{debug, warn};
+
+/// The render thread's name.
+const RENDER_THREAD: &str = "qdp-metal-render";
 
 /// The shaders: a quad placed by a rectangle, the picture's colours from its
 /// three planes or from NV12's two, and an overlay image. Their names start
@@ -150,14 +150,6 @@ const PLANE_SETS: usize = 3;
 /// drawings a layer has in flight.
 const PIXEL_BUFFER_PICTURES: usize = PLANE_SETS + 1;
 
-/// The drawings that may wait to reach the screen at once: all of a layer's
-/// three drawables, beyond which the next drawing could only wait for one.
-const WAITING_DRAWINGS: usize = 3;
-
-/// How long a drawing may wait to reach the screen before the next is drawn
-/// regardless, should macOS never say that it was shown.
-const PRESENT_TIMEOUT: Duration = Duration::from_millis(250);
-
 /// The luma plane of an NV12 pixel buffer.
 const LUMA_PLANE: usize = 0;
 
@@ -178,14 +170,14 @@ pub struct PixelRect {
 }
 
 /// An image drawn over the picture, such as the host's cursor.
-#[derive(Debug, Clone, Copy)]
-pub struct Overlay<'a> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Overlay {
     /// Its width in pixels.
     pub width: usize,
     /// Its height in pixels.
     pub height: usize,
     /// Its RGBA pixels with straight alpha, row by row.
-    pub rgba: &'a [u8],
+    pub rgba: Arc<[u8]>,
     /// Its top-left corner in the drawable's pixels.
     pub left: f64,
     /// Its top edge.
@@ -241,7 +233,7 @@ struct OverlayTexture {
     /// The texture.
     texture: SizedTexture,
     /// The pixels uploaded, to tell a new image from the same one.
-    rgba: Vec<u8>,
+    rgba: Arc<[u8]>,
 }
 
 define_class!(
@@ -271,64 +263,79 @@ impl FrameRateDemand {
     }
 }
 
-/// What became of a drawing.
+/// What to draw besides the picture, and where.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scene {
+    /// The drawable's width and height in pixels.
+    pub size: (u32, u32),
+    /// Where the picture goes, if one is shown.
+    pub picture: Option<PixelRect>,
+    /// What is drawn over the picture, if anything.
+    pub overlay: Option<Overlay>,
+}
+
+/// What became of a picture handed to the render thread, tagged as it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Drawing {
-    /// The picture was drawn, and goes to the screen.
-    Drawn,
-    /// A drawing still waits to reach the screen: the window is woken to
-    /// draw the picture once it has.
-    Deferred,
+pub enum Fate<T> {
+    /// It was drawn and handed to the display.
+    Shown {
+        /// Its tag.
+        tag: T,
+        /// When it was handed to the display.
+        at: Instant,
+        /// How long drawing it took, once a drawable was free.
+        drew_in: Duration,
+        /// How long the render thread waited for a free drawable.
+        waited: Duration,
+    },
+    /// A newer picture replaced it before it was drawn, or it could not be.
+    Unshown(T),
 }
 
-/// The drawings committed but not yet on the screen, shared with the
-/// handlers Metal calls once each is shown.
-struct Presents {
-    /// How many wait to reach the screen.
-    waiting: AtomicUsize,
-    /// Whether a drawing was put off until one reaches the screen.
-    deferred: AtomicBool,
-    /// Wakes the window to draw what was put off.
-    wake: Box<dyn Fn() + Send + Sync>,
+/// What the main thread asks the render thread for.
+struct Request<T> {
+    /// The newest picture not yet taken, and its tag.
+    picture: Option<(DecodedPicture, T)>,
+    /// The tags of pictures replaced before the render thread took them.
+    replaced: Vec<T>,
+    /// What to draw, once asked.
+    scene: Option<Scene>,
+    /// Whether a drawing is asked for.
+    pending: bool,
+    /// Whether the thread is to end.
+    stop: bool,
 }
 
-impl Presents {
-    /// Notes that a drawing reached the screen, or was passed over for a
-    /// newer one, and wakes the window if a drawing was put off.
-    fn presented(&self) {
-        let _ = self
-            .waiting
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |waiting| {
-                waiting.checked_sub(1)
-            });
-        if self.deferred.swap(false, Ordering::AcqRel) {
-            (self.wake)();
-        }
-    }
+/// The request and the condition the render thread waits on for it.
+struct Shared<T> {
+    /// The request.
+    request: Mutex<Request<T>>,
+    /// Signalled when the request changes.
+    changed: Condvar,
+}
 
-    /// Returns whether a drawing must wait for one already waiting to reach
-    /// the screen, noting that the window is to be woken if so.
-    fn must_wait(&self) -> bool {
-        if self.waiting.load(Ordering::Acquire) < WAITING_DRAWINGS {
-            return false;
-        }
-        self.deferred.store(true, Ordering::Release);
-        // The drawing may have reached the screen meanwhile, its handler
-        // finding nothing put off.
-        if self.waiting.load(Ordering::Acquire) < WAITING_DRAWINGS {
-            self.deferred.store(false, Ordering::Release);
-            return false;
-        }
-        true
+impl<T> Shared<T> {
+    /// Locks the request.
+    fn lock(&self) -> MutexGuard<'_, Request<T>> {
+        self.request.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// Draws a client's video into a window's view with Metal.
-pub struct MetalVideo {
-    /// The view's own layer, which the drawing layer is kept to the size of.
-    root: Retained<CALayer>,
-    /// The layer drawn into, over the view's.
-    layer: Retained<CAMetalLayer>,
+/// The layer drawn into, shared by the main thread, which keeps its frame to
+/// the view's, and the render thread, which sets its drawables' size and
+/// asks for them.
+struct DrawingLayer(Retained<CAMetalLayer>);
+
+// SAFETY: Apple lets a `CAMetalLayer`'s drawables be asked for, and their
+// size set, on any thread; the render thread alone does either, and the
+// main thread only sets the layer's frame and scale, in a transaction.
+unsafe impl Send for DrawingLayer {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for DrawingLayer {}
+
+/// Draws the video on the render thread: the GPU's objects and the textures
+/// of the pictures drawn.
+struct Renderer {
     /// The GPU.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// The queue the drawing goes through.
@@ -356,27 +363,42 @@ pub struct MetalVideo {
     import_failed: bool,
     /// The overlay's texture, once one was drawn.
     overlay_texture: Option<OverlayTexture>,
+}
+
+// SAFETY: Metal's devices, queues, pipelines, samplers and textures, and
+// Core Video's texture cache and pixel buffers, may be used on any thread;
+// the renderer is moved to the render thread once made, and used there
+// alone.
+unsafe impl Send for Renderer {}
+
+/// Draws a client's video into a window's view with Metal, on a thread of
+/// its own, reporting what became of each picture, tagged with a `T`.
+pub struct MetalVideo<T: Send + 'static> {
+    /// The view's own layer, which the drawing layer is kept to the size of.
+    root: Retained<CALayer>,
+    /// The layer drawn into, over the view's, shared with the render thread.
+    layer: Arc<DrawingLayer>,
+    /// What the render thread is asked for.
+    shared: Arc<Shared<T>>,
+    /// The render thread.
+    thread: Option<JoinHandle<()>>,
     /// The display link that declares the frame rates wanted, where macOS
     /// has them (14 and later).
     frame_rate_link: Option<Retained<CADisplayLink>>,
     /// The link's target, kept while the link is.
     _frame_rate_target: Option<Retained<FrameRateDemand>>,
-    /// The drawings waiting to reach the screen.
-    presents: Arc<Presents>,
-    /// When the last drawing was committed.
-    committed_at: Option<Instant>,
 }
 
-impl std::fmt::Debug for MetalVideo {
+impl<T: Send + 'static> std::fmt::Debug for MetalVideo<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("MetalVideo").finish_non_exhaustive()
     }
 }
 
-impl MetalVideo {
+impl<T: Send + 'static> MetalVideo<T> {
     /// Draws into the view `ns_view` points to, a window's `NSView`, whose
-    /// pixels are `scale` times its points, calling `wake`, from any thread,
-    /// to have the window draw again a picture it put off.
+    /// pixels are `scale` times its points, telling `report`, on the render
+    /// thread, what became of each picture.
     ///
     /// # Safety
     ///
@@ -385,7 +407,7 @@ impl MetalVideo {
     pub unsafe fn attach(
         ns_view: NonNull<c_void>,
         scale: f64,
-        wake: Box<dyn Fn() + Send + Sync>,
+        report: Box<dyn FnMut(Fate<T>) + Send>,
     ) -> Result<Self, String> {
         let main_thread = MainThreadMarker::new()
             .ok_or_else(|| "Metal drawing needs the main thread".to_owned())?;
@@ -432,9 +454,7 @@ impl MetalVideo {
                 (None, None)
             }
         };
-        Ok(Self {
-            root,
-            layer,
+        let renderer = Renderer {
             device,
             queue,
             picture,
@@ -448,44 +468,155 @@ impl MetalVideo {
             shown: None,
             import_failed: false,
             overlay_texture: None,
+        };
+        let layer = Arc::new(DrawingLayer(layer));
+        let shared = Arc::new(Shared {
+            request: Mutex::new(Request {
+                picture: None,
+                replaced: Vec::new(),
+                scene: None,
+                pending: false,
+                stop: false,
+            }),
+            changed: Condvar::new(),
+        });
+        let thread = {
+            let layer = Arc::clone(&layer);
+            let shared = Arc::clone(&shared);
+            std::thread::Builder::new()
+                .name(RENDER_THREAD.to_owned())
+                .spawn(move || render(renderer, &layer, &shared, report))
+                .map_err(|error| format!("cannot start drawing the video: {error}"))?
+        };
+        Ok(Self {
+            root,
+            layer,
+            shared,
+            thread: Some(thread),
             frame_rate_link,
             _frame_rate_target: frame_rate_target,
-            presents: Arc::new(Presents {
-                waiting: AtomicUsize::new(0),
-                deferred: AtomicBool::new(false),
-                wake,
-            }),
-            committed_at: None,
         })
     }
 
-    /// Returns when a drawing put off is drawn regardless, should macOS
-    /// never say that the one before it reached the screen.
-    pub fn retry_at(&self) -> Option<Instant> {
-        self.presents
-            .deferred
-            .load(Ordering::Acquire)
-            .then_some(self.committed_at?)
-            .map(|committed_at| committed_at + PRESENT_TIMEOUT)
-    }
-
-    /// Returns whether the next drawing must wait for the one waiting to
-    /// reach the screen, unless that has waited too long to count on.
-    fn must_wait(&self) -> bool {
-        let overdue = self
-            .committed_at
-            .is_some_and(|committed_at| committed_at.elapsed() >= PRESENT_TIMEOUT);
-        if overdue {
-            self.presents.waiting.store(0, Ordering::Release);
-            self.presents.deferred.store(false, Ordering::Release);
-            return false;
+    /// Asks for `scene` to be drawn in a layer of `scale` pixels to a point
+    /// of the window, with `picture`, tagged, as the picture from now on if
+    /// there is one: the render thread draws the newest it was given once a
+    /// drawable is free, and this returns at once.
+    pub fn show(&mut self, picture: Option<(DecodedPicture, T)>, scene: Scene, scale: f64) {
+        fit_layer(&self.root, &self.layer.0, scale);
+        let mut request = self.shared.lock();
+        if let Some(picture) = picture {
+            if let Some((_, replaced)) = request.picture.replace(picture) {
+                request.replaced.push(replaced);
+            }
         }
-        self.presents.must_wait()
+        request.scene = Some(scene);
+        request.pending = true;
+        drop(request);
+        self.shared.changed.notify_one();
     }
+}
 
+impl<T: Send + 'static> Drop for MetalVideo<T> {
+    fn drop(&mut self) {
+        if let Some(link) = &self.frame_rate_link {
+            link.invalidate();
+        }
+        self.shared.lock().stop = true;
+        self.shared.changed.notify_one();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Draws what `shared` asks for into `layer` until asked to stop, telling
+/// `report` what became of each picture. A drawable is waited for before
+/// the newest picture is taken, so that what waits is never drawn stale.
+fn render<T>(
+    mut renderer: Renderer,
+    layer: &DrawingLayer,
+    shared: &Shared<T>,
+    mut report: Box<dyn FnMut(Fate<T>) + Send>,
+) {
+    let mut failed = false;
+    loop {
+        let size = {
+            let mut request = shared.lock();
+            while !request.pending && !request.stop {
+                request = shared
+                    .changed
+                    .wait(request)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            if request.stop {
+                return;
+            }
+            request.scene.as_ref().map(|scene| scene.size)
+        };
+        if let Some((width, height)) = size {
+            let drawable_size = CGSize::new(f64::from(width), f64::from(height));
+            if layer.0.drawableSize() != drawable_size {
+                layer.0.setDrawableSize(drawable_size);
+            }
+        }
+        let wait_started = Instant::now();
+        let drawable = layer.0.nextDrawable();
+        let waited = wait_started.elapsed();
+        let (picture, scene, replaced) = {
+            let mut request = shared.lock();
+            if request.stop {
+                return;
+            }
+            request.pending = false;
+            (
+                request.picture.take(),
+                request.scene.clone(),
+                std::mem::take(&mut request.replaced),
+            )
+        };
+        for tag in replaced {
+            report(Fate::Unshown(tag));
+        }
+        let started = Instant::now();
+        let tag = picture.map(|(picture, tag)| {
+            renderer.take(picture);
+            tag
+        });
+        let drawn = match (drawable, scene) {
+            (Some(drawable), Some(scene)) => renderer.draw(&drawable, &scene),
+            (None, _) => Err("no drawable is free".to_owned()),
+            (_, None) => Err("nothing to draw".to_owned()),
+        };
+        match (drawn, tag) {
+            (Ok(()), Some(tag)) => {
+                failed = false;
+                let at = Instant::now();
+                report(Fate::Shown {
+                    tag,
+                    at,
+                    drew_in: at.saturating_duration_since(started),
+                    waited,
+                });
+            }
+            (Ok(()), None) => failed = false,
+            (Err(error), tag) => {
+                if !failed {
+                    failed = true;
+                    warn!(%error, "cannot show the window's picture");
+                }
+                if let Some(tag) = tag {
+                    report(Fate::Unshown(tag));
+                }
+            }
+        }
+    }
+}
+
+impl Renderer {
     /// Takes `picture` as the one drawn from now on: drawn from its pixel
     /// buffer where it has one, and uploaded otherwise.
-    pub fn take(&mut self, picture: DecodedPicture) {
+    fn take(&mut self, picture: DecodedPicture) {
         match picture {
             DecodedPicture::Memory(frame) => self.upload(&frame),
             DecodedPicture::PixelBuffer(picture) => {
@@ -534,7 +665,7 @@ impl MetalVideo {
     }
 
     /// Takes `frame` as the picture drawn from now on.
-    pub fn upload(&mut self, frame: &Yuv420Frame) {
+    fn upload(&mut self, frame: &Yuv420Frame) {
         let luma_size = (frame.width(), frame.height());
         let chroma_size = (frame.chroma_width(), frame.chroma_height());
         // A frame of another size needs textures of its size.
@@ -568,32 +699,16 @@ impl MetalVideo {
         self.shown = Some(Shown::Uploaded);
     }
 
-    /// Draws the picture at `picture` and `overlay` over it in a drawable of
-    /// `size` pixels, `scale` of them to a point of the window, black around
-    /// them, and presents it; or puts the drawing off while the one before
-    /// it waits to reach the screen.
-    pub fn draw(
+    /// Draws `scene` into `drawable`, black around the picture, and presents
+    /// it.
+    fn draw(
         &mut self,
-        size: (u32, u32),
-        scale: f64,
-        picture: Option<PixelRect>,
-        overlay: Option<Overlay<'_>>,
-    ) -> Result<Drawing, String> {
-        if self.must_wait() {
-            return Ok(Drawing::Deferred);
-        }
-        fit_layer(&self.root, &self.layer, scale);
-        let drawable_size = CGSize::new(f64::from(size.0), f64::from(size.1));
-        if self.layer.drawableSize() != drawable_size {
-            self.layer.setDrawableSize(drawable_size);
-        }
-        if let Some(overlay) = overlay {
+        drawable: &ProtocolObject<dyn CAMetalDrawable>,
+        scene: &Scene,
+    ) -> Result<(), String> {
+        if let Some(overlay) = &scene.overlay {
             self.take_overlay(overlay);
         }
-        let drawable = self
-            .layer
-            .nextDrawable()
-            .ok_or_else(|| "no drawable is free".to_owned())?;
         let pass = MTLRenderPassDescriptor::renderPassDescriptor();
         // SAFETY: a render pass has a first colour attachment.
         let attachment = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -616,10 +731,10 @@ impl MetalVideo {
         let planes = self.newest.and_then(|newest| self.plane_sets.get(newest));
         let pixel_buffer = self.pixel_buffers.back();
         if let (Some(rect), Some(Shown::PixelBuffer), Some(textures)) =
-            (picture, self.shown, pixel_buffer)
+            (scene.picture, self.shown, pixel_buffer)
         {
             encoder.setRenderPipelineState(&self.nv12);
-            quad(&encoder, rect, size);
+            quad(&encoder, rect, scene.size);
             let extent = NonNull::from(&textures.extent).cast::<c_void>();
             // SAFETY: the textures, sampler and extent are those the shader
             // reads, at the indices it reads them from; the extent is the
@@ -636,10 +751,10 @@ impl MetalVideo {
                 );
             }
         } else if let (Some(rect), Some(Shown::Uploaded), Some(planes)) =
-            (picture, self.shown, planes)
+            (scene.picture, self.shown, planes)
         {
             encoder.setRenderPipelineState(&self.picture);
-            quad(&encoder, rect, size);
+            quad(&encoder, rect, scene.size);
             // SAFETY: the textures and sampler are those the shader reads,
             // at the indices it reads them from.
             unsafe {
@@ -654,7 +769,7 @@ impl MetalVideo {
                 );
             }
         }
-        if let (Some(overlay), Some(texture)) = (overlay, &self.overlay_texture) {
+        if let (Some(overlay), Some(texture)) = (&scene.overlay, &self.overlay_texture) {
             encoder.setRenderPipelineState(&self.overlay);
             let rect = PixelRect {
                 left: overlay.left,
@@ -662,7 +777,7 @@ impl MetalVideo {
                 width: overlay.width as f64,
                 height: overlay.height as f64,
             };
-            quad(&encoder, rect, size);
+            quad(&encoder, rect, scene.size);
             // SAFETY: as for the picture.
             unsafe {
                 encoder.setFragmentTexture_atIndex(Some(&texture.texture.texture), 0);
@@ -675,23 +790,14 @@ impl MetalVideo {
             }
         }
         encoder.endEncoding();
-        let drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
-        let presents = Arc::clone(&self.presents);
-        let presented = RcBlock::new(move |_drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
-            presents.presented();
-        });
-        self.presents.waiting.fetch_add(1, Ordering::AcqRel);
-        // SAFETY: the block is valid for the call, which copies it, and the
-        // drawable is not presented yet.
-        unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&presented)) };
+        let drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(drawable);
         commands.presentDrawable(drawable);
         commands.commit();
-        self.committed_at = Some(Instant::now());
-        Ok(Drawing::Drawn)
+        Ok(())
     }
 
     /// Uploads `overlay`'s image, if it is not the one uploaded already.
-    fn take_overlay(&mut self, overlay: Overlay<'_>) {
+    fn take_overlay(&mut self, overlay: &Overlay) {
         let size = (overlay.width, overlay.height);
         if overlay.rgba.len() != overlay.width * overlay.height * RGBA_BYTES {
             return;
@@ -706,19 +812,11 @@ impl MetalVideo {
         let Some(texture) = texture(&self.device, MTLPixelFormat::RGBA8Unorm, size) else {
             return;
         };
-        fill(&texture, overlay.rgba, RGBA_BYTES);
+        fill(&texture, &overlay.rgba, RGBA_BYTES);
         self.overlay_texture = Some(OverlayTexture {
             texture,
-            rgba: overlay.rgba.to_vec(),
+            rgba: Arc::clone(&overlay.rgba),
         });
-    }
-}
-
-impl Drop for MetalVideo {
-    fn drop(&mut self) {
-        if let Some(link) = &self.frame_rate_link {
-            link.invalidate();
-        }
     }
 }
 

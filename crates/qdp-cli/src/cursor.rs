@@ -1,6 +1,8 @@
 //! The host's cursor images, scaled to the window's picture and drawn into
 //! it when the window cannot use them as its pointer.
 
+use std::sync::Arc;
+
 use qdp::message::CursorImage;
 
 /// The bytes per RGBA pixel.
@@ -22,8 +24,9 @@ pub struct ScaledCursor {
     pub height: usize,
     /// The hotspot's column and row.
     pub hotspot: (usize, usize),
-    /// RGBA pixels with straight alpha, row by row.
-    pub rgba: Vec<u8>,
+    /// RGBA pixels with straight alpha, row by row, shared with the drawing
+    /// that shows them.
+    pub rgba: Arc<[u8]>,
 }
 
 impl ScaledCursor {
@@ -93,7 +96,7 @@ impl ScaledCursor {
                 hotspot(image.hotspot_x, source_width, width),
                 hotspot(image.hotspot_y, source_height, height),
             ),
-            rgba,
+            rgba: rgba.into(),
         }
     }
 

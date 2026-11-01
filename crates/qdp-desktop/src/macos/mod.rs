@@ -18,7 +18,7 @@ mod pen;
 #[cfg(feature = "audio")]
 pub use audio::MacDesktopAudio;
 pub use capture::MacScreenCapture;
-pub use metal_video::{Drawing, MetalVideo, Overlay, PixelRect};
+pub use metal_video::{Fate, MetalVideo, Overlay, PixelRect, Scene};
 
 /// Returns the desktop's sound, captured with ScreenCaptureKit.
 #[cfg(feature = "audio")]
