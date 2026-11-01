@@ -45,8 +45,8 @@ qdp-codec.workspace = true
 qdp-runtime.workspace = true
 tracing.workspace = true
 
-# Android has no clipboard arboard reaches.
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# Android and iOS have no clipboard arboard reaches.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -65,21 +65,24 @@ wl-clipboard-rs.workspace = true
 x11rb.workspace = true
 zbus = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-block2.workspace = true
+# Metal drawing, on Macs and iOS devices.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2.workspace = true
-objc2-app-kit.workspace = true
-objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
-objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 objc2-foundation.workspace = true
 objc2-metal.workspace = true
 objc2-quartz-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-audio-types.workspace = true
+objc2-core-media.workspace = true
 objc2-screen-capture-kit.workspace = true
 
-[target.'cfg(any(target_os = "macos", windows, target_os = "android"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios", windows, target_os = "android"))'.dependencies]
 cpal = { workspace = true, optional = true }
 
 # On Android, cpal's real-time feature opens AAudio streams in their

@@ -195,6 +195,12 @@ impl Session {
         self.events.clone()
     }
 
+    /// Returns the host's cursor as the session keeps it, for a presenter
+    /// that draws it.
+    pub fn shared_cursor(&self) -> SharedCursor {
+        Arc::clone(&self.cursor)
+    }
+
     /// Returns the host's cursor image, or `None` while it is hidden.
     pub fn cursor(&self) -> Option<CursorImage> {
         self.cursor

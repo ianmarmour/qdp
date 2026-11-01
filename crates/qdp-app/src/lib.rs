@@ -9,7 +9,10 @@
 //!   and its cursor, pointer mode and statistics to the app.
 //! - [`settings`] reads what the app connects with.
 //! - [`gamepad`] converts a gamepad's state to QDP's report.
+//! - [`cursor`] scales the host's cursor images to the picture, for the
+//!   clients that draw them, the desktop client among them.
 
+pub mod cursor;
 pub mod events;
 pub mod gamepad;
 pub mod session;

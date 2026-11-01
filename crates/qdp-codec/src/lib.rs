@@ -41,7 +41,7 @@ mod process_decoder;
 mod sequence;
 #[cfg(target_os = "linux")]
 mod vaapi;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod videotoolbox;
 
 use thiserror::Error;
@@ -69,7 +69,7 @@ pub use process_decoder::{DecoderCommand, ProcessDecoder, serve_decoder, serve_d
 pub use sequence::{ColorDescription, SequenceHeader};
 #[cfg(target_os = "linux")]
 pub use vaapi::VaapiEncoder;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use videotoolbox::PixelBufferPicture;
 
 /// An error from encoding or decoding.
