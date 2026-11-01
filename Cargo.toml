@@ -78,6 +78,8 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "rin
 # Opus audio, in pure Rust. It decodes bit-exactly as libopus does and
 # interoperates with it both ways.
 rusty-opus = { version = "1.0.2", default-features = false }
+# P-256 arithmetic for SPAKE2 pairing, which ring does not expose.
+p256 = { version = "0.13.2", default-features = false, features = ["arithmetic"] }
 ring = { version = "0.17.14", default-features = false }
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
 # Software drawing into the window; X11 and Wayland libraries are loaded at

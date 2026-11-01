@@ -11,6 +11,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+p256.workspace = true
 ring.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
