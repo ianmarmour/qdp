@@ -128,8 +128,10 @@ reach the encoder's input, encode and read back.
 
 Clients decode on the GPU where they can: on Macs with hardware AV1 decoding
 (Apple M3 and newer) through VideoToolbox, falling back to software decoding
-elsewhere or if the hardware cannot handle a stream. `--decoder software` or
-`--decoder hardware` forces one. `qdp connect --decoder-process on` decodes in
+elsewhere or if the hardware cannot handle a stream. On a Mac, the window
+draws each picture with Metal straight from the buffer VideoToolbox decoded
+it into, so that no pixel is copied between decoding and the screen.
+`--decoder software` or `--decoder hardware` forces one. `qdp connect --decoder-process on` decodes in
 a separate process, so that a decoder bug a malicious host's stream exploits
 cannot reach the session's keys, clipboard or input; a decoder process that
 fails is replaced. It costs some speed, since each picture is copied between

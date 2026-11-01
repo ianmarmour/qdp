@@ -10,7 +10,7 @@ use qdp::message::{
 };
 #[cfg(target_os = "linux")]
 use qdp_codec::DmaBufFrame;
-use qdp_codec::Yuv420Frame;
+use qdp_codec::{DecodedPicture, Yuv420Frame};
 
 use tokio::sync::Notify;
 
@@ -615,10 +615,12 @@ pub struct CursorWarp {
 
 /// Receives the frames a client decodes, such as a window that shows them.
 pub trait FrameSink {
-    /// Shows a decoded frame and says whether to keep streaming. The sink
-    /// takes the frame, so that one that keeps it to draw later need not
-    /// copy it.
-    fn present(&mut self, frame: Yuv420Frame, info: FrameInfo) -> SinkControl;
+    /// Shows a decoded picture and says whether to keep streaming. The sink
+    /// takes the picture, so that one that keeps it to draw later need not
+    /// copy it; a hardware decoder's picture may be in GPU memory, which a
+    /// sink that needs it in memory copies from with
+    /// [`DecodedPicture::with_memory`].
+    fn present(&mut self, frame: DecodedPicture, info: FrameInfo) -> SinkControl;
 
     /// Returns when the sink shows the frames it is given.
     fn presentation_timing(&self) -> PresentationTiming {

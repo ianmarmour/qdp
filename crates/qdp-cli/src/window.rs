@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use qdp::message::{CursorImage, DesktopRect, FrameNumber, PointerKind, PointerMode, StreamId};
-use qdp_codec::Yuv420Frame;
+use qdp_codec::DecodedPicture;
 use qdp_desktop::{DeviceSelector, Microphone, PassthroughCapture, TouchpadCapture};
 use qdp_runtime::{
     CursorWarp, DisplaySize, DisplayTiming, Focus, FrameInfo, FrameSink, InputHandle, PenInput,
@@ -113,7 +113,7 @@ struct FrameId {
 #[derive(Debug, Default)]
 struct SlotState {
     /// The newest frame, waiting to be drawn.
-    waiting: Option<(Yuv420Frame, FrameId)>,
+    waiting: Option<(DecodedPicture, FrameId)>,
     /// When the frames drawn or replaced since the session last asked
     /// reached the screen.
     presentations: Vec<Presentation>,
@@ -137,7 +137,7 @@ impl FrameSlot {
     }
 
     /// Puts a frame in the slot, replacing one not drawn yet.
-    fn put(&self, frame: Yuv420Frame, info: &FrameInfo) {
+    fn put(&self, frame: DecodedPicture, info: &FrameInfo) {
         let id = FrameId {
             stream_id: info.stream_id,
             frame_number: info.frame_number,
@@ -149,7 +149,7 @@ impl FrameSlot {
     }
 
     /// Takes the frame waiting to be drawn.
-    fn take(&self) -> Option<(Yuv420Frame, FrameId)> {
+    fn take(&self) -> Option<(DecodedPicture, FrameId)> {
         self.lock().waiting.take()
     }
 
@@ -251,7 +251,7 @@ impl WindowSink {
 }
 
 impl FrameSink for WindowSink {
-    fn present(&mut self, frame: Yuv420Frame, info: FrameInfo) -> SinkControl {
+    fn present(&mut self, frame: DecodedPicture, info: FrameInfo) -> SinkControl {
         if self.close.is_closed() {
             return SinkControl::Stop;
         }
@@ -307,7 +307,7 @@ enum Painter {
     Processor(Surface<Rc<Window>, Rc<Window>>),
     /// The GPU, with Metal.
     #[cfg(target_os = "macos")]
-    Metal(qdp_desktop::MetalVideo),
+    Metal(Box<qdp_desktop::MetalVideo>),
 }
 
 /// The application the window's event loop runs.
@@ -920,7 +920,7 @@ impl WindowApp {
         if let Some(metal) = attach_metal(&window) {
             return Ok(Display {
                 window,
-                painter: Painter::Metal(metal),
+                painter: Painter::Metal(Box::new(metal)),
             });
         }
         let surface = Context::new(Rc::clone(&window))
@@ -964,21 +964,25 @@ impl WindowApp {
     /// follows a device the client does not know.
     fn draw(&mut self) {
         let started = Instant::now();
-        let newest = self.slot.take();
-        if let Some((frame, _)) = &newest {
-            let size = (frame.width(), frame.height());
+        let newest = self.slot.take().map(|(frame, id)| {
+            let size = frame.size();
             if self.picture != Some(size) {
                 self.cursor_stale = true;
             }
             self.picture = Some(size);
             match self.display.as_mut().map(|display| &mut display.painter) {
-                Some(Painter::Processor(_)) | None => self.current = Some(yuv420_to_rgb(frame)),
+                Some(Painter::Processor(_)) | None => match frame.with_memory(yuv420_to_rgb) {
+                    Ok(rgb) => self.current = Some(rgb),
+                    Err(error) => warn!(%error, "cannot read the decoded picture"),
+                },
+                // A picture the GPU holds is drawn where it is.
                 #[cfg(target_os = "macos")]
-                Some(Painter::Metal(metal)) => metal.upload(frame),
+                Some(Painter::Metal(metal)) => metal.take(frame),
             }
-        }
+            id
+        });
         let presented_at = self.show();
-        if let Some((_, id)) = newest {
+        if let Some(id) = newest {
             self.slot.shown(id, presented_at);
             if let Some(presented_at) = presented_at {
                 self.draw_stats.drew(

@@ -6,7 +6,8 @@ use tracing::{info, warn};
 use crate::DmaBufFrame;
 use crate::decoder::SOFTWARE_DECODER;
 use crate::{
-    Av1Decoder, Av1Encoder, CodecError, EncodedFrame, EncoderSettings, KeyFrameRequest, Yuv420Frame,
+    Av1Decoder, Av1Encoder, CodecError, DecodedPicture, EncodedFrame, EncoderSettings,
+    KeyFrameRequest, Yuv420Frame,
 };
 
 /// An AV1 encoder producing temporal units in the form QDP sends.
@@ -56,8 +57,15 @@ pub trait VideoEncoder {
 /// An AV1 decoder for QDP streams, in which each temporal unit holds one shown
 /// frame and so gives one picture.
 pub trait VideoDecoder: Send {
-    /// Decodes one temporal unit.
+    /// Decodes one temporal unit into memory.
     fn decode(&mut self, temporal_unit: &[u8]) -> Result<Yuv420Frame, CodecError>;
+
+    /// Decodes one temporal unit, leaving the picture where the decoder
+    /// put it: in GPU memory, for a hardware decoder whose pictures a
+    /// window can draw from there, or in memory.
+    fn decode_picture(&mut self, temporal_unit: &[u8]) -> Result<DecodedPicture, CodecError> {
+        self.decode(temporal_unit).map(DecodedPicture::Memory)
+    }
 
     /// Returns which decoder this is, for logs.
     fn description(&self) -> &str;
@@ -171,8 +179,12 @@ struct FallbackDecoder {
 
 impl VideoDecoder for FallbackDecoder {
     fn decode(&mut self, temporal_unit: &[u8]) -> Result<Yuv420Frame, CodecError> {
+        self.decode_picture(temporal_unit)?.into_memory()
+    }
+
+    fn decode_picture(&mut self, temporal_unit: &[u8]) -> Result<DecodedPicture, CodecError> {
         if let Some(hardware) = &mut self.hardware {
-            match hardware.decode(temporal_unit) {
+            match hardware.decode_picture(temporal_unit) {
                 Err(CodecError::HardwareUnavailable(reason)) => {
                     warn!(reason, "decoding in software instead of hardware");
                     self.hardware = None;
@@ -184,7 +196,7 @@ impl VideoDecoder for FallbackDecoder {
             Some(software) => software,
             None => self.software.insert(Av1Decoder::new(self.threads)?),
         };
-        software.decode(temporal_unit)
+        software.decode(temporal_unit).map(DecodedPicture::Memory)
     }
 
     fn description(&self) -> &str {

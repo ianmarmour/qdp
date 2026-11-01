@@ -17,7 +17,7 @@ use qdp::message::{
     TouchpadContactFlags, TouchpadInfo, TouchpadReport,
 };
 use qdp::wire::{SignedVarInt, VarInt};
-use qdp_codec::{CodecPreference, Yuv420Frame};
+use qdp_codec::{CodecPreference, DecodedPicture};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdentity};
 use qdp_runtime::{
     ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, CapturedFrame, ClientAudio,
@@ -297,7 +297,8 @@ impl InputInjector for Recorder {
 }
 
 impl FrameSink for Collector {
-    fn present(&mut self, frame: Yuv420Frame, info: FrameInfo) -> SinkControl {
+    fn present(&mut self, frame: DecodedPicture, info: FrameInfo) -> SinkControl {
+        let frame = frame.into_memory().unwrap();
         // The host sends every frame it captures, so frame number n shows pattern
         // frame n - 1.
         let number = info.frame_number.0.into_inner();
@@ -649,7 +650,7 @@ struct SlowSink {
 }
 
 impl FrameSink for SlowSink {
-    fn present(&mut self, _frame: Yuv420Frame, info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, info: FrameInfo) -> SinkControl {
         std::thread::sleep(SLOW_PRESENT);
         self.latencies.push(info.latency);
         if self.latencies.len() >= SLOW_FRAMES {
@@ -1267,7 +1268,7 @@ struct ClipboardWatcher {
 }
 
 impl FrameSink for ClipboardWatcher {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         if !self.reached_host && self.host.get().as_deref() == Some("copied on the client") {
             self.reached_host = true;
@@ -1486,7 +1487,7 @@ struct AudioWatcher {
 }
 
 impl FrameSink for AudioWatcher {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         let played = self.speakers.recorded.lock().unwrap().len();
         if played >= SAMPLE_RATE as usize * 3 / 2 || self.frames >= CLIPBOARD_FRAMES {
@@ -1572,7 +1573,7 @@ struct MicrophoneSwitch {
 }
 
 impl FrameSink for MicrophoneSwitch {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         let heard = self.host_microphone.recorded.lock().unwrap().len();
         if self.frames == INPUT_FRAME {
@@ -1703,7 +1704,7 @@ struct ModeWatcher {
 }
 
 impl FrameSink for ModeWatcher {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         if let Some(frames) = &mut self.frames_since {
             *frames += 1;
@@ -1757,7 +1758,7 @@ struct ConfinementWatcher {
 }
 
 impl FrameSink for ConfinementWatcher {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         if self.confinements.iter().any(Option::is_some) || self.frames >= CLIPBOARD_FRAMES {
             SinkControl::Stop
@@ -1978,7 +1979,7 @@ struct GamepadWatcher {
 }
 
 impl FrameSink for GamepadWatcher {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         if self.frames == INPUT_FRAME {
             assert!(self.input.send(UserInput::GamepadConnected {
@@ -2214,7 +2215,7 @@ struct PassthroughWatcher {
 }
 
 impl FrameSink for PassthroughWatcher {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         if self.frames == INPUT_FRAME {
             for (slot, name, descriptor) in [
@@ -2380,7 +2381,7 @@ struct TouchpadWatcher {
 }
 
 impl FrameSink for TouchpadWatcher {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         if self.frames == INPUT_FRAME {
             assert!(self.input.send(UserInput::TouchpadConnected {
@@ -2493,7 +2494,7 @@ struct Endless {
 }
 
 impl FrameSink for Endless {
-    fn present(&mut self, _frame: Yuv420Frame, _info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames.fetch_add(1, Ordering::Relaxed);
         SinkControl::Continue
     }
@@ -2512,7 +2513,7 @@ struct LaterSink {
 }
 
 impl FrameSink for LaterSink {
-    fn present(&mut self, _frame: Yuv420Frame, info: FrameInfo) -> SinkControl {
+    fn present(&mut self, _frame: DecodedPicture, info: FrameInfo) -> SinkControl {
         self.given.push(info);
         self.count += 1;
         if self.count >= FRAMES {

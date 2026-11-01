@@ -40,8 +40,8 @@ objc2-metal = { version = "0.3.2", default-features = false, features = ["std", 
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CADisplayLink", "CAFrameRateRange", "CALayer", "CAMetalLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-graphics", "objc2-core-media"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-audio-types", "objc2-core-video"] }
-objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
-objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTUtilities", "objc2-core-media", "objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVReturn", "objc2", "objc2-metal"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTUtilities", "objc2-core-media", "objc2-core-video"] }
 qdp = { path = "crates/qdp" }
 qdp-codec = { path = "crates/qdp-codec" }
 qdp-desktop = { path = "crates/qdp-desktop", default-features = false }
