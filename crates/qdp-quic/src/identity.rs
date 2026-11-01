@@ -75,6 +75,26 @@ impl KeyPin {
         let parsed = rustls::server::ParsedCertificate::try_from(certificate)?;
         Ok(Self::of_spki(parsed.subject_public_key_info().as_ref()))
     }
+
+    /// Reads a pin as `qdp pin` prints it: 64 hexadecimal digits, in either
+    /// case, optionally with colons between them. Returns `None` for anything
+    /// else.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let digits: Vec<u8> = text.bytes().filter(|&byte| byte != b':').collect();
+        if digits.len() != PIN_LENGTH * 2 || !digits.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let mut pin = [0; PIN_LENGTH];
+        for (byte, pair) in pin.iter_mut().zip(digits.chunks_exact(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(Self(pin))
+    }
+
+    /// Returns the pin as 64 lowercase hexadecimal digits.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
 }
 
 /// Shows the pin in hexadecimal, as a fingerprint a user can compare.
@@ -206,6 +226,17 @@ fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_and_writes_pins_in_hex() {
+        let text = "ab".repeat(PIN_LENGTH);
+        let pin = KeyPin::from_hex(&text).unwrap();
+        assert_eq!(pin, KeyPin([0xab; PIN_LENGTH]));
+        assert_eq!(pin.to_hex(), text);
+        assert_eq!(KeyPin::from_hex(&"AB:".repeat(PIN_LENGTH)), Some(pin));
+        assert_eq!(KeyPin::from_hex("ab"), None);
+        assert_eq!(KeyPin::from_hex(&"+a".repeat(PIN_LENGTH)), None);
+    }
+
     use super::*;
 
     /// A new identity is kept and the same one is loaded on the next run;

@@ -8,6 +8,7 @@ members = [
     "crates/qdp-cli",
     "crates/qdp-codec",
     "crates/qdp-desktop",
+    "crates/qdp-gateway",
     "crates/qdp-gtk",
     "crates/qdp-quic",
     "crates/qdp-runtime",
@@ -38,6 +39,15 @@ futures-lite = { version = "2.6.1", default-features = false, features = ["std"]
 # libudev's development files.
 gilrs = { version = "0.11.2", default-features = false, features = ["wgi"] }
 libc = { version = "0.2.172", default-features = false }
+# LDAP, for the gateway to check users against an organization's directory,
+# Active Directory included, over TLS with rustls.
+ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
+# The gateway's configuration file, in TOML.
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+# The system's certificate authorities, which the gateway checks the
+# directory's certificate with unless configured with the organization's.
+rustls-native-certs = { version = "0.8.5", default-features = false }
 # GTK 4 and libadwaita, for the Linux app, at the versions of Ubuntu 24.04
 # (GTK 4.14, libadwaita 1.5) and later.
 gtk = { package = "gtk4", version = "0.11.5", default-features = false, features = ["v4_14"] }

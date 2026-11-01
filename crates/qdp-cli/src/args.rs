@@ -171,6 +171,7 @@ const MAX_RESUME_SECONDS: u64 = 86_400;
 pub const DEFAULT_SERVER_NAME: &str = "qdp-host";
 
 /// The length of a key pin in hexadecimal digits.
+#[cfg(test)]
 const PIN_HEX_LENGTH: usize = 64;
 
 /// What the user asked for.
@@ -538,16 +539,8 @@ fn parse_resolution(text: &str) -> Result<(u32, u32), ArgsError> {
 
 /// Parses a key pin written as 64 hexadecimal digits.
 pub fn parse_pin(text: &str) -> Result<KeyPin, ArgsError> {
-    let invalid = || error("a pin is 64 hexadecimal digits, as `qdp pin` prints");
-    let digits: String = text.chars().filter(|character| *character != ':').collect();
-    if digits.len() != PIN_HEX_LENGTH || !digits.is_ascii() {
-        return Err(invalid());
-    }
-    let mut pin = [0; PIN_HEX_LENGTH / 2];
-    for (index, byte) in pin.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&digits[index * 2..index * 2 + 2], 16).map_err(|_| invalid())?;
-    }
-    Ok(KeyPin(pin))
+    KeyPin::from_hex(text)
+        .ok_or_else(|| error("a pin is 64 hexadecimal digits, as `qdp pin` prints"))
 }
 
 /// Resolves the host's address: an IP address or a host name, with or without a
@@ -575,7 +568,7 @@ pub fn resolve_address(text: &str) -> Result<SocketAddr, ArgsError> {
 
 /// Formats a key pin as 64 hexadecimal digits.
 pub fn format_pin(pin: KeyPin) -> String {
-    pin.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    pin.to_hex()
 }
 
 /// Parses the command line, without the program name.
