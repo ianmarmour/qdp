@@ -28,7 +28,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use qdp::message::PointerKind;
+use qdp::message::{PointerKind, PointerMode};
 use qdp_quic::KeyPin;
 use qdp_runtime::{LatencyStages, WarpKind};
 
@@ -67,8 +67,9 @@ pub enum Event {
         kind: WarpKind,
     },
     /// The host's pointer mode changed: in relative mode the app captures
-    /// the pointer.
-    PointerMode(PointerKind),
+    /// the pointer, and in absolute mode keeps it in the area the host
+    /// confines it to, if any (Section 8.9). Its line names the mode only.
+    PointerMode(PointerMode),
     /// A gamepad's rumble changed.
     Rumble {
         /// The gamepad's slot.
@@ -155,7 +156,7 @@ impl fmt::Display for Event {
                 };
                 write!(formatter, "warp {x} {y} {kind}")
             }
-            Self::PointerMode(mode) => formatter.write_str(match mode {
+            Self::PointerMode(mode) => formatter.write_str(match mode.mode {
                 PointerKind::Absolute => "pointer absolute",
                 PointerKind::Relative => "pointer relative",
             }),
@@ -227,7 +228,10 @@ mod tests {
                 "warp 10.5 20 follow",
             ),
             (
-                Event::PointerMode(PointerKind::Relative),
+                Event::PointerMode(PointerMode {
+                    mode: PointerKind::Relative,
+                    confinement: None,
+                }),
                 "pointer relative",
             ),
             (

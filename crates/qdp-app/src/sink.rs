@@ -7,7 +7,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use qdp::message::{CursorImage, PointerKind, PointerMode};
+use qdp::message::{CursorImage, PointerMode};
 use qdp_codec::DecodedPicture;
 use qdp_runtime::{
     CursorWarp, DisplayTiming, FrameInfo, FrameSink, LatencyStages, Presentation,
@@ -56,7 +56,7 @@ pub struct AppSink<P> {
     /// The size of the last frame, in pixels.
     video: Option<(usize, usize)>,
     /// The host's pointer mode, as last passed on.
-    pointer: Option<PointerKind>,
+    pointer: Option<PointerMode>,
     /// Shows the pictures.
     presenter: P,
     /// The video since the statistics were last sent.
@@ -130,9 +130,9 @@ impl<P: Presenter> FrameSink for AppSink<P> {
     }
 
     fn set_pointer_mode(&mut self, mode: &PointerMode) {
-        if self.pointer != Some(mode.mode) {
-            self.pointer = Some(mode.mode);
-            self.send(Event::PointerMode(mode.mode));
+        if self.pointer != Some(*mode) {
+            self.pointer = Some(*mode);
+            self.send(Event::PointerMode(*mode));
         }
     }
 }
