@@ -282,6 +282,101 @@ only on first use. Hosts MUST rate-limit failures as for every method. How an
 authenticated identity maps to an operating system account and desktop is decided by
 the host.
 
+### 4.4.9 PAIRING (0x06)
+
+Pairing lets a user authorize a new client by typing, once, a short code that the
+host shows, with no key pin, token or password to copy between devices. It
+authenticates both endpoints: the host learns that the client is the one whose user
+can see the host's display, and the client learns that it reached the host showing
+the code, so a client that has not verified the host's key may use it
+([Section 11.1](11-security.md#111-host-authentication)). On success the host
+authorizes the client's certificate key for `CLIENT_CERTIFICATE` in later sessions,
+and the client pins the host's key.
+
+The client MUST present a certificate in the TLS handshake, and a host MUST NOT offer
+`PAIRING` on a connection where the client presented none. A host offers `PAIRING`
+only while pairing is enabled, which an administrator MUST be able to turn off.
+
+**Code.** A pairing code is four decimal digits, chosen uniformly from 0000 to 9999
+with a cryptographically secure random number generator, for example by rejection
+sampling. The host chooses a new code for every exchange; a code is used for one
+exchange only and expires 120 seconds after the host shows it. A guess succeeds with
+probability one in 10,000, which the exchange and the limits below keep from adding
+up: each exchange allows one guess, and the host allows few exchanges.
+
+**Exchange.** The endpoints run SPAKE2 [RFC9382] with the ciphersuite
+`SPAKE2-P256-SHA256-HKDF-HMAC`. The client is party A and the host is party B:
+
+| Step | Message | Auth Data |
+|---|---|---|
+| 1 | `AUTH_START` | Device Name |
+| 2 | `AUTH_CONTINUE` (host) | pB |
+| 3 | `AUTH_CONTINUE` (client) | pA, followed by the client's confirmation cA |
+| 4 | `AUTH_RESULT` | The host's confirmation cB on `SUCCESS`; empty on failure |
+
+```
+PAIRING Start Auth Data {
+  Device Name (String),
+}
+```
+
+- **Device Name**: the client device's name for users, such as "Living room
+  tablet", at most 64 bytes. It is not authenticated and serves only to tell the
+  user which device is asking.
+- **pA**, **pB**: SEC1 uncompressed points of 65 bytes. **cA**, **cB**: HMAC-SHA256
+  outputs of 32 bytes.
+
+On step 1 the host chooses a code and shows it to the user at the host together with
+the Device Name and the client's address, for example in a system notification,
+then chooses y and sends pB. On step 2 the client asks its user for the code shown
+on the host, chooses x and sends pA and cA. The parameters of [RFC9382] are:
+
+- **Identities**: A is the 32-byte key pin of the client's certificate and B the
+  32-byte key pin of the host's certificate (the SHA-256 hash of the
+  SubjectPublicKeyInfo), each as the endpoint observed them in the TLS handshake. A
+  host or client in the middle of the connection holds other keys, so the two
+  endpoints' transcripts differ and the exchange fails.
+- **w**: `OS2IP(HKDF-SHA256(IKM = code, salt = nil, info = "QDP pairing code",
+  L = 40)) mod p`, where the code is its four ASCII digits and p is the order of
+  P-256. No memory-hard function is used: the code is never stored and
+  is used for one exchange, so there is no verifier to guess against offline.
+- **AAD**: the 32-byte `tls-exporter` channel binding of
+  [Section 4.4.4](#444-scram_sha_256_plus-0x03), which binds the confirmations to
+  the connection.
+
+Endpoints MUST reject a pA or pB that is not a point of P-256 or is the point at
+infinity, and MUST abort if K is the point at infinity. Confirmations are compared
+in constant time.
+
+The host:
+
+- verifies cA before sending anything that depends on the code, and sends cB only
+  on success. If cA does not match, the code has expired, or the client sent
+  something else, it answers `FAILED_RETRY`; the code is used up, and another
+  attempt starts again at step 1 with a new code;
+- allows at most one pairing exchange at a time, answering `FAILED_RETRY` to a
+  pairing attempt while another is in progress;
+- after three consecutive failed exchanges, MUST refuse pairing for at least five
+  minutes, and MUST double that time after each further failure, until an exchange
+  succeeds or the host's user resets it. A user who mistypes waits minutes, while an
+  attacker who cannot see the host's display gets about twenty guesses in a year,
+  each of which the host shows to its user: a chance of about 0.2%;
+- on success, records the client's key pin, with its Device Name, as authorized for
+  `CLIENT_CERTIFICATE`, and SHOULD let the user list paired clients and remove
+  them.
+
+The client:
+
+- MAY accept the host's certificate without verifying it, since the exchange
+  authenticates the host, but MUST still verify the TLS handshake's signatures;
+- MUST NOT send any other credential, and MUST NOT pipeline messages
+  ([Section 4.4.6](#446-pipelining)) after step 3, until it has verified cB, and
+  MUST close the connection with `QDP_AUTH_FAILED` if cB does not match;
+- on success, pins the host's key ([Section 11.1](11-security.md#111-host-authentication))
+  and SHOULD authenticate later connections to the host with `CLIENT_CERTIFICATE`;
+- keeps its private key in the platform's protected storage where it can
+  ([Section 11.2](11-security.md#112-client-authentication)).
+
 ## 4.5 Configuration
 
 In the `CONFIGURING` state the client MUST send `DISPLAY_REQUEST`

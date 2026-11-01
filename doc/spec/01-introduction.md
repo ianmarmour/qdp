@@ -270,6 +270,7 @@ greasing, as in HTTP/3.
 - **[HID-CLASS]** USB Implementers Forum, *Device Class Definition for Human
   Interface Devices (HID)*, version 1.11 (report descriptors, report IDs, and
   input, output and feature reports).
+- **[RFC2104]** HMAC: Keyed-Hashing for Message Authentication.
 - **[RFC2119]** Key words for use in RFCs to Indicate Requirement Levels.
 - **[RFC3190]** RTP Payload Format for 12-bit DAT Audio and 20- and 24-bit
   Linear Sampled Audio (L24).
@@ -278,8 +279,11 @@ greasing, as in HTTP/3.
   Certificate Revocation List (CRL) Profile (`SubjectPublicKeyInfo`).
 - **[RFC5646]** Tags for Identifying Languages (BCP 47).
 - **[RFC5802]** Salted Challenge Response Authentication Mechanism (SCRAM).
+- **[RFC5869]** HMAC-based Extract-and-Expand Key Derivation Function (HKDF).
 - **[RFC5905]** Network Time Protocol Version 4.
 - **[RFC6716]** Definition of the Opus Audio Codec.
+- **[RFC6762]** Multicast DNS.
+- **[RFC6763]** DNS-Based Service Discovery.
 - **[RFC6838]** Media Type Specifications and Registration Procedures.
 - **[RFC7301]** Transport Layer Security (TLS) Application-Layer Protocol
   Negotiation Extension (ALPN).
@@ -295,6 +299,8 @@ greasing, as in HTTP/3.
 - **[RFC9002]** QUIC Loss Detection and Congestion Control.
 - **[RFC9221]** An Unreliable Datagram Extension to QUIC.
 - **[RFC9266]** Channel Bindings for TLS 1.3 (`tls-exporter`).
+- **[RFC9382]** SPAKE2, a Password-Authenticated Key Exchange (the
+  `SPAKE2-P256-SHA256-HKDF-HMAC` ciphersuite, with its M and N for P-256).
 - **[RFC9525]** Service Identity in TLS.
 - **[USB2]** USB Implementers Forum, *Universal Serial Bus Specification*,
   revision 2.0 (the `idVendor`, `idProduct` and `bcdDevice` fields of the device
