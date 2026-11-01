@@ -21,6 +21,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 
 /** The connection screen: the host to stream from and how. */
 class MainActivity : Activity() {
@@ -36,6 +37,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Native.init(applicationContext)
+        takeLink(intent)
         val settings = Settings.load(this)
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -88,6 +90,24 @@ class MainActivity : Activity() {
             }
         }
         setContentView(scroll)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (takeLink(intent)) {
+            recreate()
+        }
+    }
+
+    /** Keeps the settings a connection link in [intent] gives, returning whether it had one. */
+    private fun takeLink(intent: Intent?): Boolean {
+        val link = intent?.data ?: return false
+        val settings = ConnectionLink.apply(link, Settings.load(this)) ?: return false
+        settings.save(this)
+        // The link is used once, not again when the screen is recreated.
+        intent.data = null
+        Toast.makeText(this, "Filled in from the link", Toast.LENGTH_SHORT).show()
+        return true
     }
 
     /** Returns `value` density-independent pixels in pixels. */
