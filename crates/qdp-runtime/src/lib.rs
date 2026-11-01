@@ -44,6 +44,7 @@ mod host_passthrough;
 mod layout;
 mod lock_keys;
 mod media;
+mod pairing;
 mod rate_control;
 mod recovery_bases;
 mod resumption;
@@ -87,6 +88,9 @@ pub use media::{
     PointerPosition, Presentation, PresentationTiming, RefreshMode, SinkControl, TestPattern,
     WantedDisplay, WarpKind, changed_blocks,
 };
+pub use pairing::{
+    CODE_LIFETIME, CodeFuture, Pairing, PairingEvent, PairingOutcome, PairingPrompt, PairingRefusal,
+};
 pub use resumption::{DEFAULT_RESUMPTION_LIFETIME, ResumptionSlot};
 
 /// An error that ends a session.
@@ -116,6 +120,15 @@ pub enum RuntimeError {
     /// The host rejected the client's credentials.
     #[error("authentication failed: {0}")]
     AuthenticationFailed(String),
+    /// The code typed to pair was not four digits.
+    #[error("a pairing code is four digits")]
+    InvalidPairingCode,
+    /// The user declined to type the code to pair.
+    #[error("pairing was cancelled")]
+    PairingCancelled,
+    /// The client pairs, but has no prompt to ask its user for the code.
+    #[error("pairing needs a prompt for the code")]
+    NoPairingPrompt,
     /// A user name cannot be prepared with RFC 8265.
     #[error("the user name contains disallowed characters")]
     InvalidUsername,
@@ -152,6 +165,9 @@ impl RuntimeError {
             | Self::NoCommonAuthMethod
             | Self::UnexpectedAuthStep
             | Self::AuthenticationFailed(_)
+            | Self::InvalidPairingCode
+            | Self::PairingCancelled
+            | Self::NoPairingPrompt
             | Self::InvalidUsername => ErrorCode::AUTH_FAILED,
             Self::ProtocolViolation(_) => ErrorCode::PROTOCOL_VIOLATION,
             _ => ErrorCode::INTERNAL_ERROR,

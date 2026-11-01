@@ -44,6 +44,7 @@ use crate::clipboard::{
 use crate::decode_thread::DecodeThread;
 use crate::lock_keys::LockSync;
 use crate::media::{CursorWarp, FrameInfo, FrameSink, PresentationTiming, SinkControl, WarpKind};
+use crate::pairing::PairingPrompt;
 use crate::resumption::ResumptionSlot;
 use crate::stream_format::StreamFormat;
 use crate::{ClientCredentials, RuntimeError, close_on_error};
@@ -119,6 +120,9 @@ pub struct ClientOptions {
     /// which it can reconnect without the user's credentials (Section
     /// 4.4.7).
     pub resumption: ResumptionSlot,
+    /// Asks the user for the code the host shows, for credentials that pair
+    /// (Section 4.4.9).
+    pub pairing_prompt: Option<PairingPrompt>,
 }
 
 /// What happened during one session.
@@ -361,6 +365,7 @@ async fn run_session(
     audio: ClientAudio,
 ) -> Result<ClientSummary, RuntimeError> {
     let binding = connection.channel_binding()?;
+    let host_key = connection.peer_key_pin();
     // The session starts from the client's devices, focus and display as
     // they are now, which matters when it resumes an earlier one.
     let mut display_size = options.display;
@@ -378,7 +383,7 @@ async fn run_session(
     let hello = client_hello(options, directions, &audio);
     let audio_request = audio.request();
     let mut driver = ClientDriver::client(connection, hello)?;
-    let mut auth = ClientAuthExchange::new(options.credentials.clone(), binding);
+    let mut auth = ClientAuthExchange::new(options.credentials.clone(), binding, host_key);
     let mut display_config = None;
     let mut early_messages = Vec::new();
     let (display, first_request) = DisplayRequests::start(display_size, Instant::now());
@@ -390,12 +395,28 @@ async fn run_session(
                 driver.session().start_auth(method, auth_data)?;
             }
             ClientEvent::AuthContinue { auth_data } => {
-                let reply = auth.continue_exchange(&auth_data)?;
+                let reply = if auth.awaits_pairing_code() {
+                    // The host shows the code now; the user reads it there.
+                    let prompt = options
+                        .pairing_prompt
+                        .as_ref()
+                        .ok_or(RuntimeError::NoPairingPrompt)?;
+                    let code = prompt.ask().await.ok_or(RuntimeError::PairingCancelled)?;
+                    auth.continue_pairing(&auth_data, &code)?
+                } else {
+                    auth.continue_exchange(&auth_data)?
+                };
                 driver.session().continue_auth(reply)?;
             }
             ClientEvent::AuthResult(result) => {
                 // A failure closes the connection with QDP_AUTH_FAILED.
                 auth.finish(&result)?;
+                if let (Some(host_key), Some(prompt)) =
+                    (auth.paired_host(), &options.pairing_prompt)
+                {
+                    info!("paired with the host");
+                    prompt.paired(host_key);
+                }
                 let session = driver.session();
                 session.send(&ControlMessage::DisplayRequest(first_request.clone()))?;
                 for (device_id, kind, name) in STANDARD_DEVICES {

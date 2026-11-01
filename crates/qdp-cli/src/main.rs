@@ -704,6 +704,7 @@ async fn receive(
                 decoder_process: decoder_process(args)?,
                 keyboard_info: qdp_desktop::keyboard_info(),
                 resumption: resumption.clone(),
+                pairing_prompt: None,
             };
             let error = match connect_once(args, &endpoint, &options, sink, input.as_mut()).await {
                 Ok(summary) => return Ok(summary),

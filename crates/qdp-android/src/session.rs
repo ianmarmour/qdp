@@ -251,6 +251,7 @@ async fn receive(
                 decoder_process: None,
                 keyboard_info: None,
                 resumption: resumption.clone(),
+                pairing_prompt: None,
             };
             let attempt = connect_once(
                 address, config, &endpoint, &options, sink, &mut input, events,

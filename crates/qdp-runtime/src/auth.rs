@@ -1,7 +1,10 @@
 //! Authentication policy for hosts and credentials for clients (Section 4.4).
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+use qdp::auth::pairing::{ClientPairing, HostPairing, PairingCode, PairingKeys, PairingStart};
 
 use qdp::auth::precis::prepare_username;
 use qdp::auth::scram::{
@@ -15,6 +18,7 @@ use tracing::{debug, info};
 
 use crate::RuntimeError;
 use crate::admission::AdmissionTicket;
+use crate::pairing::{CODE_LIFETIME, Pairing, PairingOutcome, PairingSlot};
 use crate::resumption::{
     ClientIdentity, DEFAULT_RESUMPTION_LIFETIME, IssuedToken, ResumptionTokens,
 };
@@ -64,8 +68,11 @@ pub struct HostAuthenticator {
     /// SCRAM credentials by prepared user name.
     users: HashMap<String, ScramCredentials>,
     /// The keys of the client certificates accepted with the
-    /// `CLIENT_CERTIFICATE` method.
-    client_keys: Vec<KeyPin>,
+    /// `CLIENT_CERTIFICATE` method, which clones share, so that a client that
+    /// pairs in one session is accepted in the next.
+    client_keys: Arc<Mutex<Vec<KeyPin>>>,
+    /// The pairing policy, if the host pairs with clients (Section 4.4.9).
+    pairing: Option<Pairing>,
     /// The secret from which credentials for unknown user names derive.
     secret: [u8; HOST_SECRET_LENGTH],
     /// The resumption tokens issued to sessions (Section 4.4.7).
@@ -83,7 +90,8 @@ impl HostAuthenticator {
         Ok(Self {
             tokens: Vec::new(),
             users: HashMap::new(),
-            client_keys: Vec::new(),
+            client_keys: Arc::default(),
+            pairing: None,
             secret: random_bytes()?,
             resumption: ResumptionTokens::default(),
             resumption_lifetime: Some(DEFAULT_RESUMPTION_LIFETIME),
@@ -105,7 +113,34 @@ impl HostAuthenticator {
     /// Accepts clients presenting a certificate whose key hashes to `pin`,
     /// with the `CLIENT_CERTIFICATE` method (Section 4.4.2).
     pub fn add_client_key(&mut self, pin: KeyPin) {
-        self.client_keys.push(pin);
+        self.authorize_client_key(pin);
+    }
+
+    /// Pairs with clients as `pairing` decides, accepting each paired
+    /// client's key from then on (Section 4.4.9).
+    pub fn enable_pairing(&mut self, pairing: Pairing) {
+        self.pairing = Some(pairing);
+    }
+
+    /// Accepts `pin` with `CLIENT_CERTIFICATE`, in every clone.
+    fn authorize_client_key(&self, pin: KeyPin) {
+        let mut keys = self.client_keys();
+        if !keys.contains(&pin) {
+            keys.push(pin);
+        }
+    }
+
+    /// Locks the accepted client keys.
+    fn client_keys(&self) -> std::sync::MutexGuard<'_, Vec<KeyPin>> {
+        self.client_keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Returns whether a client presenting a certificate with `pin` is
+    /// accepted with `CLIENT_CERTIFICATE`.
+    fn accepts_client_key(&self, pin: &KeyPin) -> bool {
+        self.client_keys().contains(pin)
     }
 
     /// Accepts the user `username` with SCRAM-SHA-256-PLUS. The name must already
@@ -125,20 +160,24 @@ impl HostAuthenticator {
         Ok(())
     }
 
-    /// Returns whether the host accepts anyone at all: a token, a user or a
-    /// client key.
+    /// Returns whether the host accepts anyone at all: a token, a user, a
+    /// client key, or a client that pairs.
     pub fn accepts_anyone(&self) -> bool {
-        !self.tokens.is_empty() || !self.users.is_empty() || !self.client_keys.is_empty()
+        !self.tokens.is_empty()
+            || !self.users.is_empty()
+            || !self.client_keys().is_empty()
+            || self.pairing.is_some()
     }
 
     /// Returns the methods to offer, in order of preference, on a connection
     /// whose client presented a certificate with `client_key`, if any:
-    /// `CLIENT_CERTIFICATE` only to a client that presented one (Section
-    /// 4.4.2), and `TOKEN` also for resumption tokens, if the host accepts
-    /// anyone to issue them to.
+    /// `CLIENT_CERTIFICATE` and `PAIRING` only to a client that presented
+    /// one (Sections 4.4.2 and 4.4.9), and `TOKEN` also for resumption
+    /// tokens, if the host accepts anyone to issue them to.
     pub fn methods(&self, client_key: Option<KeyPin>) -> Vec<AuthMethod> {
         let mut methods = Vec::new();
-        if client_key.is_some() && !self.client_keys.is_empty() {
+        let presented = client_key.is_some();
+        if presented && (!self.client_keys().is_empty() || self.pairing.is_some()) {
             methods.push(AuthMethod::CLIENT_CERTIFICATE);
         }
         if !self.tokens.is_empty() || (self.accepts_anyone() && self.resumption_lifetime.is_some())
@@ -147,6 +186,9 @@ impl HostAuthenticator {
         }
         if !self.users.is_empty() {
             methods.push(AuthMethod::SCRAM_SHA_256_PLUS);
+        }
+        if presented && self.pairing.is_some() {
+            methods.push(AuthMethod::PAIRING);
         }
         methods
     }
@@ -180,7 +222,7 @@ impl HostAuthenticator {
         let accepted = match &identity {
             ClientIdentity::Token(position) => *position < self.tokens.len(),
             ClientIdentity::User(user) => self.users.contains_key(user),
-            ClientIdentity::Certificate(pin) => self.client_keys.contains(pin),
+            ClientIdentity::Certificate(pin) => self.accepts_client_key(pin),
         };
         info!(accepted, "resumption token redeemed");
         accepted.then_some(identity)
@@ -205,6 +247,19 @@ pub(crate) struct HostAuthExchange<'a> {
     locked: bool,
     /// Who the client authenticated as, once it has.
     identity: Option<ClientIdentity>,
+    /// A pairing exchange waiting for the client's share and confirmation.
+    pairing: Option<PendingPairing>,
+}
+
+/// A pairing exchange the host answered, waiting for the client's message.
+#[derive(Debug)]
+struct PendingPairing {
+    /// The host's side of the exchange.
+    exchange: HostPairing,
+    /// The exchange's place, which ends with it.
+    slot: PairingSlot,
+    /// When the code expires.
+    expires_at: Instant,
 }
 
 impl<'a> HostAuthExchange<'a> {
@@ -223,6 +278,7 @@ impl<'a> HostAuthExchange<'a> {
             user: None,
             locked: false,
             identity: None,
+            pairing: None,
         }
     }
 
@@ -247,6 +303,8 @@ impl<'a> HostAuthExchange<'a> {
         self.user = None;
         self.locked = false;
         self.identity = None;
+        // A new attempt abandons a pairing exchange in progress.
+        self.pairing = None;
         match method {
             AuthMethod::TOKEN => {
                 let identity = self.authenticator.token_identity(auth_data);
@@ -261,7 +319,84 @@ impl<'a> HostAuthExchange<'a> {
             }
             AuthMethod::CLIENT_CERTIFICATE => self.start_certificate(auth_data),
             AuthMethod::SCRAM_SHA_256_PLUS => self.start_scram(auth_data, ticket),
+            AuthMethod::PAIRING => self.start_pairing(auth_data, ticket),
             _ => AuthResponse::Reject,
+        }
+    }
+
+    /// Answers `AUTH_START` for `PAIRING` (Section 4.4.9): if pairing may
+    /// start, chooses a code, has the host's user shown it, and sends the
+    /// host's share.
+    fn start_pairing(&mut self, auth_data: &[u8], ticket: &AdmissionTicket) -> AuthResponse {
+        let (Some(pairing), Some(client_key)) = (&self.authenticator.pairing, self.client_key)
+        else {
+            return AuthResponse::Reject;
+        };
+        let Ok(start) = PairingStart::decode(auth_data) else {
+            return AuthResponse::Reject;
+        };
+        let now = Instant::now();
+        let slot = match pairing.begin(&start.device_name, now) {
+            Ok(slot) => slot,
+            Err(refusal) => {
+                info!(device = start.device_name, %refusal, "pairing refused");
+                return AuthResponse::Reject;
+            }
+        };
+        let random = SystemRandom::new();
+        let keys = PairingKeys {
+            client: client_key.0,
+            host: pairing.host_key().0,
+        };
+        let started = PairingCode::generate(&random).and_then(|code| {
+            HostPairing::start(&code, &keys, &self.binding.0, &random)
+                .map(|exchange| (code, exchange))
+        });
+        let Ok((code, exchange)) = started else {
+            return AuthResponse::Reject;
+        };
+        info!(
+            device = start.device_name,
+            address = %ticket.address(),
+            "a client asks to pair"
+        );
+        pairing.tell(crate::pairing::PairingEvent::Requested {
+            device_name: start.device_name,
+            address: ticket.address(),
+            code,
+        });
+        let share = exchange.share().to_vec();
+        self.pairing = Some(PendingPairing {
+            exchange,
+            slot,
+            expires_at: now + CODE_LIFETIME,
+        });
+        AuthResponse::Continue(share)
+    }
+
+    /// Answers the client's share and confirmation, accepting the client's
+    /// key from now on if it typed the code shown.
+    fn finish_pairing(&mut self, pending: PendingPairing, auth_data: &[u8]) -> AuthResponse {
+        let now = Instant::now();
+        let confirmation = if now <= pending.expires_at {
+            pending.exchange.finish(auth_data).ok()
+        } else {
+            info!("pairing failed: the code expired");
+            None
+        };
+        match (confirmation, self.client_key) {
+            (Some(confirmation), Some(client_key)) => {
+                self.authenticator.authorize_client_key(client_key);
+                pending.slot.end(PairingOutcome::Paired { client_key }, now);
+                info!("pairing succeeded");
+                self.identity = Some(ClientIdentity::Certificate(client_key));
+                AuthResponse::Accept(confirmation.to_vec())
+            }
+            _ => {
+                info!("pairing failed: the code typed was not the one shown");
+                pending.slot.end(PairingOutcome::Failed, now);
+                AuthResponse::Reject
+            }
         }
     }
 
@@ -271,7 +406,7 @@ impl<'a> HostAuthExchange<'a> {
     fn start_certificate(&mut self, auth_data: &[u8]) -> AuthResponse {
         let accepted = self
             .client_key
-            .filter(|pin| auth_data.is_empty() && self.authenticator.client_keys.contains(pin));
+            .filter(|pin| auth_data.is_empty() && self.authenticator.accepts_client_key(pin));
         info!(
             accepted = accepted.is_some(),
             "client certificate authentication"
@@ -315,6 +450,9 @@ impl<'a> HostAuthExchange<'a> {
 
     /// Answers `AUTH_CONTINUE`.
     pub(crate) fn continue_exchange(&mut self, auth_data: &[u8]) -> AuthResponse {
+        if let Some(pending) = self.pairing.take() {
+            return self.finish_pairing(pending, auth_data);
+        }
         let Some(server) = self.scram.take() else {
             return AuthResponse::Reject;
         };
@@ -353,6 +491,16 @@ pub enum ClientCredentials {
         /// The password.
         password: String,
     },
+    /// Pairing with a code the host shows, which the client's
+    /// [`crate::PairingPrompt`] asks its user for; the connection's endpoint
+    /// must present the certificate whose key is `client_key` (Section 4.4.9).
+    Pairing {
+        /// The device's name, which the host shows with the code.
+        device_name: String,
+        /// The key of the certificate the client presents, SPAKE2's
+        /// identity A.
+        client_key: KeyPin,
+    },
 }
 
 /// Hides the secrets.
@@ -364,6 +512,10 @@ impl std::fmt::Debug for ClientCredentials {
             Self::Password { username, .. } => formatter
                 .debug_struct("Password")
                 .field("username", username)
+                .finish_non_exhaustive(),
+            Self::Pairing { device_name, .. } => formatter
+                .debug_struct("Pairing")
+                .field("device_name", device_name)
                 .finish_non_exhaustive(),
         }
     }
@@ -384,6 +536,11 @@ enum ClientAuthState {
     ScramFirst(ScramClient),
     /// The client-final-message was sent.
     ScramFinal(ScramClientFinal),
+    /// A pairing exchange was asked for; the host's share comes next.
+    PairingStarted,
+    /// The client's share and confirmation were sent; the host's
+    /// confirmation comes next.
+    PairingSent(ClientPairing),
 }
 
 /// The client's side of authentication.
@@ -393,18 +550,72 @@ pub(crate) struct ClientAuthExchange {
     credentials: ClientCredentials,
     /// The connection's channel binding.
     binding: ChannelBinding,
+    /// The key of the certificate the host presented, if known: SPAKE2's
+    /// identity B when pairing.
+    host_key: Option<KeyPin>,
     /// The progress of the exchange.
     state: ClientAuthState,
+    /// The host the client paired with, once the host proved it showed the
+    /// code.
+    paired_host: Option<KeyPin>,
 }
 
 impl ClientAuthExchange {
-    /// Prepares authentication with `credentials` on a connection with `binding`.
-    pub(crate) fn new(credentials: ClientCredentials, binding: ChannelBinding) -> Self {
+    /// Prepares authentication with `credentials` on a connection with
+    /// `binding`, to a host that presented a certificate with `host_key`.
+    pub(crate) fn new(
+        credentials: ClientCredentials,
+        binding: ChannelBinding,
+        host_key: Option<KeyPin>,
+    ) -> Self {
         Self {
             credentials,
             binding,
+            host_key,
             state: ClientAuthState::Idle,
+            paired_host: None,
         }
+    }
+
+    /// Returns whether the exchange waits for the code the host shows: the
+    /// host's share has come, or comes next.
+    pub(crate) fn awaits_pairing_code(&self) -> bool {
+        matches!(self.state, ClientAuthState::PairingStarted)
+    }
+
+    /// Returns the host the client paired with, once the host proved it
+    /// showed the code.
+    pub(crate) fn paired_host(&self) -> Option<KeyPin> {
+        self.paired_host
+    }
+
+    /// Answers the host's share with the `code` the user typed.
+    pub(crate) fn continue_pairing(
+        &mut self,
+        host_share: &[u8],
+        code: &str,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let ClientCredentials::Pairing { client_key, .. } = &self.credentials else {
+            return Err(RuntimeError::UnexpectedAuthStep);
+        };
+        let (Some(host_key), ClientAuthState::PairingStarted) = (self.host_key, &self.state) else {
+            return Err(RuntimeError::UnexpectedAuthStep);
+        };
+        let code = PairingCode::parse(code).ok_or(RuntimeError::InvalidPairingCode)?;
+        let keys = PairingKeys {
+            client: client_key.0,
+            host: host_key.0,
+        };
+        let (pairing, message) = ClientPairing::respond(
+            &code,
+            &keys,
+            &self.binding.0,
+            host_share,
+            &SystemRandom::new(),
+        )
+        .map_err(|error| RuntimeError::AuthenticationFailed(error.to_string()))?;
+        self.state = ClientAuthState::PairingSent(pairing);
+        Ok(message)
     }
 
     /// Returns the method and Auth Data of `AUTH_START`, given the methods the host
@@ -432,6 +643,15 @@ impl ClientAuthExchange {
                 let (client, first) = ScramClient::new(username, password, &nonce, self.binding)?;
                 self.state = ClientAuthState::ScramFirst(client);
                 Ok((AuthMethod::SCRAM_SHA_256_PLUS, first))
+            }
+            ClientCredentials::Pairing { device_name, .. }
+                if offered.contains(&AuthMethod::PAIRING) =>
+            {
+                self.state = ClientAuthState::PairingStarted;
+                let start = PairingStart {
+                    device_name: device_name.clone(),
+                };
+                Ok((AuthMethod::PAIRING, start.to_bytes()))
             }
             ClientCredentials::Password { username, password }
                 if offered.contains(&AuthMethod::PASSWORD) =>
@@ -471,12 +691,22 @@ impl ClientAuthExchange {
             ClientAuthState::ScramFinal(client) => {
                 Ok(client.verify_server_final(&result.auth_data)?)
             }
+            // Only a host that showed the code derived its confirmation.
+            ClientAuthState::PairingSent(pairing) => {
+                pairing.verify_host(&result.auth_data).map_err(|_| {
+                    RuntimeError::AuthenticationFailed(
+                        "the host did not prove it showed the code".to_owned(),
+                    )
+                })?;
+                self.paired_host = self.host_key;
+                Ok(())
+            }
             ClientAuthState::Certificate | ClientAuthState::Token | ClientAuthState::Password => {
                 Ok(())
             }
-            ClientAuthState::Idle | ClientAuthState::ScramFirst(_) => {
-                Err(RuntimeError::UnexpectedAuthStep)
-            }
+            ClientAuthState::Idle
+            | ClientAuthState::ScramFirst(_)
+            | ClientAuthState::PairingStarted => Err(RuntimeError::UnexpectedAuthStep),
         }
     }
 }
@@ -592,6 +822,7 @@ mod tests {
                     password: password.to_owned(),
                 },
                 binding(),
+                None,
             );
             let (method, first) = client.start(&authenticator.methods(None)).unwrap();
             let AuthResponse::Continue(server_first) = host.start(method, &first, &ticket) else {
@@ -648,7 +879,7 @@ mod tests {
                 "{client_key:?} {auth_data:?}"
             );
         }
-        let mut client = ClientAuthExchange::new(ClientCredentials::Certificate, binding());
+        let mut client = ClientAuthExchange::new(ClientCredentials::Certificate, binding(), None);
         assert_eq!(
             client.start(&authenticator.methods(Some(pin(1)))).unwrap(),
             (AuthMethod::CLIENT_CERTIFICATE, Vec::new())
@@ -679,13 +910,13 @@ mod tests {
             username: "ian".to_owned(),
             password: "pencil".to_owned(),
         };
-        let mut client = ClientAuthExchange::new(credentials.clone(), binding());
+        let mut client = ClientAuthExchange::new(credentials.clone(), binding(), None);
         let both = [AuthMethod::PASSWORD, AuthMethod::SCRAM_SHA_256_PLUS];
         assert_eq!(
             client.start(&both).unwrap().0,
             AuthMethod::SCRAM_SHA_256_PLUS
         );
-        let mut client = ClientAuthExchange::new(credentials, binding());
+        let mut client = ClientAuthExchange::new(credentials, binding(), None);
         let (method, auth_data) = client.start(&[AuthMethod::PASSWORD]).unwrap();
         assert_eq!(method, AuthMethod::PASSWORD);
         let sent = PasswordAuthData::decode(&auth_data).unwrap();
@@ -699,7 +930,8 @@ mod tests {
             auth_data: Vec::new(),
         };
         assert!(client.finish(&success).is_ok());
-        let mut certificate = ClientAuthExchange::new(ClientCredentials::Certificate, binding());
+        let mut certificate =
+            ClientAuthExchange::new(ClientCredentials::Certificate, binding(), None);
         assert!(matches!(
             certificate.start(&[AuthMethod::TOKEN]),
             Err(RuntimeError::NoCommonAuthMethod)
@@ -710,7 +942,7 @@ mod tests {
     #[test]
     fn no_common_method() {
         let mut client =
-            ClientAuthExchange::new(ClientCredentials::Token(b"t".to_vec()), binding());
+            ClientAuthExchange::new(ClientCredentials::Token(b"t".to_vec()), binding(), None);
         assert!(matches!(
             client.start(&[AuthMethod::SCRAM_SHA_256_PLUS]),
             Err(RuntimeError::NoCommonAuthMethod)
@@ -736,13 +968,15 @@ mod tests {
                 password: "pencil".to_owned(),
             },
             binding(),
+            None,
         );
         client.start(&[AuthMethod::SCRAM_SHA_256_PLUS]).unwrap();
         assert!(matches!(
             client.finish(&success),
             Err(RuntimeError::UnexpectedAuthStep)
         ));
-        let mut token = ClientAuthExchange::new(ClientCredentials::Token(b"t".to_vec()), binding());
+        let mut token =
+            ClientAuthExchange::new(ClientCredentials::Token(b"t".to_vec()), binding(), None);
         token.start(&[AuthMethod::TOKEN]).unwrap();
         assert!(token.finish(&success).is_ok());
         assert_eq!(

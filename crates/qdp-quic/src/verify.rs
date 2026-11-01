@@ -1,6 +1,7 @@
-//! Verification of the host's certificate by a pinned key (Section 11.1),
-//! and of the possession of a client's certificate, which the host
-//! authorizes by its key (Section 4.4.2).
+//! Verification of the host's certificate by a pinned key (Section 11.1), or
+//! by the pairing that follows the handshake (Section 4.4.9), and of the
+//! possession of a client's certificate, which the host authorizes by its key
+//! (Section 4.4.2).
 
 use std::sync::Arc;
 
@@ -15,15 +16,26 @@ use rustls::{
 
 use crate::KeyPin;
 
+/// Which host keys a [`PinnedKeyVerifier`] accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AcceptedKeys {
+    /// Those whose pins are listed.
+    Pinned(Vec<KeyPin>),
+    /// Any key, which pairing then authenticates (Section 4.4.9).
+    Paired,
+}
+
 /// Accepts a host certificate whose SubjectPublicKeyInfo hashes to one of the
-/// pinned values, and checks that the host holds the matching private key.
+/// pinned values, or any for pairing, and checks that the host holds the
+/// matching private key.
 ///
 /// Names, validity dates and issuers are not checked: the pin, obtained in
-/// advance from a broker or an administrator, is the whole of the trust decision.
+/// advance from a broker or an administrator, or by pairing, is the whole of
+/// the trust decision.
 #[derive(Debug)]
 pub struct PinnedKeyVerifier {
-    /// The accepted pins.
-    pins: Vec<KeyPin>,
+    /// The accepted keys.
+    accepted: AcceptedKeys,
     /// The cryptographic provider whose signature algorithms verify the
     /// handshake.
     provider: Arc<CryptoProvider>,
@@ -32,7 +44,20 @@ pub struct PinnedKeyVerifier {
 impl PinnedKeyVerifier {
     /// Creates a verifier that accepts any of `pins`.
     pub fn new(pins: Vec<KeyPin>, provider: Arc<CryptoProvider>) -> Self {
-        Self { pins, provider }
+        Self {
+            accepted: AcceptedKeys::Pinned(pins),
+            provider,
+        }
+    }
+
+    /// Creates a verifier for a connection that pairs with the host, which
+    /// accepts any key but still checks that the host holds it: the pairing
+    /// exchange authenticates the key (Section 4.4.9).
+    pub fn for_pairing(provider: Arc<CryptoProvider>) -> Self {
+        Self {
+            accepted: AcceptedKeys::Paired,
+            provider,
+        }
     }
 }
 
@@ -47,7 +72,11 @@ impl ServerCertVerifier for PinnedKeyVerifier {
     ) -> Result<ServerCertVerified, Error> {
         let pin = KeyPin::of_certificate(end_entity)
             .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        if self.pins.contains(&pin) {
+        let accepted = match &self.accepted {
+            AcceptedKeys::Pinned(pins) => pins.contains(&pin),
+            AcceptedKeys::Paired => true,
+        };
+        if accepted {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(Error::InvalidCertificate(
