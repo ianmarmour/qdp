@@ -22,6 +22,8 @@ mod kde_protocols;
 mod keycodes;
 #[cfg(feature = "screen-capture")]
 mod monitor_matching;
+#[cfg(feature = "notifications")]
+pub(crate) mod notifications;
 mod pen;
 #[cfg(feature = "screen-capture")]
 mod screencast;
