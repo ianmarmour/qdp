@@ -1367,6 +1367,16 @@ const CHUNK: Duration = Duration::from_millis(10);
 /// The samples per channel in one chunk.
 const CHUNK_SAMPLES: usize = SAMPLE_RATE as usize / 100;
 
+/// The blocks a second of recorded sound is split into to tell where it
+/// sounds: a millisecond each, shorter than any tone's half period.
+const BLOCKS_PER_SECOND: usize = 1000;
+
+/// The level below which a block of recorded sound is silent.
+const SILENCE: f32 = 0.01;
+
+/// The least a recording must sound for its tone's frequency to be told.
+const MIN_SOUNDING: Duration = Duration::from_millis(200);
+
 /// A thread a test audio device runs, stopped when the device is dropped.
 struct DeviceThread {
     /// Tells the thread to stop.
@@ -1461,19 +1471,31 @@ impl RecordingOutput {
     }
 
     /// Returns the tone's frequency in the last half second recorded, from
-    /// its zero crossings, or `None` if that was silent.
+    /// its zero crossings where it sounds, or `None` if it sounded for less
+    /// than [`MIN_SOUNDING`] of it. The silence a playout makes while its
+    /// buffer fills, or when packets come late, does not count: it says
+    /// nothing of the tone.
     fn frequency(&self) -> Option<f32> {
         let recorded = self.recorded.lock().unwrap();
         let half_second = SAMPLE_RATE as usize / 2;
         let tail = &recorded[recorded.len().checked_sub(half_second)?..];
-        if tail.iter().all(|sample| sample.abs() < 0.01) {
+        let block = SAMPLE_RATE as usize / BLOCKS_PER_SECOND;
+        let sounding: Vec<bool> = tail
+            .chunks(block)
+            .map(|samples| samples.iter().any(|sample| sample.abs() >= SILENCE))
+            .collect();
+        let (mut pairs, mut crossings) = (0_usize, 0_usize);
+        for (index, pair) in tail.windows(2).enumerate() {
+            if sounding[index / block] && sounding[(index + 1) / block] {
+                pairs += 1;
+                crossings += usize::from((pair[0] < 0.0) != (pair[1] < 0.0));
+            }
+        }
+        if (pairs as f32) < MIN_SOUNDING.as_secs_f32() * SAMPLE_RATE as f32 {
             return None;
         }
-        let crossings = tail
-            .windows(2)
-            .filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0))
-            .count();
-        Some(crossings as f32)
+        // A tone crosses zero twice a period.
+        Some(crossings as f32 * SAMPLE_RATE as f32 / (2.0 * pairs as f32))
     }
 }
 
