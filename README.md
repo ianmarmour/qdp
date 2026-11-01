@@ -308,14 +308,16 @@ both bumpers together, opens the menu, which also shows the on-screen keyboard
 and statistics and disconnects. Leaving the app ends the session, and
 returning connects again.
 
-## Mac app
+## Mac, iPhone and iPad apps
 
-The app in [`apple`](apple) streams from a host to Macs with Apple silicon
-running macOS 26 or later. It is a SwiftUI app around the Rust core
-[`qdp-apple`](crates/qdp-apple), which decodes AV1 with VideoToolbox on Macs
-with an AV1 decoder (M3 and later) and in software otherwise, and draws with
-Metal on a thread of its own, as `qdp connect` does. Building it needs Xcode 26,
-XcodeGen and Rust's Apple targets:
+The apps in [`apple`](apple) stream from a host to Macs with Apple silicon and
+to iPhones and iPads, running macOS or iOS 26 or later. They are SwiftUI apps
+around the same Rust core as the Android app, [`qdp-apple`](crates/qdp-apple),
+which decodes AV1 with VideoToolbox where the device has an AV1 decoder (M3
+and later Macs, iPhone 15 Pro and later, iPads with an M4 or A17 Pro) and in
+software otherwise, and draws with Metal on a thread of its own, as `qdp
+connect` does on a Mac. Building them needs Xcode 26, XcodeGen and Rust's Apple
+targets:
 
 ```bash
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
@@ -325,12 +327,16 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
 cd apple && ./build-core.sh && xcodegen generate && open QDP.xcodeproj
 ```
 
-The app lists the hosts on the local network and those it paired with;
+Both apps list the hosts on the local network and those they paired with;
 choosing a new host pairs with it by the code the host shows, and choosing a
-paired one streams at once. Each stream opens in a window of its own, which can
-go full screen; clicking into it sends the keyboard and mouse, controllers are
-sent as gamepads, and while the host's pointer is relative the mouse is
-captured, until Control, Option, Shift and Z are pressed together.
+paired one streams at once. On a Mac each stream opens in a window of its own,
+which can go full screen; clicking into it sends the keyboard and mouse, and
+while the host's pointer is relative the mouse is captured until Control,
+Option, Shift and Z are pressed together. On iPhone and iPad touches work as a
+trackpad or as the host's touchscreen, a keyboard, mouse or trackpad attached
+to an iPad work as on a computer, and controllers are sent as gamepads with
+rumble; the button at the top corner, or Select, Start and both shoulder
+buttons together, opens the stream's menu.
 
 ## Builds and releases
 

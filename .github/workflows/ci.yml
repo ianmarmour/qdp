@@ -252,6 +252,7 @@ jobs:
           |---|---|
           | Android (64-bit ARM, Android 10 or later) | \`qdp-android-arm64.apk\` |
           | Mac app (Apple silicon, macOS 26 or later) | \`qdp-macos-app.zip\` |
+          | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
           | Linux (x86-64) | \`qdp-linux-x86_64.tar.gz\` |
           | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
           | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
