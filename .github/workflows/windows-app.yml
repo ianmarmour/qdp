@@ -1,9 +1,7 @@
-# Builds the Windows app: the Rust core as qdp_windows.dll, then the WinUI 3
-# app around it, self-contained, zipped and, with the qdp command, as its
-# installer, qdp-windows-x64.msi, which it installs, opens, upgrades and
-# removes as a user would. CI calls it for every change merged
-# into main; it can also be started by hand on any branch, which is how
-# changes to the app are checked before they merge.
+# Builds the gateway for Windows servers, zipped and as its installer,
+# qdp-gateway-windows-x64.msi, then installs, starts, upgrades and removes
+# it on the runner as an administrator would. CI calls it for every change
+# merged into main; it can also be started by hand on any branch.
 name: Windows app
 
 on:
@@ -21,14 +19,11 @@ env:
   WIX_VERSION: 5.0.2
 
 jobs:
-  windows-app:
-    name: Windows app
+  windows-gateway:
+    name: Windows gateway
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
-
-      # NASM for the codecs' assembly.
-      - uses: ilammy/setup-nasm@v1
 
       - name: Install Rust
         shell: bash
@@ -38,66 +33,49 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-app
+          key: windows-gateway
 
+      # WiX builds the installer; it is a .NET tool.
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
 
-      - name: Test the app's logic
-        shell: pwsh
-        run: dotnet test windows/QDP.Tests/QDP.Tests.csproj -c Release
-
-      - name: Build the app
-        shell: pwsh
-        run: ./windows/build.ps1
-
-      - name: Build the qdp command, for a host to stream from
-        shell: bash
-        run: cargo build --release --locked -p qdp-cli
-
-      # Opens the app and its pages, and streams the test pattern from a host
-      # on the runner through the app's core, which decodes in software and
-      # draws with the runner's GPU-less Direct3D.
-      - name: Try the app
-        shell: powershell
-        run: ./windows/smoke.ps1
-
-      # WiX builds the installer; it is a .NET tool.
       - name: Install WiX
         shell: pwsh
-        run: dotnet tool install --global wix --version $env:WIX_VERSION
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          wix extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION"
+
+      - name: Build the gateway
+        shell: bash
+        run: cargo build --release --locked -p qdp-gateway
 
       # And a later build of it, to upgrade to.
       - name: Build the installer
         shell: pwsh
         run: |
-          ./packaging/windows/build-msi.ps1 app qdp-windows-x64.msi
-          ./packaging/windows/build-msi.ps1 app upgrade.msi ([int]$env:GITHUB_RUN_NUMBER + 1)
+          ./packaging/windows/build-msi.ps1 gateway qdp-gateway-windows-x64.msi
+          ./packaging/windows/build-msi.ps1 gateway upgrade.msi ([int]$env:GITHUB_RUN_NUMBER + 1)
+          Compress-Archive -Path target/release/qdp-gateway.exe -DestinationPath qdp-gateway-windows-x86_64.zip
 
       - name: Try the installer
         shell: pwsh
-        run: ./packaging/windows/try-app-msi.ps1 qdp-windows-x64.msi upgrade.msi
+        run: ./packaging/windows/try-gateway-msi.ps1 qdp-gateway-windows-x64.msi upgrade.msi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: qdp-windows-app
+          name: qdp-gateway-windows-x86_64
           path: |
-            qdp-windows-app-x64.zip
-            qdp-windows-x64.msi
+            qdp-gateway-windows-x86_64.zip
+            qdp-gateway-windows-x64.msi
           if-no-files-found: error
 
       # Not released: only artifacts named qdp-* are.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: installer-logs-windows-app
-          path: '*.log'
+          name: installer-logs-windows-gateway
+          path: |
+            *.log
+            C:\ProgramData\qdp-gateway\gateway.log
           if-no-files-found: ignore
-
-      # Not released: only artifacts named qdp-* are.
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: smoke-windows-app
-          path: windows/screenshots
