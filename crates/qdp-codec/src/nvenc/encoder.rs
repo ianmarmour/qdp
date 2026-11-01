@@ -29,17 +29,14 @@ use super::ffi::{self, FunctionList, Handle, Status};
 use crate::backend::VideoEncoder;
 use crate::d3d11va::create_for_vendor;
 use crate::obu::{ObuType, parse_obus};
-use crate::stream_check::check_first_key_frame;
+use crate::stream_check::{check_first_key_frame, tile_grid};
 use crate::{
     CodecError, EncodedFrame, EncoderSettings, KeyFrameRequest, NO_LEVEL, TileCount, Yuv420Frame,
-    level_for, tile_count, to_qdp_temporal_unit,
+    level_for, to_qdp_temporal_unit,
 };
 
 /// NVIDIA's PCI vendor identifier.
 const NVIDIA_VENDOR: u32 = 0x10de;
-
-/// The most tile columns frames are divided into; more tiles go in rows.
-const MAX_TILE_COLUMNS: u32 = 4;
 
 /// The lowest quantizer used: 0 would make frames lossless.
 const MIN_QUANTIZER: u8 = 1;
@@ -83,15 +80,6 @@ impl Drop for Library {
 /// Returns that hardware encoding is unavailable, saying why.
 fn unavailable(reason: &str) -> CodecError {
     CodecError::HardwareUnavailable(reason.to_owned())
-}
-
-/// Returns how frames of `width × height` are divided into tiles: at least
-/// the tiles of Section 6.4.4, in at most [`MAX_TILE_COLUMNS`] columns, all
-/// counts powers of 2 as NVENC divides frames uniformly.
-fn tile_grid(width: usize, height: usize) -> (u32, u32) {
-    let tiles = tile_count(width, height) as u32;
-    let columns = tiles.min(MAX_TILE_COLUMNS);
-    (columns, tiles / columns)
 }
 
 /// An AV1 encoder on NVENC.
@@ -637,19 +625,5 @@ impl Drop for NvencEncoder {
                 destroy(self.session);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Frames are divided into at least Section 6.4.4's tiles, in columns
-    /// first.
-    #[test]
-    fn divides_frames_into_tiles() {
-        assert_eq!(tile_grid(1920, 1080), (2, 1));
-        assert_eq!(tile_grid(2560, 1440), (4, 1));
-        assert_eq!(tile_grid(3840, 2160), (4, 2));
     }
 }
