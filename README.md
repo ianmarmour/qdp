@@ -307,9 +307,11 @@ always. The frames stay in GPU memory for the hardware encoder, which the
 console needs unless its buffers are linear, and the pointer is read from the
 card's cursor plane. A display must be connected and on, a dummy plug standing
 in for one on a machine without a monitor. With several monitors, only the first
-is streamed and the pointer assumes it is the whole desktop. The host's sound,
-clipboard and notices need the desktop session, so they do not reach a console
-stream yet.
+is streamed and the pointer assumes it is the whole desktop. A console stream
+plays the sound of the desktop session shown when it starts, through that
+user's PipeWire, and presents the client's microphone there; one that starts at
+the login screen has no sound until the device connects again. The clipboard
+and notices do not reach a console stream yet.
 
 To serve the console from boot, before anyone logs in, run the host as a system
 service. `sudo qdp service install` writes a systemd unit that runs
