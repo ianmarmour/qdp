@@ -27,6 +27,8 @@ mod touchpad_capture;
 mod touchscreen;
 mod uhid;
 mod uinput;
+#[cfg(feature = "screen-capture")]
+mod wlr_displays;
 
 #[cfg(feature = "audio")]
 pub use audio::{PipeWireInput, PipeWireOutput};

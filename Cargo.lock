@@ -2319,6 +2319,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-plasma",
+ "wayland-protocols-wlr",
  "windows",
  "wl-clipboard-rs",
  "x11rb",

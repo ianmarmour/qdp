@@ -15,7 +15,10 @@ use qdp_runtime::WantedDisplay;
 use tracing::{info, warn};
 
 use super::kde_displays::KdeDisplays;
-use crate::monitor_modes::{MonitorMode, MonitorSettings, SavedSettings, matching_settings};
+use super::wlr_displays::WlrDisplays;
+use crate::monitor_modes::{
+    ModeRange, MonitorMode, MonitorSettings, SavedSettings, matching_settings,
+};
 
 /// Whether a session is changing a monitor.
 static MATCHING: AtomicBool = AtomicBool::new(false);
@@ -25,6 +28,8 @@ static MATCHING: AtomicBool = AtomicBool::new(false);
 pub(super) struct MonitorState {
     /// The modes it offers.
     pub(super) modes: Vec<MonitorMode>,
+    /// Which modes it takes.
+    pub(super) range: ModeRange,
     /// Its settings.
     pub(super) current: MonitorSettings,
 }
@@ -33,6 +38,8 @@ pub(super) struct MonitorState {
 enum DisplaySettings {
     /// KDE Plasma's.
     Kde(KdeDisplays),
+    /// Those of wlroots compositors and others that share their protocol.
+    Wlr(WlrDisplays),
 }
 
 impl DisplaySettings {
@@ -41,8 +48,12 @@ impl DisplaySettings {
         if let Some(kde) = KdeDisplays::open()? {
             return Ok(Self::Kde(kde));
         }
+        if let Some(wlr) = WlrDisplays::open()? {
+            return Ok(Self::Wlr(wlr));
+        }
         Err(
-            "the host cannot change this desktop's display settings yet; it can KDE Plasma's"
+            "the host cannot change this desktop's display settings yet; it can those of KDE \
+             Plasma and of wlroots compositors"
                 .to_owned(),
         )
     }
@@ -51,6 +62,7 @@ impl DisplaySettings {
     fn monitor(&mut self, name: &str) -> Result<MonitorState, String> {
         match self {
             Self::Kde(kde) => kde.monitor(name),
+            Self::Wlr(wlr) => wlr.monitor(name),
         }
     }
 
@@ -58,6 +70,7 @@ impl DisplaySettings {
     fn apply(&mut self, name: &str, settings: &MonitorSettings) -> Result<(), String> {
         match self {
             Self::Kde(kde) => kde.apply(name, settings),
+            Self::Wlr(wlr) => wlr.apply(name, settings),
         }
     }
 }
@@ -94,7 +107,7 @@ impl MonitorMatching {
     pub(crate) fn apply(&mut self, wanted: &WantedDisplay) -> Result<MonitorSettings, String> {
         let mut displays = DisplaySettings::open()?;
         let state = displays.monitor(&self.monitor)?;
-        let target = matching_settings(wanted, &state.modes, &state.current)
+        let target = matching_settings(wanted, &state.modes, state.range, &state.current)
             .ok_or_else(|| format!("{} offers no modes", self.monitor))?;
         if target.same_as(&state.current) {
             return Ok(state.current);
