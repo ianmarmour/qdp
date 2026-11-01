@@ -3,8 +3,10 @@
 //! it, for the client to draw.
 //!
 //! Desktop Duplication stops while the secure desktop (the sign-in screen,
-//! Ctrl+Alt+Delete and elevation prompts) is shown; the capture keeps
-//! delivering the last image until it can duplicate the desktop again.
+//! the lock screen, Ctrl+Alt+Delete and elevation prompts) is shown. A host
+//! allowed to, as one running as SYSTEM in the console's session is, follows
+//! it there and captures it too (see [`super::input_desktop`]); others keep
+//! delivering the last image until they can duplicate the desktop again.
 
 use std::slice;
 use std::sync::Arc;
@@ -15,6 +17,8 @@ use qdp_runtime::{
     CapturedFrame, CursorShape, CursorState, FrameSource, PointerPosition, RuntimeError,
 };
 use tracing::{info, warn};
+
+use super::input_desktop::follow_input_desktop;
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
@@ -244,6 +248,7 @@ impl DesktopDuplication {
             Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
                 info!("the desktop changed; duplicating it again");
                 self.duplication = None;
+                follow_input_desktop();
                 return Ok(());
             }
             Err(error) => return Err(format!("cannot capture the screen: {error}")),
@@ -258,6 +263,8 @@ impl DesktopDuplication {
     /// Starts duplicating the desktop again. Returns `None` while the
     /// desktop does not allow it.
     fn reconnect(&mut self) -> Result<Option<IDXGIOutputDuplication>, String> {
+        // Only the desktop this thread is on can be duplicated.
+        follow_input_desktop();
         // SAFETY: the output and device are valid.
         let duplication = match unsafe { self.output.DuplicateOutput(&self.device) } {
             Ok(duplication) => duplication,

@@ -4,10 +4,21 @@
 //! higher integrity level, such as programs run as administrator, and
 //! `SendInput` reports no error when it drops input for that reason; running
 //! the host as administrator lets it control those windows too. The secure
-//! desktop (the sign-in screen, Ctrl+Alt+Delete and elevation prompts) takes
-//! no injected input at all.
+//! desktop (the sign-in screen, the lock screen, Ctrl+Alt+Delete and
+//! elevation prompts) takes injected input only from a host allowed to
+//! follow it there, as one running as SYSTEM in the console's session is
+//! (see [`super::input_desktop`]). No injected keys make Ctrl+Alt+Delete:
+//! such a host asks Winlogon for it with `SendSAS` instead.
 
 use std::io;
+
+use tracing::{debug, info};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
+use windows::core::{s, w};
+
+use super::input_desktop::follow_input_desktop;
 
 use qdp::message::{KeyboardInfo, KeyboardLeds, LayoutPlatform, PointerKind};
 use qdp_runtime::{InputAction, InputInjector, PixelRect, PointerButton};
@@ -263,6 +274,41 @@ impl Translator {
     }
 }
 
+/// The keyboard usages of the left and right Control keys.
+const CONTROL_USAGES: [u8; 2] = [0xe0, 0xe4];
+
+/// The keyboard usages of the left and right Alt keys.
+const ALT_USAGES: [u8; 2] = [0xe2, 0xe6];
+
+/// The keyboard usages of Delete and the keypad's Delete.
+const DELETE_USAGES: [u8; 2] = [0x4c, 0x63];
+
+/// The modifiers held among those of Ctrl+Alt+Delete, as the client's keys
+/// pressed and released them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SecureAttentionKeys {
+    /// The Control keys held, a bit for each.
+    control: u8,
+    /// The Alt keys held, a bit for each.
+    alt: u8,
+}
+
+impl SecureAttentionKeys {
+    /// Notes a key pressed or released. Returns whether it was Delete
+    /// pressed with Control and Alt held: Ctrl+Alt+Delete.
+    fn key(&mut self, usage: u8, pressed: bool) -> bool {
+        let update = |held: &mut u8, keys: &[u8; 2]| {
+            if let Some(index) = keys.iter().position(|&key| key == usage) {
+                let bit = 1 << index;
+                *held = if pressed { *held | bit } else { *held & !bit };
+            }
+        };
+        update(&mut self.control, &CONTROL_USAGES);
+        update(&mut self.alt, &ALT_USAGES);
+        pressed && DELETE_USAGES.contains(&usage) && self.control != 0 && self.alt != 0
+    }
+}
+
 /// Injects input with `SendInput` on the primary monitor, which is the
 /// monitor Desktop Duplication captures.
 #[derive(Debug)]
@@ -273,6 +319,8 @@ pub struct SendInputInjector {
     touch: TouchInjector,
     /// Performs the pen's input.
     pen: PenInjector,
+    /// The keys of Ctrl+Alt+Delete held.
+    secure_attention: SecureAttentionKeys,
 }
 
 impl SendInputInjector {
@@ -283,15 +331,54 @@ impl SendInputInjector {
             translator: Translator::new(width, height),
             touch: TouchInjector::default(),
             pen: PenInjector::default(),
+            secure_attention: SecureAttentionKeys::default(),
         }
     }
 }
 
+/// Asks Winlogon for the secure attention sequence, as Ctrl+Alt+Delete on
+/// the machine's keyboard does: through `SendSAS`, which Windows lets
+/// services and the processes they start as SYSTEM call once the
+/// SoftwareSASGeneration policy allows. Others' requests are ignored.
+fn send_secure_attention() -> Result<(), String> {
+    /// `SendSAS(BOOL AsUser)`.
+    type SendSas = unsafe extern "system" fn(i32);
+    // SAFETY: loads sas.dll from the system directory only.
+    let library = unsafe { LoadLibraryExW(w!("sas.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .map_err(|error| format!("cannot load sas.dll: {error}"))?;
+    // SAFETY: the name is a constant string.
+    let address =
+        unsafe { GetProcAddress(library, s!("SendSAS")) }.ok_or("sas.dll has no SendSAS")?;
+    // SAFETY: SendSAS has this signature in every Windows that has it.
+    let send =
+        unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, SendSas>(address) };
+    // SAFETY: FALSE asks as a service, which the host is or is started by.
+    unsafe { send(0) };
+    Ok(())
+}
+
 impl InputInjector for SendInputInjector {
     fn inject(&mut self, action: &InputAction) -> Result<(), String> {
+        // Input goes to the desktop shown, the secure desktop included when
+        // the host may follow it there.
+        follow_input_desktop();
         match action {
             InputAction::Touch(points) => return self.touch.touch(points),
             InputAction::Pen(report) => return self.pen.set(report),
+            &InputAction::KeyDown(usage) => {
+                if self.secure_attention.key(usage, true) {
+                    match send_secure_attention() {
+                        Ok(()) => {
+                            info!("asked Windows for Ctrl+Alt+Delete");
+                            return Ok(());
+                        }
+                        Err(error) => debug!(%error, "cannot ask for Ctrl+Alt+Delete"),
+                    }
+                }
+            }
+            &InputAction::KeyUp(usage) => {
+                self.secure_attention.key(usage, false);
+            }
             _ => {}
         }
         let inputs = self.translator.inputs(action)?;
@@ -564,5 +651,24 @@ mod tests {
             horizontal: 0,
         };
         assert!(translator.inputs(&none).unwrap().is_empty());
+    }
+
+    /// Delete pressed with a Control and an Alt key held, on either side,
+    /// is Ctrl+Alt+Delete; without either, or once one is released, it is
+    /// not.
+    #[test]
+    fn spots_ctrl_alt_delete() {
+        let mut keys = SecureAttentionKeys::default();
+        assert!(!keys.key(0x4c, true));
+        keys.key(0x4c, false);
+        assert!(!keys.key(0xe0, true));
+        assert!(!keys.key(0x4c, true));
+        assert!(!keys.key(0xe6, true));
+        assert!(keys.key(0x4c, true));
+        assert!(keys.key(0x63, true));
+        keys.key(0xe0, false);
+        assert!(!keys.key(0x4c, true));
+        assert!(!keys.key(0xe4, true));
+        assert!(keys.key(0x4c, true));
     }
 }

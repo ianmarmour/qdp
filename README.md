@@ -267,8 +267,12 @@ controllers, and `qdp serve --passthrough all` or `--passthrough off`
 accepts every device or none. On
 Windows the host sends input with
 `SendInput`; Windows keeps it from reaching programs run as administrator unless
-the host runs as administrator too, and from the sign-in screen and elevation
-prompts entirely.
+the host runs as administrator too, and from the secure desktop (the sign-in
+and lock screens, Ctrl+Alt+Delete and elevation prompts) unless the host runs
+as SYSTEM in the console's session. Such a host follows the secure desktop
+whenever it shows, capturing and controlling it like any other, and turns
+Ctrl+Alt+Delete pressed on the client into the real one with `SendSAS`, which
+needs the SoftwareSASGeneration policy to allow services.
 
 The host streams its screen. On Linux it asks the desktop, through the
 ScreenCast portal that GNOME, KDE and wlroots compositors provide, which
@@ -278,8 +282,8 @@ captures the main display with ScreenCaptureKit; the first time, macOS asks to
 allow Screen Recording for the terminal or app running `qdp`, and performing
 the client's input needs Accessibility to be allowed for it as well, both under
 System Settings, Privacy & Security. On Windows 10 and later the host captures
-the primary monitor with DXGI Desktop Duplication, and holds the last image
-while the sign-in screen or an elevation prompt is shown. On Linux and macOS
+the primary monitor with DXGI Desktop Duplication; unless it runs as SYSTEM, it
+holds the last image while the sign-in screen or an elevation prompt is shown. On Linux and macOS
 the host encodes each frame as the compositor delivers it, rather than at fixed
 frame times, so that frames do not wait for the next one; it still sends no
 more than `--fps` a second, and repeats the last frame when nothing changes.
