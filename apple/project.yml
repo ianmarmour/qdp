@@ -52,6 +52,7 @@ targets:
     settings:
       base:
         ENABLE_HARDENED_RUNTIME: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # The core is built for Apple silicon, which streams with the AV1
         # decoders of M3 and later.
         ARCHS: arm64
@@ -87,6 +88,7 @@ targets:
     settings:
       base:
         TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 schemes:
   QDP-macOS:
     build:
