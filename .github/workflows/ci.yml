@@ -95,6 +95,9 @@ jobs:
       # time, a host and a client each; run together on a Windows runner they
       # fall behind, as audio_flows_both_ways once did, hearing its tone
       # slowed, so they run one at a time.
+      - name: Desktop capture tests
+        run: cargo test --locked -p qdp-desktop --test windows_desktop -- --ignored --test-threads=1 captures
+
       - name: Tests
         run: cargo test --workspace --locked -- --test-threads=1
 
