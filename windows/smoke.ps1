@@ -62,6 +62,21 @@ function Set-Named($window, [string] $name, [string] $value) {
     [System.Windows.Forms.SendKeys]::SendWait($value)
 }
 
+# Returns the element in WINDOW whose name starts with PREFIX, waiting up to
+# ten seconds for it.
+function Find-Starting($window, [string] $prefix) {
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        $all = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition)
+        foreach ($element in $all) {
+            if ($element.Current.Name.StartsWith($prefix)) { return $element }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "the app shows nothing named '$prefix...'"
+}
+
 # Selects the element named NAME in WINDOW, as a navigation item or a radio
 # button.
 function Select-Named($window, [string] $name) {
@@ -83,6 +98,35 @@ function Find-AppWindow([int] $processId, [string] $prefix) {
         if ($candidate.Current.Name -like "$prefix*") { return $candidate }
     }
     return $null
+}
+
+# Waits up to a minute for the app's stream window of the smoke host, saving
+# the screen as SHOT if it never opens.
+function Wait-Stream($app, [string] $shot) {
+    $deadline = (Get-Date).AddSeconds(60)
+    while ($null -eq (Find-AppWindow $app.Id 'Smoke host')) {
+        if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
+        if ((Get-Date) -gt $deadline) {
+            Save-Screen $shot
+            throw 'the stream window never opened'
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+# Brings the app back, saving the screen as SHOT, and disconnects the stream
+# from it, waiting for the stream window to close.
+function Stop-Stream($app, $window, [string] $shot) {
+    $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).SetWindowVisualState(
+        [System.Windows.Automation.WindowVisualState]::Normal)
+    Start-Sleep -Seconds 2
+    Save-Screen $shot
+    Invoke-Named $window 'Disconnect'
+    $deadline = (Get-Date).AddSeconds(30)
+    while ($null -ne (Find-AppWindow $app.Id 'Smoke host')) {
+        if ((Get-Date) -gt $deadline) { throw 'the stream window did not close' }
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 # A host on this machine, streaming its test pattern.
@@ -137,34 +181,26 @@ Set-Named $window 'Token' $token
 Start-Sleep -Seconds 1
 Save-Screen 'add-computer'
 Invoke-Named $window 'Connect'
-$deadline = (Get-Date).AddSeconds(60)
-$stream = $null
-while ($null -eq $stream) {
-    if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
-    if ((Get-Date) -gt $deadline) {
-        Save-Screen 'no-stream'
-        throw 'the stream window never opened'
-    }
-    Start-Sleep -Milliseconds 500
-    $stream = Find-AppWindow $app.Id 'Smoke host'
-}
+Wait-Stream $app 'no-stream'
 # Long enough for a second's statistics.
 Start-Sleep -Seconds 4
 Save-Screen 'app-stream'
 
 # Brought back, the app says how the stream goes, and disconnects it.
-$window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).SetWindowVisualState(
-    [System.Windows.Automation.WindowVisualState]::Normal)
-Start-Sleep -Seconds 2
-Save-Screen 'app-streaming'
-Invoke-Named $window 'Disconnect'
-$deadline = (Get-Date).AddSeconds(30)
-while ($null -ne (Find-AppWindow $app.Id 'Smoke host')) {
-    if ((Get-Date) -gt $deadline) { throw 'the stream window did not close' }
-    Start-Sleep -Milliseconds 500
-}
+Stop-Stream $app $window 'app-streaming'
+
+# The host streamed is kept, its token in the Credential Locker, and its
+# row, which screen readers name with how it stands, streams it again from
+# the keyboard.
+$row = Find-Starting $window 'Smoke host, '
 Start-Sleep -Seconds 1
 Save-Screen 'app-after'
+$row.SetFocus()
+[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+Wait-Stream $app 'no-stream-again'
+Start-Sleep -Seconds 2
+Save-Screen 'app-again'
+Stop-Stream $app $window 'app-streaming-again'
 if ($app.HasExited) { throw "the app exited with code $($app.ExitCode)" }
 $app.CloseMainWindow() | Out-Null
 if (-not $app.WaitForExit(15000)) {
@@ -172,7 +208,7 @@ if (-not $app.WaitForExit(15000)) {
     throw 'the app did not close'
 }
 Copy-Item (Join-Path $appData 'qdp.log') (Join-Path $shots 'app.log') -ErrorAction SilentlyContinue
-Write-Host 'the app showed its pages, streamed the host and disconnected'
+Write-Host 'the app showed its pages, streamed the host, kept it and streamed it again'
 
 # The core, as the app calls it.
 Add-Type -TypeDefinition @'

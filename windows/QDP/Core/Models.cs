@@ -26,11 +26,22 @@ internal sealed record StreamTarget(
     string Pin = "",
     string Token = "");
 
+/// <summary>How the device authenticates with a host it keeps.</summary>
+public enum HostAccess
+{
+    /// <summary>It paired with the host, which accepts its key.</summary>
+    Paired,
+
+    /// <summary>The host accepts a token, which Windows' Credential Locker keeps.</summary>
+    Token,
+}
+
 /// <summary>
-/// A host the device paired with: its name, the address it was last reached
-/// at, and its key pin.
+/// A host the device keeps in its list, having paired with it or streamed
+/// it with a token: its name, the address it was last reached at, its key
+/// pin, and how the device authenticates with it.
 /// </summary>
-public sealed class PairedHost
+public sealed class KeptHost
 {
     /// <summary>The host's name for people.</summary>
     public string Name { get; set; } = "";
@@ -40,6 +51,20 @@ public sealed class PairedHost
 
     /// <summary>Its key pin, in hexadecimal.</summary>
     public string Pin { get; set; } = "";
+
+    /// <summary>How the device authenticates with it.</summary>
+    public HostAccess Access { get; set; } = HostAccess.Paired;
+
+    /// <summary>
+    /// The stream of the host under <paramref name="name"/> at
+    /// <paramref name="address"/>. A token host's token is not in it: it is
+    /// taken from the Credential Locker as the stream starts.
+    /// </summary>
+    internal StreamTarget Target(string name, string address) => new(
+        name,
+        address,
+        Access == HostAccess.Token ? Authentication.Token : Authentication.Paired,
+        Pin);
 }
 
 /// <summary>The video size a stream asks the host for.</summary>

@@ -107,7 +107,11 @@ public sealed partial class MainWindow : Window
     /// <summary>Returns why the app cannot stream at all, if it cannot.</summary>
     internal string? Problem => problem;
 
-    /// <summary>Starts a stream of <paramref name="target"/>, unless one runs.</summary>
+    /// <summary>
+    /// Starts a stream of <paramref name="target"/>, unless one runs, with
+    /// the token the Credential Locker keeps for it if it needs one and has
+    /// none.
+    /// </summary>
     internal void Connect(StreamTarget target)
     {
         if (session is not null || problem is not null)
@@ -115,6 +119,17 @@ public sealed partial class MainWindow : Window
             return;
         }
         HostsPage?.ClearProblem();
+        if (target is { Authentication: Authentication.Token, Token: "" })
+        {
+            if (Tokens.Find(target.Pin) is not { } token)
+            {
+                HostsPage?.ShowProblem(
+                    $"Couldn't connect to {target.Name}",
+                    "QDP no longer has its token. Forget it, then add it again with its key pin and token.");
+                return;
+            }
+            target = target with { Token = token };
+        }
         try
         {
             session = StreamSession.Start(
@@ -190,6 +205,7 @@ public sealed partial class MainWindow : Window
             case SessionEvent.WindowShown:
                 streaming = true;
                 ShowStreaming(name);
+                KeepStreamed(running.Target);
                 StepBack();
                 break;
             case SessionEvent.Stats(var video):
@@ -202,11 +218,33 @@ public sealed partial class MainWindow : Window
                 running.AnswerPairing(await AskPairingCode(name, retry));
                 break;
             case SessionEvent.Paired(var pin):
-                Hosts.Keep(new PairedHost { Name = name, Address = running.Target.Address, Pin = pin });
+                Hosts.Keep(new KeptHost { Name = name, Address = running.Target.Address, Pin = pin });
                 break;
             case SessionEvent.Ended(var failure):
                 Ended(name, failure);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Keeps the host a stream shows first in the list, at the address it
+    /// was reached at, and its token if it took one: the host accepted it,
+    /// as no stream shows before it does. Hosts paired with were kept as
+    /// they paired.
+    /// </summary>
+    private void KeepStreamed(StreamTarget target)
+    {
+        HostAccess? access = target.Authentication switch
+        {
+            Authentication.Paired => HostAccess.Paired,
+            Authentication.Token => HostAccess.Token,
+            _ => null,
+        };
+        if (access is { } kept)
+        {
+            Hosts.Keep(
+                new KeptHost { Name = target.Name, Address = target.Address, Pin = target.Pin, Access = kept },
+                target.Token);
         }
     }
 

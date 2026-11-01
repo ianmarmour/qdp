@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The computers to stream: those on the network and those paired with. -->
+<!-- The computers to stream: those on the network and those kept. -->
 <Page
     x:Class="Qdp.Pages.HostsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -22,7 +22,7 @@
             <StackPanel Spacing="4">
                 <TextBlock Text="Computers" Style="{StaticResource TitleTextBlockStyle}" />
                 <TextBlock
-                    Text="Stream a computer on your network, or one you paired with."
+                    Text="Stream a computer on your network, or one you've connected to before."
                     TextWrapping="Wrap"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Style="{StaticResource BodyTextBlockStyle}" />
@@ -61,8 +61,7 @@
                         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1"
-                        CornerRadius="{StaticResource OverlayCornerRadius}"
-                        AutomationProperties.Name="{x:Bind Name}">
+                        CornerRadius="{StaticResource OverlayCornerRadius}">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />

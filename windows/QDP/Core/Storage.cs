@@ -5,8 +5,8 @@ namespace Qdp.Core;
 
 /// <summary>
 /// Where the app keeps what it remembers: the device's key and the log,
-/// which the core writes, and the paired hosts and settings, as JSON, in
-/// %LOCALAPPDATA%\QDP.
+/// which the core writes, and the hosts kept and settings, as JSON, in
+/// %LOCALAPPDATA%\QDP. Tokens are kept apart, by <see cref="Tokens"/>.
 /// </summary>
 internal static class Storage
 {
@@ -14,7 +14,7 @@ internal static class Storage
     internal static string DataDirectory { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QDP");
 
-    /// <summary>The paired hosts' file.</summary>
+    /// <summary>The kept hosts' file.</summary>
     private static string HostsFile => Path.Combine(DataDirectory, "hosts.json");
 
     /// <summary>The settings' file.</summary>
@@ -23,13 +23,13 @@ internal static class Storage
     /// <summary>Makes the data directory if it does not exist.</summary>
     internal static void Prepare() => Directory.CreateDirectory(DataDirectory);
 
-    /// <summary>Returns the paired hosts, most recently kept first.</summary>
-    internal static List<PairedHost> LoadHosts() =>
-        Load(HostsFile, StorageJson.Default.ListPairedHost) ?? [];
+    /// <summary>Returns the kept hosts, most recently kept first.</summary>
+    internal static List<KeptHost> LoadHosts() =>
+        Load(HostsFile, StorageJson.Default.ListKeptHost) ?? [];
 
-    /// <summary>Keeps the paired hosts.</summary>
-    internal static void SaveHosts(List<PairedHost> hosts) =>
-        Save(HostsFile, hosts, StorageJson.Default.ListPairedHost);
+    /// <summary>Saves the kept hosts.</summary>
+    internal static void SaveHosts(List<KeptHost> hosts) =>
+        Save(HostsFile, hosts, StorageJson.Default.ListKeptHost);
 
     /// <summary>Returns the settings.</summary>
     internal static AppSettings LoadSettings() =>
@@ -77,7 +77,7 @@ internal static class Storage
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     UseStringEnumConverter = true)]
-[JsonSerializable(typeof(List<PairedHost>))]
+[JsonSerializable(typeof(List<KeptHost>))]
 [JsonSerializable(typeof(AppSettings))]
 internal sealed partial class StorageJson : JsonSerializerContext
 {
