@@ -122,8 +122,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The streaming tests encode, send and decode video and audio in real
+      # time, a host and a client each; macOS runners have three processors,
+      # too few to run them all at once and keep time, so two run at a time.
       - name: Tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=2
 
       - name: Build the qdp command
         run: cargo build --release --locked -p qdp-cli
