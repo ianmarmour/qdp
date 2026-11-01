@@ -1,20 +1,20 @@
-# Checks every change on Linux, builds the qdp command for Linux and the
-# Android app, and publishes both as a GitHub release when a version tag
-# such as v0.2.0 is pushed.
+# Checks every change merged into main on Linux, builds the qdp command for
+# Linux and the Android app, and publishes both as a GitHub release when a
+# version tag such as v0.2.0 is pushed. Pull requests are not checked here,
+# so that merging never waits for it; a run can be started on any branch by
+# hand.
 name: CI
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # A newer push to a pull request replaces its checks; main and tags build
-  # every commit.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Every commit to main, and every tag, is built.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -99,9 +99,8 @@ jobs:
       - name: Build the app
         working-directory: android
         # With the signing secrets set, every build is signed with the same
-        # key, so that each installs over the last; without them, as for
-        # pull requests from forks, builds are signed with a throwaway debug
-        # key.
+        # key, so that each installs over the last; without them, builds are
+        # signed with a throwaway debug key.
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           QDP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}

@@ -286,8 +286,9 @@ returning connects again.
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
-every pull request and push to `main` on Linux: formatting, clippy and the
-tests. It also builds the `qdp` command for Linux and the Android app, which
+every change merged into `main` on Linux: formatting, clippy and the tests.
+Pull requests are not checked, so that merging never waits for it, and a run
+can be started on any branch from the Actions tab. It also builds the `qdp` command for Linux and the Android app, which
 each run keeps as downloadable artifacts. Pushing a version tag publishes both
 as a GitHub release:
 
