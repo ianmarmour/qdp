@@ -136,6 +136,14 @@ fn check_stream(units: &[Vec<u8>]) -> Vec<ParsedFrame> {
         }
         all.extend(frames);
     }
+    // Every frame read refreshed at least one slot, which now holds it.
+    let last = all
+        .iter()
+        .rfind(|frame| !frame.header.show_existing_frame)
+        .unwrap();
+    assert!(parser.refs().iter().any(|slot| {
+        slot.valid && slot.order_hint == last.header.order_hint && slot.size == last.header.size
+    }));
     all
 }
 
