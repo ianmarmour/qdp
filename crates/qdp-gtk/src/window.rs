@@ -57,6 +57,8 @@ const OK: &str = "ok";
 
 /// Sets up the app's actions as it starts.
 pub fn startup(application: &adw::Application) {
+    // The windows take the app's icon, as the desktop entry names it.
+    gtk::Window::set_default_icon_name(APP_ID);
     let about = gio::ActionEntry::builder("about")
         .activate(|application: &adw::Application, _, _| {
             let about = adw::AboutDialog::builder()
