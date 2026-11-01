@@ -22,10 +22,13 @@ base_dn = "DC=corp,DC=example,DC=com"
 # name_attribute = "uid"
 
 [totp]
-# Who enrolls TOTP secrets: "admin-only", with `qdp-gateway totp enroll USER`,
-# or "first-login", which shows a new user a QR code for their authenticator
-# app the first time they sign in.
-enrollment = "admin-only"
+# Who enrolls TOTP secrets. "first-login": a user without one signs in with
+# their domain password, is shown a QR code for their authenticator app, such
+# as Google Authenticator, Microsoft Authenticator or Authy, and types its
+# first code; from then on every sign-in asks for a code after the password.
+# "admin-only": only `qdp-gateway totp enroll USER` enrolls, for organizations
+# that will not let a password alone choose the second factor.
+enrollment = "first-login"
 
 [assertions]
 # The groups hosts are told users are in.

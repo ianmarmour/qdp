@@ -504,12 +504,15 @@ packaging/linux/stage-gtk.sh target/release/qdp-gtk ~/.local && cp target/releas
 
 `qdp-gateway` ([`crates/qdp-gateway`](crates/qdp-gateway)) lets users outside
 an organization's network reach the QDP hosts inside it through one public
-endpoint ([Section 13](doc/spec/13-gateway.md) of the spec). It signs each
-user in with the organization's directory, LDAP or Active Directory over TLS,
-then always a TOTP code from an authenticator app such as Google
-Authenticator, Microsoft Authenticator or Authy, and tunnels their QDP
-sessions, end to end, to the hosts it lists for them or that its routes let
-them open by their names inside the network. It stands apart from QDP's apps
+endpoint ([Section 13](doc/spec/13-gateway.md) of the spec). The organization
+brings its own accounts: each user signs in with their domain credentials,
+checked with its directory, LDAP or Active Directory over TLS, then always a
+TOTP code from an authenticator app such as Google Authenticator, Microsoft
+Authenticator or Authy. A user without one yet is shown a QR code to add it
+to their app the first time, and asked for a code at every sign-in after;
+`enrollment = "admin-only"` leaves enrolling to administrators instead. It
+tunnels their QDP sessions, end to end, to the hosts it lists for them or
+that its routes let them open by their names inside the network. It stands apart from QDP's apps
 and hosts, and runs as a service on Linux and Windows servers.
 
 On Linux, install the release's `qdp-gateway-linux-x86_64.rpm`, or run
