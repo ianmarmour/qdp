@@ -168,6 +168,11 @@ pub struct AdmissionTicket {
 }
 
 impl AdmissionTicket {
+    /// Returns the connection's address.
+    pub(crate) fn address(&self) -> IpAddr {
+        self.address
+    }
+
     /// Records a failed authentication attempt, as `user` if it was an
     /// attempt as one of the host's users.
     pub(crate) fn failed(&self, user: Option<&str>) {

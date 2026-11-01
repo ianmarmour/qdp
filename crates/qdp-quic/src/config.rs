@@ -55,6 +55,10 @@ pub enum HostVerification {
     /// The host's certificate must chain to one of these roots and be valid for
     /// the server name.
     WebPki(Arc<rustls::RootCertStore>),
+    /// Any key the host proves it holds, which the client then authenticates
+    /// by pairing (Section 4.4.9). Only for a session that authenticates with
+    /// `PAIRING`, and pins the key once that succeeds.
+    Pairing,
 }
 
 /// Returns the cryptographic provider QDP uses: ring, with TLS 1.3 only.
@@ -121,6 +125,9 @@ pub fn client_config(
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PinnedKeyVerifier::new(pins, provider))),
         HostVerification::WebPki(roots) => builder.with_root_certificates(roots),
+        HostVerification::Pairing => builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedKeyVerifier::for_pairing(provider))),
     };
     let mut tls = match identity {
         Some(identity) => {

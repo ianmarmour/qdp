@@ -25,11 +25,12 @@ use qdp_runtime::{
     CursorWarp, DesktopScale, DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest,
     FrameArrivals, FrameInfo, FrameSink, FrameSource, GamepadFeedback, HostAudio,
     HostAuthenticator, HostDesktop, HostOptions, InputAction, InputHandle, InputInjector,
-    InputQueue, Microphone, NoInput, OpenedDesktop, PassthroughDevice, PassthroughFeedback,
-    PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton, PointerPosition, Presentation,
-    PresentationTiming, RefreshMode, ResumptionSlot, RuntimeError, SAMPLE_RATE, SharedClipboard,
-    SinkControl, TestPattern, TouchPhase, TouchPoint, UserInput, WantedDisplay, WarpKind,
-    input_channel, input_classes, run, serve,
+    InputQueue, Microphone, NoInput, OpenedDesktop, Pairing, PairingEvent, PairingOutcome,
+    PairingPrompt, PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect,
+    Playout, PointerButton, PointerPosition, Presentation, PresentationTiming, RefreshMode,
+    ResumptionSlot, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
+    TouchPhase, TouchPoint, UserInput, WantedDisplay, WarpKind, input_channel, input_classes, run,
+    serve,
 };
 
 /// The width of the streamed frames.
@@ -392,6 +393,19 @@ fn start_host_with(
     tokio::task::JoinHandle<Result<qdp_runtime::HostSummary, RuntimeError>>,
 ) {
     let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    start_host_on(identity, authenticator, desktop)
+}
+
+/// Starts a host presenting `identity`, serving `desktop` to one client.
+fn start_host_on(
+    identity: TlsIdentity,
+    authenticator: HostAuthenticator,
+    desktop: HostDesktop,
+) -> (
+    SocketAddr,
+    KeyPin,
+    tokio::task::JoinHandle<Result<qdp_runtime::HostSummary, RuntimeError>>,
+) {
     let pin = identity.key_pin().unwrap();
     let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
     let address = endpoint.local_address().unwrap();
@@ -444,6 +458,7 @@ fn client_options(credentials: ClientCredentials) -> ClientOptions {
             layout: "gb".to_owned(),
         }),
         resumption: ResumptionSlot::default(),
+        pairing_prompt: None,
     }
 }
 
@@ -468,18 +483,25 @@ async fn stream_with(
     input: Option<(InputHandle, InputQueue)>,
     identity: Option<TlsIdentity>,
 ) -> Result<Collector, RuntimeError> {
+    let verification = HostVerification::PinnedKeys(vec![pin]);
+    stream_verified(address, verification, options, input, identity).await
+}
+
+/// Connects a client that verifies the host with `verification`, as
+/// [`stream_with`] does.
+async fn stream_verified(
+    address: SocketAddr,
+    verification: HostVerification,
+    options: ClientOptions,
+    input: Option<(InputHandle, InputQueue)>,
+    identity: Option<TlsIdentity>,
+) -> Result<Collector, RuntimeError> {
     let display = options.display;
     let mut endpoint = ClientEndpoint::bind(loopback()).unwrap();
     if let Some(identity) = identity {
         endpoint.set_identity(identity);
     }
-    let connection = endpoint
-        .connect(
-            address,
-            SERVER_NAME,
-            HostVerification::PinnedKeys(vec![pin]),
-        )
-        .await?;
+    let connection = endpoint.connect(address, SERVER_NAME, verification).await?;
     let (handle, mut queue) = input.unzip();
     let full_size = (display.width as usize, display.height as usize) >= (WIDTH, HEIGHT);
     let mut collector = Collector {
@@ -2748,6 +2770,7 @@ async fn reconnects_with_a_resumption_token() {
     };
     let first = ClientOptions {
         resumption: resumption.clone(),
+        pairing_prompt: None,
         ..client_options(password)
     };
     tokio::time::timeout(TEST_TIMEOUT, stream_with(address, pin, first, None, None))
@@ -2760,6 +2783,7 @@ async fn reconnects_with_a_resumption_token() {
 
     let resumed = ClientOptions {
         resumption: resumption.clone(),
+        pairing_prompt: None,
         ..client_options(token.clone())
     };
     let collector =
@@ -2813,4 +2837,161 @@ async fn client_certificate_authenticates() {
             );
         }
     }
+}
+
+/// The codes a pairing host showed and how its exchanges ended, as its
+/// listener heard them.
+#[derive(Debug, Default)]
+struct PairingLog {
+    /// The latest code shown.
+    shown: Option<String>,
+    /// How each exchange ended.
+    ended: Vec<PairingOutcome>,
+}
+
+/// Returns a desktop that streams the test pattern, with no input.
+fn pattern_desktop() -> HostDesktop {
+    host_desktop(
+        test_pattern(),
+        Box::new(NoInput),
+        None,
+        HostAudio::default(),
+    )
+}
+
+/// Returns a host identity, and an authenticator that pairs for it and
+/// keeps what its listener hears in the returned log.
+fn pairing_host() -> (TlsIdentity, HostAuthenticator, Arc<Mutex<PairingLog>>) {
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let log = Arc::new(Mutex::new(PairingLog::default()));
+    let heard = Arc::clone(&log);
+    let pairing = Pairing::new(identity.key_pin().unwrap(), move |event| {
+        let mut log = heard.lock().unwrap();
+        match event {
+            PairingEvent::Requested { code, .. } => log.shown = Some(code.to_string()),
+            PairingEvent::Ended { outcome, .. } => log.ended.push(outcome),
+        }
+    });
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.enable_pairing(pairing);
+    (identity, authenticator, log)
+}
+
+/// Returns a client's options for pairing as `client_key`, whose prompt
+/// types the code `log` shows, or another if `typo`, and keeps the paired
+/// host's key in `paired`.
+fn pairing_options(
+    client_key: KeyPin,
+    log: &Arc<Mutex<PairingLog>>,
+    typo: bool,
+    paired: &Arc<Mutex<Option<KeyPin>>>,
+) -> ClientOptions {
+    let shown = Arc::clone(log);
+    let pinned = Arc::clone(paired);
+    let prompt = PairingPrompt::new(
+        move || {
+            let code = shown
+                .lock()
+                .unwrap()
+                .shown
+                .clone()
+                .expect("the host showed a code");
+            let typed = if typo {
+                format!("{:04}", (code.parse::<u32>().unwrap() + 1) % 10_000)
+            } else {
+                code
+            };
+            Box::pin(async move { Some(typed) })
+        },
+        move |host_key| *pinned.lock().unwrap() = Some(host_key),
+    );
+    let mut options = client_options(ClientCredentials::Pairing {
+        device_name: "Test tablet".to_owned(),
+        client_key,
+    });
+    options.pairing_prompt = Some(prompt);
+    options
+}
+
+/// A client whose user types the code the host shows pairs and streams; it
+/// learns the host's key, and the host accepts its key with
+/// `CLIENT_CERTIFICATE` from then on (Section 4.4.9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_with_the_shown_code_authenticates() {
+    let (identity, authenticator, log) = pairing_host();
+    let host_key = identity.key_pin().unwrap();
+    let again = identity.clone_key();
+    let (address, _, _host) = start_host_on(identity, authenticator.clone(), pattern_desktop());
+    let client = TlsIdentity::generate_self_signed(vec!["client".to_owned()]).unwrap();
+    let client_key = client.key_pin().unwrap();
+    let paired = Arc::new(Mutex::new(None));
+    let options = pairing_options(client_key, &log, false, &paired);
+    let result = tokio::time::timeout(
+        TEST_TIMEOUT,
+        stream_verified(
+            address,
+            HostVerification::Pairing,
+            options,
+            None,
+            Some(client.clone_key()),
+        ),
+    )
+    .await
+    .expect("the session finishes in time");
+    check_frames(&result.unwrap());
+    assert_eq!(*paired.lock().unwrap(), Some(host_key));
+    assert_eq!(
+        log.lock().unwrap().ended,
+        [PairingOutcome::Paired { client_key }]
+    );
+
+    // The paired client now connects with its certificate, pinning the host.
+    let (address, _, _host) = start_host_on(again, authenticator, pattern_desktop());
+    let options = client_options(ClientCredentials::Certificate);
+    let result = tokio::time::timeout(
+        TEST_TIMEOUT,
+        stream_with(address, host_key, options, None, Some(client)),
+    )
+    .await
+    .expect("the session finishes in time");
+    check_frames(&result.unwrap());
+}
+
+/// A client whose user types another code is refused, and learns no key to
+/// pin; after three such failures in a row the host refuses to pair for a
+/// minute, even with the right code (Section 4.4.9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_with_another_code_fails() {
+    let (identity, authenticator, log) = pairing_host();
+    let client = TlsIdentity::generate_self_signed(vec!["client".to_owned()]).unwrap();
+    let client_key = client.key_pin().unwrap();
+    let paired = Arc::new(Mutex::new(None));
+    for attempt in 0..4 {
+        let typo = attempt < 3;
+        let (address, _, _host) = start_host_on(
+            identity.clone_key(),
+            authenticator.clone(),
+            pattern_desktop(),
+        );
+        let options = pairing_options(client_key, &log, typo, &paired);
+        let result = tokio::time::timeout(
+            TEST_TIMEOUT,
+            stream_verified(
+                address,
+                HostVerification::Pairing,
+                options,
+                None,
+                Some(client.clone_key()),
+            ),
+        )
+        .await
+        .expect("the session finishes in time");
+        assert!(
+            matches!(result, Err(RuntimeError::AuthenticationFailed(_))),
+            "attempt {attempt}: {:?}",
+            result.err()
+        );
+    }
+    assert_eq!(*paired.lock().unwrap(), None);
+    assert_eq!(log.lock().unwrap().ended, [PairingOutcome::Failed; 3]);
 }
