@@ -20,6 +20,8 @@ mod session;
 #[cfg(target_os = "linux")]
 mod session_events;
 #[cfg(target_os = "linux")]
+mod settings;
+#[cfg(target_os = "linux")]
 mod window;
 
 #[cfg(target_os = "linux")]

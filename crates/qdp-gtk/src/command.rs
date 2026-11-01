@@ -35,10 +35,26 @@ fn start_with(
 /// Starts `qdp` with `arguments`, its standard input and output piped to
 /// the app, and its log on the app's standard error.
 pub fn start(arguments: &[&OsStr]) -> Result<gio::Subprocess, glib::Error> {
-    start_with(
-        arguments,
+    start_with_environment(arguments, &[])
+}
+
+/// Starts `qdp` as [`start`] does, with the environment variables
+/// `environment` besides the app's: for secrets, which a command line would
+/// show other users.
+pub fn start_with_environment(
+    arguments: &[&OsStr],
+    environment: &[(&str, &str)],
+) -> Result<gio::Subprocess, glib::Error> {
+    let launcher = gio::SubprocessLauncher::new(
         gio::SubprocessFlags::STDIN_PIPE | gio::SubprocessFlags::STDOUT_PIPE,
-    )
+    );
+    for (variable, value) in environment {
+        launcher.setenv(variable, value, true);
+    }
+    let program = program();
+    let mut argv = vec![program.as_os_str()];
+    argv.extend_from_slice(arguments);
+    launcher.spawn(&argv)
 }
 
 /// Runs `qdp` with `arguments`, its output dropped, and returns whether it

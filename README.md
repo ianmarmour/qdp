@@ -480,9 +480,14 @@ and later). It lists the hosts on the local network, which it follows with
 `qdp discover --watch`, and those it paired with; choosing a new host pairs
 with it by the code the host shows, and choosing a paired one streams at once,
 in the window `qdp connect` opens, which the app runs with `--events` and
-follows. It keeps the client's key and the hosts it paired with in
-`~/.local/share/qdp`, and runs the `qdp` installed beside it, or else the one
-on the `PATH`. The release's `qdp-gtk-linux-x86_64.rpm`, with `qdp`'s RPM,
+follows. A host set up with a key pin and a token is added by its address,
+pin and token instead, the token kept in a file only the user may read and
+passed to `qdp connect` in `QDP_TOKEN`, out of the command line. Its
+preferences (Ctrl+,) choose the video's resolution and decoding, sound, the
+microphone, the clipboard and touchpad gestures for every stream. It keeps the
+client's key and the hosts it paired with in `~/.local/share/qdp`, its
+settings in `~/.config/qdp`, and runs the `qdp` installed beside it, or else
+the one on the `PATH`. The release's `qdp-gtk-linux-x86_64.rpm`, with `qdp`'s RPM,
 installs it with its desktop entry, icons and AppStream metadata, so that it
 shows in the desktop's menus and software center; its
 `qdp-gtk-linux-x86_64.tar.gz`, extracted into `~/.local`, installs it for one

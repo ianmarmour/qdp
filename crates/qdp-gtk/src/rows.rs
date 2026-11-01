@@ -3,7 +3,7 @@
 //! choosing it does. The Mac and iPhone app's `HostStore` lists them alike.
 
 use crate::discovery::{FoundHost, PairingOffer};
-use crate::hosts::PairedHost;
+use crate::hosts::{PairedHost, Token};
 use crate::key_pin::KeyPin;
 
 /// How a row stands.
@@ -27,8 +27,29 @@ pub enum Status {
 pub enum Authentication {
     /// By the key pin kept from pairing.
     Paired(KeyPin),
+    /// By a key pin and a token the user added the host with.
+    Token {
+        /// The host's key pin.
+        pin: KeyPin,
+        /// The token it accepts.
+        token: Token,
+    },
     /// By pairing, with the code the host shows.
     Pair,
+}
+
+impl Authentication {
+    /// Returns how a host paired with, or added with a token, is
+    /// authenticated.
+    fn of(host: &PairedHost) -> Self {
+        match &host.token {
+            Some(token) => Self::Token {
+                pin: host.pin.clone(),
+                token: token.clone(),
+            },
+            None => Self::Paired(host.pin.clone()),
+        }
+    }
 }
 
 /// A host to stream from, or to pair with.
@@ -47,7 +68,7 @@ impl Target {
     /// host's pin once paired, its address until then.
     pub fn key(&self) -> &str {
         match &self.authentication {
-            Authentication::Paired(pin) => pin.as_str(),
+            Authentication::Paired(pin) | Authentication::Token { pin, .. } => pin.as_str(),
             Authentication::Pair => &self.address,
         }
     }
@@ -95,7 +116,7 @@ pub fn rows(found: &[FoundHost], paired: &[PairedHost]) -> Vec<Row> {
                     target: Some(Target {
                         name: host.name.clone(),
                         address: host.address.clone(),
-                        authentication: Authentication::Paired(known.pin.clone()),
+                        authentication: Authentication::of(known),
                     }),
                     paired: Some(known.clone()),
                 };
@@ -138,7 +159,7 @@ pub fn rows(found: &[FoundHost], paired: &[PairedHost]) -> Vec<Row> {
                 target: Some(Target {
                     name: host.name.clone(),
                     address: host.address.clone(),
-                    authentication: Authentication::Paired(host.pin.clone()),
+                    authentication: Authentication::of(host),
                 }),
                 paired: Some(host.clone()),
             }),
@@ -171,6 +192,7 @@ mod tests {
             pin,
             address: address.to_owned(),
             name: name.to_owned(),
+            token: None,
         }
     }
 
@@ -236,5 +258,33 @@ mod tests {
         assert_eq!(rows[5].detail, "Not on this network · 10.0.0.2:4433");
         assert!(rows[2].paired.is_none());
         assert_eq!(rows[4].paired.as_ref().unwrap().pin, pin("cd"));
+    }
+
+    #[test]
+    fn authenticates_token_hosts_by_their_token() {
+        let token = Token::new("s3cret").unwrap();
+        let host = PairedHost {
+            token: Some(token.clone()),
+            ..paired("Lab", "10.0.0.3:4433", pin("ef"))
+        };
+        let expected = Authentication::Token {
+            pin: pin("ef"),
+            token,
+        };
+        let seen = rows(
+            &[found(
+                "lab",
+                "10.0.0.7:4433",
+                Some(pin("ef")),
+                PairingOffer::NotOffered,
+            )],
+            std::slice::from_ref(&host),
+        );
+        assert_eq!(seen[0].status, Status::Ready);
+        assert_eq!(seen[0].target.as_ref().unwrap().authentication, expected);
+        assert_eq!(seen[0].target.as_ref().unwrap().key(), pin("ef").as_str());
+        let unseen = rows(&[], &[host]);
+        assert_eq!(unseen[0].status, Status::NotSeen);
+        assert_eq!(unseen[0].target.as_ref().unwrap().authentication, expected);
     }
 }

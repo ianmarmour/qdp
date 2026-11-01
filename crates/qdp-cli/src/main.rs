@@ -62,6 +62,10 @@ use crate::sink::CliSink;
 /// The environment variable that holds the password for `--user`.
 const PASSWORD_VARIABLE: &str = "QDP_PASSWORD";
 
+/// The environment variable `qdp connect` reads a token from when given no
+/// `--token`, so that apps keep it out of the command line.
+const TOKEN_VARIABLE: &str = "QDP_TOKEN";
+
 /// The environment variable that sets the log level.
 const LOG_VARIABLE: &str = "QDP_LOG";
 
@@ -238,6 +242,13 @@ fn print_pin(directory: &std::path::Path, role: Role) -> CliResult {
     let pin = identity.key_pin().map_err(|error| error.to_string())?;
     println!("{}", format_pin(pin));
     Ok(())
+}
+
+/// Returns the token in `QDP_TOKEN`, if it holds one.
+fn token_from_environment() -> Option<String> {
+    std::env::var(TOKEN_VARIABLE)
+        .ok()
+        .filter(|token| !token.is_empty())
 }
 
 /// Returns the password from `QDP_PASSWORD`.
@@ -1066,7 +1077,14 @@ async fn receive(
     let mut endpoint = ClientEndpoint::bind(local).map_err(|error| error.to_string())?;
     // The client presents its certificate only when it authenticates with
     // it, so that other hosts do not learn its key.
-    let client_key = if pairs || (args.token.is_none() && args.user.is_none()) {
+    // A token from the environment stays out of the command line, which
+    // other users can read.
+    let token = args.token.clone().or_else(|| {
+        (!pairs && args.user.is_none())
+            .then(token_from_environment)
+            .flatten()
+    });
+    let client_key = if pairs || (token.is_none() && args.user.is_none()) {
         let identity = identity::load_or_create(&args.identity, Role::Client)
             .map_err(|error| format!("cannot load the client identity: {error}"))?;
         let pin = identity.key_pin().map_err(|error| error.to_string())?;
@@ -1100,7 +1118,7 @@ async fn receive(
             HostVerification::PinnedKeys(vec![host.pin])
         }
     };
-    let credentials = match (&args.token, &args.user, client_key) {
+    let credentials = match (&token, &args.user, client_key) {
         (Some(token), _, _) => ClientCredentials::Token(token.as_bytes().to_vec()),
         (None, Some(user), _) => ClientCredentials::Password {
             username: user.clone(),
