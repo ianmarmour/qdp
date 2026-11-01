@@ -27,11 +27,15 @@ final class StreamViewController: UIViewController {
     private var dragging = false
     private var scrollRemainder = CGSize.zero
     private var trackpadGestures: [UIGestureRecognizer] = []
+    /// Hides an attached pointer while the host's cursor is drawn at it.
+    private var pointerInteraction: UIPointerInteraction?
 
     /// How much farther than the finger the pointer moves.
     private static let pointerSpeed: CGFloat = 1.5
     /// 1/120ths of a detent per point two fingers scroll.
     private static let unitsPerPoint: CGFloat = 3
+    /// 1/120ths of a detent in a mouse wheel's notch.
+    private static let unitsPerNotch: CGFloat = 120
     /// How long a finger is held still before it drags.
     private static let dragDelay: TimeInterval = 0.35
     /// The frame rates the display is asked for while streaming.
@@ -63,6 +67,9 @@ final class StreamViewController: UIViewController {
         view.addSubview(keyboard)
         installGestures()
         view.addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered)))
+        let interaction = UIPointerInteraction(delegate: self)
+        view.addInteraction(interaction)
+        pointerInteraction = interaction
     }
 
     override var canBecomeFirstResponder: Bool { true }
@@ -170,14 +177,37 @@ final class StreamViewController: UIViewController {
             gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
             view.addGestureRecognizer(gesture)
         }
+        // An attached trackpad's and mouse wheel's scrolling, whatever
+        // touching does. Without touches to count, no finger starts them.
+        let glide = UIPanGestureRecognizer(target: self, action: #selector(scrolled))
+        glide.allowedScrollTypesMask = .continuous
+        let wheel = UIPanGestureRecognizer(target: self, action: #selector(wheeled))
+        wheel.allowedScrollTypesMask = .discrete
+        for gesture in [glide, wheel] {
+            gesture.maximumNumberOfTouches = 0
+            view.addGestureRecognizer(gesture)
+        }
+    }
+
+    /// Whether fingers on the screen work as a trackpad, which draws the
+    /// host's cursor at the pointer.
+    private var actsAsTrackpad: Bool {
+        touchMode == .trackpad && TouchSource.current == .touchscreen
     }
 
     private func touchModeChanged() {
-        let trackpad = touchMode == .trackpad
+        let trackpad = actsAsTrackpad
         trackpadGestures.forEach { $0.isEnabled = trackpad }
+        pointerInteraction?.invalidate()
         if let session = model.session {
             qdp_session_draw_cursor(session, trackpad)
         }
+    }
+
+    /// Whether `touch` is a pointer's rather than a finger's: an attached
+    /// mouse's or trackpad's, or, on a Mac, every touch.
+    private func isPointer(_ touch: UITouch) -> Bool {
+        touch.type == .indirectPointer || TouchSource.current == .macPointer
     }
 
     /// The picture's place in the layer and the video's size, once a frame
@@ -220,13 +250,38 @@ final class StreamViewController: UIViewController {
         movePointer(by: delta)
     }
 
+    /// Scrolls as two fingers on the screen or an attached trackpad do.
     @objc private func scrolled(_ gesture: UIPanGestureRecognizer) {
-        guard let session = model.session else { return }
+        scroll(by: takeTranslation(of: gesture), unitsPerPoint: Self.unitsPerPoint)
+    }
+
+    /// Scrolls a notch for each of a mouse wheel's. UIKit tells only which
+    /// way the wheel turned, not how far a notch moves.
+    @objc private func wheeled(_ gesture: UIPanGestureRecognizer) {
+        let delta = takeTranslation(of: gesture)
+        let notches = CGPoint(x: Self.direction(of: delta.x), y: Self.direction(of: delta.y))
+        scroll(by: notches, unitsPerPoint: Self.unitsPerNotch)
+    }
+
+    /// Returns how far `gesture` moved since it was last asked.
+    private func takeTranslation(of gesture: UIPanGestureRecognizer) -> CGPoint {
         let delta = gesture.translation(in: view)
         gesture.setTranslation(.zero, in: view)
+        return delta
+    }
+
+    /// Returns 1, -1 or 0 for a positive, negative or no movement.
+    private static func direction(of movement: CGFloat) -> CGFloat {
+        movement > 0 ? 1 : movement < 0 ? -1 : 0
+    }
+
+    /// Scrolls as the content would follow a movement of `delta`, at
+    /// `unitsPerPoint` 1/120ths of a detent per point.
+    private func scroll(by delta: CGPoint, unitsPerPoint: CGFloat) {
+        guard let session = model.session else { return }
         // Content follows the fingers: moving them down scrolls up.
-        let horizontal = scrollRemainder.width - delta.x * Self.unitsPerPoint
-        let vertical = scrollRemainder.height + delta.y * Self.unitsPerPoint
+        let horizontal = scrollRemainder.width - delta.x * unitsPerPoint
+        let vertical = scrollRemainder.height + delta.y * unitsPerPoint
         let whole = (horizontal.rounded(.towardZero), vertical.rounded(.towardZero))
         scrollRemainder = CGSize(width: horizontal - whole.0, height: vertical - whole.1)
         if whole.0 != 0 || whole.1 != 0 {
@@ -279,7 +334,7 @@ final class StreamViewController: UIViewController {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            if touch.type == .indirectPointer {
+            if isPointer(touch) {
                 pointerButton(touch, pressed: true, event: event)
             } else if touchMode == .direct {
                 send(touch, phase: QDP_TOUCH_DOWN)
@@ -289,7 +344,7 @@ final class StreamViewController: UIViewController {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            if touch.type == .indirectPointer {
+            if isPointer(touch) {
                 pointerMoved(touch)
             } else if touchMode == .direct {
                 send(touch, phase: QDP_TOUCH_MOVE)
@@ -299,7 +354,7 @@ final class StreamViewController: UIViewController {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            if touch.type == .indirectPointer {
+            if isPointer(touch) {
                 pointerButton(touch, pressed: false, event: event)
             } else if touchMode == .direct {
                 send(touch, phase: QDP_TOUCH_UP)
@@ -309,7 +364,7 @@ final class StreamViewController: UIViewController {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            if touch.type == .indirectPointer {
+            if isPointer(touch) {
                 pointerButton(touch, pressed: false, event: event)
             } else if touchMode == .direct {
                 send(touch, phase: QDP_TOUCH_CANCEL)
@@ -425,6 +480,14 @@ final class StreamViewController: UIViewController {
         guard let session = model.session else { return }
         qdp_session_key(session, usage, true)
         qdp_session_key(session, usage, false)
+    }
+}
+
+extension StreamViewController: UIPointerInteractionDelegate {
+    /// Hides an attached pointer while the host's cursor is drawn at it, so
+    /// that one cursor shows.
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        actsAsTrackpad ? .hidden() : nil
     }
 }
 

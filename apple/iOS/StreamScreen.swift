@@ -47,8 +47,10 @@ struct StreamScreen: View {
         .defersSystemGestures(on: .all)
         .confirmationDialog(model.target.name, isPresented: $menuOpen, titleVisibility: .visible) {
             Button("Show Keyboard") { keyboardRequests += 1 }
-            Button(touchMode == .trackpad ? "Use Direct Touch" : "Use Trackpad") {
-                touchMode = touchMode == .trackpad ? .direct : .trackpad
+            if TouchSource.current == .touchscreen {
+                Button(touchMode == .trackpad ? "Use Direct Touch" : "Use Trackpad") {
+                    touchMode = touchMode == .trackpad ? .direct : .trackpad
+                }
             }
             Button(showStats ? "Hide Statistics" : "Show Statistics") { showStats.toggle() }
             Button("Disconnect", role: .destructive) { dismiss() }

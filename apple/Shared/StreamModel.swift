@@ -159,12 +159,16 @@ final class StreamModel {
 
     /// Waits for the session's events on a queue of their own and handles
     /// them on the main actor.
+    ///
+    /// The queue runs at the default quality of service, as the session's
+    /// threads that send the events do, so that waiting for them inverts no
+    /// priorities.
     private func listen(to session: OpaquePointer) {
         listening.value = true
         let flag = listening
         let wait = Self.eventWait
         let address = Int(bitPattern: session)
-        DispatchQueue.global(qos: .userInitiated).async(group: listener) { [weak self] in
+        DispatchQueue.global(qos: .default).async(group: listener) { [weak self] in
             guard let session = OpaquePointer(bitPattern: address) else { return }
             while flag.value {
                 guard let line = Core.takeString(qdp_session_next_event(session, wait)) else {
