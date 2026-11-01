@@ -52,6 +52,9 @@ wayland-client = { version = "0.31.15", default-features = false }
 wayland-protocols = { version = "0.32.13", default-features = false, features = ["client", "unstable"] }
 # KWin's display settings, which the host changes to the client's display.
 wayland-protocols-plasma = { version = "0.3.12", default-features = false, features = ["client"] }
+# The display settings of wlroots compositors and others sharing their
+# protocol, which the host changes to the client's display.
+wayland-protocols-wlr = { version = "0.3.12", default-features = false, features = ["client"] }
 x11rb = { version = "0.13", default-features = false }
 # PipeWire, which delivers captured screens on Linux.
 pipewire = { version = "0.10.1", default-features = false, features = ["v0_3_49"] }

@@ -38,6 +38,7 @@ Serve options:
                        Change the streamed monitor's resolution and scale to
                        the client's display for each session, as close as
                        its modes allow, and back afterwards; on KDE Plasma
+                       and wlroots compositors such as sway and Hyprland
                        (default off: the host scales its frames instead)
   --fps N              Frames per second (default 60)
   --encoder KIND       auto, hardware or software (default auto: the GPU's

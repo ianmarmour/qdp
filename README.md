@@ -74,8 +74,11 @@ mode closest to the client's display, by shape and then by size, at the
 nearest refresh rate, and the client's scale. When the session ends the
 monitor gets its own mode and scale back; they are saved in the identity
 directory while changed, so a host that stops without putting them back does
-when it next starts. This works on KDE Plasma so far, through KWin's display
-settings, as System Settings changes them.
+when it next starts. The host changes the settings the way the desktop's own
+display tools do: on KDE Plasma through KWin's output management, and on sway,
+Hyprland, river, Wayfire, niri, COSMIC and other compositors sharing the
+wlroots output management protocol through that, where a headless or virtual
+monitor takes the client's size exactly.
 
 With `--headless` the client opens no window and only logs statistics, and
 `--output session.y4m` also writes the decoded video to a YUV4MPEG2 file, which

@@ -21,7 +21,7 @@ use wayland_protocols_plasma::output_management::v2::client::kde_output_configur
 use wayland_protocols_plasma::output_management::v2::client::kde_output_management_v2::KdeOutputManagementV2;
 
 use super::monitor_matching::MonitorState;
-use crate::monitor_modes::{MonitorMode, MonitorSettings};
+use crate::monitor_modes::{ModeRange, MonitorMode, MonitorSettings};
 
 /// The output device versions used: 2 names each monitor.
 const DEVICE_VERSIONS: RangeInclusive<u32> = 2..=11;
@@ -282,6 +282,7 @@ impl KdeDisplays {
             .ok_or_else(|| format!("KWin did not say {name}'s mode"))?;
         Ok(MonitorState {
             modes: device.modes.iter().filter_map(Mode::mode).collect(),
+            range: ModeRange::Listed,
             current: MonitorSettings {
                 mode: current,
                 scale: device.scale,

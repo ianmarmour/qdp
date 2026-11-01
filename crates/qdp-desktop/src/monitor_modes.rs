@@ -60,6 +60,15 @@ impl MonitorMode {
     }
 }
 
+/// Which modes a monitor takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ModeRange {
+    /// Only the ones it lists, as a real monitor.
+    Listed,
+    /// Any size, as a headless or virtual monitor.
+    Any,
+}
+
 /// The settings of a monitor that matching changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MonitorSettings {
@@ -77,14 +86,16 @@ impl MonitorSettings {
     }
 }
 
-/// Returns the settings that bring a monitor offering `modes`, whose settings
-/// are `current`, closest to `wanted`: the mode closest to its size, by
-/// shape first and then by area, at the refresh rate closest to its own; and
-/// its interface scale, or the current one if the client did not say.
-/// Returns `None` if the monitor offers no modes.
+/// Returns the settings that bring a monitor offering `modes`, or any mode as
+/// `range` says, whose settings are `current`, closest to `wanted`: its size
+/// exactly if the monitor takes any, or else the listed mode closest to it,
+/// by shape first and then by area, at the refresh rate closest to its own;
+/// and its interface scale, or the current one if the client did not say.
+/// Returns `None` if the monitor takes only listed modes and lists none.
 pub(crate) fn matching_settings(
     wanted: &WantedDisplay,
     modes: &[MonitorMode],
+    range: ModeRange,
     current: &MonitorSettings,
 ) -> Option<MonitorSettings> {
     let target = MonitorMode {
@@ -96,6 +107,17 @@ pub(crate) fn matching_settings(
             wanted.refresh_millihertz
         },
     };
+    let scale = if wanted.scale_percent == 0 {
+        current.scale
+    } else {
+        (f64::from(wanted.scale_percent) / UNIT_PERCENT).clamp(MIN_SCALE, MAX_SCALE)
+    };
+    if range == ModeRange::Any {
+        return Some(MonitorSettings {
+            mode: target,
+            scale,
+        });
+    }
     // How far a size is from the wanted one: how much its shape differs,
     // and how much its area does, each as a ratio.
     let size_distance = |mode: &MonitorMode| {
@@ -114,11 +136,6 @@ pub(crate) fn matching_settings(
                 .cmp(&refresh_distance(b))
                 .then(b.refresh_millihertz.cmp(&a.refresh_millihertz))
         })?;
-    let scale = if wanted.scale_percent == 0 {
-        current.scale
-    } else {
-        (f64::from(wanted.scale_percent) / UNIT_PERCENT).clamp(MIN_SCALE, MAX_SCALE)
-    };
     Some(MonitorSettings { mode: *mode, scale })
 }
 
@@ -224,12 +241,22 @@ mod tests {
     /// closest to the client's, with the client's scale.
     #[test]
     fn takes_the_size_asked_for() {
-        let settings =
-            matching_settings(&wanted(1920, 1080, 60, 100), &ultrawide(), &current()).unwrap();
+        let settings = matching_settings(
+            &wanted(1920, 1080, 60, 100),
+            &ultrawide(),
+            ModeRange::Listed,
+            &current(),
+        )
+        .unwrap();
         assert_eq!(settings.mode, mode(1920, 1080, 60));
         assert_eq!(settings.scale, 1.0);
-        let settings =
-            matching_settings(&wanted(1920, 1080, 50, 200), &ultrawide(), &current()).unwrap();
+        let settings = matching_settings(
+            &wanted(1920, 1080, 50, 200),
+            &ultrawide(),
+            ModeRange::Listed,
+            &current(),
+        )
+        .unwrap();
         assert_eq!(settings.mode, mode(1920, 1080, 50));
         assert_eq!(settings.scale, 2.0);
     }
@@ -239,23 +266,61 @@ mod tests {
     /// one or a small one of nearer shape.
     #[test]
     fn takes_the_closest_size_otherwise() {
-        let settings =
-            matching_settings(&wanted(3456, 2234, 120, 200), &ultrawide(), &current()).unwrap();
+        let settings = matching_settings(
+            &wanted(3456, 2234, 120, 200),
+            &ultrawide(),
+            ModeRange::Listed,
+            &current(),
+        )
+        .unwrap();
         assert_eq!(settings.mode, mode(3840, 2160, 60));
-        let settings =
-            matching_settings(&wanted(5000, 2100, 0, 0), &ultrawide(), &current()).unwrap();
+        let settings = matching_settings(
+            &wanted(5000, 2100, 0, 0),
+            &ultrawide(),
+            ModeRange::Listed,
+            &current(),
+        )
+        .unwrap();
         assert_eq!(settings.mode, mode(5120, 2160, 60));
         // An unsaid scale keeps the monitor's own.
         assert_eq!(settings.scale, 1.5);
-        assert!(matching_settings(&wanted(1920, 1080, 60, 100), &[], &current()).is_none());
+        assert!(
+            matching_settings(
+                &wanted(1920, 1080, 60, 100),
+                &[],
+                ModeRange::Listed,
+                &current()
+            )
+            .is_none()
+        );
+    }
+
+    /// A monitor that takes any mode, as a headless one, takes the client's
+    /// size exactly.
+    #[test]
+    fn takes_any_size_where_it_can() {
+        let settings = matching_settings(
+            &wanted(3456, 2234, 120, 200),
+            &[],
+            ModeRange::Any,
+            &current(),
+        )
+        .unwrap();
+        assert_eq!(settings.mode, mode(3456, 2234, 120));
+        assert_eq!(settings.scale, 2.0);
     }
 
     /// Scales are kept within what compositors take and compared as they
     /// keep them.
     #[test]
     fn keeps_scales_in_range() {
-        let settings =
-            matching_settings(&wanted(1920, 1080, 60, 1000), &ultrawide(), &current()).unwrap();
+        let settings = matching_settings(
+            &wanted(1920, 1080, 60, 1000),
+            &ultrawide(),
+            ModeRange::Listed,
+            &current(),
+        )
+        .unwrap();
         assert_eq!(settings.scale, MAX_SCALE);
         let near = MonitorSettings {
             scale: 1.5 + 1.0 / 1000.0,
