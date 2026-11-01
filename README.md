@@ -129,7 +129,12 @@ streams the screen, a notice on Linux and Windows hosts says that a device sees
 and controls it, so that whoever is at the machine knows; it goes when the
 session ends. On Linux it is a desktop notification; on Windows a banner at the
 top of the main display, over every window, which screen captures leave out, so
-that the stream does not show it.
+that the stream does not show it. On Windows, `qdp serve --privacy on` also
+covers every display while a session streams the screen, saying that the
+computer is in use from another device, and ignores its own keyboard and mouse,
+so that only the device streaming sees and controls it; Ctrl+Alt+Delete still
+works. The covers stay out of the stream, which needs Windows 10 version 2004 or
+later.
 
 On Linux the host encodes on the GPU through VA-API when the GPU can encode
 AV1 (AMD RDNA 3 or newer, Intel Arc or newer), and otherwise falls back to

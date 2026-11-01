@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use qdp::discovery::{PairingOffer, ServiceRecord};
 use qdp_codec::{CodecPreference, DecoderCommand};
 use qdp_desktop::{
-    Advertisement, Advertising, DisplayMatching, FrameMemory, Notification, ScreenOptions, Urgency,
+    Advertisement, Advertising, DisplayMatching, FrameMemory, HostPrivacy, Notification,
+    ScreenOptions, Urgency,
 };
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
 use qdp_runtime::{
@@ -44,8 +45,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::args::{
     AdvertiseMode, Audio, ClientsAction, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement,
-    GpuCapture, HostTrust, LockPolicy, PairingMode, Presentation, ServeArgs, SourceKind, USAGE,
-    format_pin, parse_args,
+    GpuCapture, HostTrust, LockPolicy, PairingMode, Presentation, Privacy, ServeArgs, SourceKind,
+    USAGE, format_pin, parse_args,
 };
 use crate::identity::Role;
 use crate::paired::{Paired, PairedFile};
@@ -292,6 +293,7 @@ async fn serve(args: ServeArgs) -> CliResult {
     let clipboard_directions = args.clipboard;
     let audio_setting = args.audio;
     let lock_policy = args.lock;
+    let privacy = args.privacy;
     let match_display = args.match_display;
     let screen = ScreenOptions {
         matching: match_display,
@@ -338,7 +340,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                 };
                 let options = Arc::clone(&options);
                 let state_directory = Arc::clone(&state_directory);
-                let notice = SessionNotice::default();
+                let local = LocalUser::new(privacy);
                 sessions.spawn(async move {
                     let connection = match incoming.establish().await {
                         Ok(connection) => connection,
@@ -356,7 +358,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                             Audio::Off => HostAudio::default(),
                         },
                         open: Box::new({
-                            let notice = notice.clone();
+                            let local = local.clone();
                             move || {
                                 Box::pin(open_desktop(
                                     source_kind,
@@ -364,14 +366,14 @@ async fn serve(args: ServeArgs) -> CliResult {
                                     state_directory,
                                     lock_policy,
                                     screen,
-                                    notice,
+                                    local,
                                     peer,
                                 ))
                             }
                         }),
                     };
                     let result = qdp_runtime::serve(connection, ticket, &options, desktop).await;
-                    notice.close().await;
+                    local.ended().await;
                     match result {
                         Ok(summary) => info!(
                             %peer,
@@ -475,22 +477,25 @@ fn shared_clipboard(directions: Option<ClipboardDirections>) -> Option<SharedCli
 
 /// Opens a session's desktop once its client has authenticated: what it
 /// streams, as [`open_source`] opens it, an input injector for it, and,
-/// when it streams the screen, the lock that `lock` asks for and `notice`
-/// that the client at `peer` streams it.
+/// when it streams the screen, the lock that `lock` asks for, and what
+/// `local` shows the host's user of the client at `peer` streaming it.
 async fn open_desktop(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
     lock: LockPolicy,
     screen: ScreenOptions,
-    notice: SessionNotice,
+    local: LocalUser,
     peer: SocketAddr,
 ) -> Result<OpenedDesktop, RuntimeError> {
     let (source, streamed) = open_source(kind, size, state_directory, screen)
         .await
         .map_err(RuntimeError::Capture)?;
     if streamed == Streamed::Screen {
-        notice.show(peer).await;
+        local
+            .streaming(peer)
+            .await
+            .map_err(|error| RuntimeError::Capture(format!("privacy was asked for: {error}")))?;
     }
     let (width, height) = source.size();
     let injector = qdp_desktop::input_injector(width as u32, height as u32);
@@ -544,6 +549,54 @@ impl SessionNotice {
         if let Some(notification) = shown {
             notification.close().await;
         }
+    }
+}
+
+/// What the host's user sees of a session that streams the screen (Section
+/// 11.4): the notice that a device streams it, and, where `--privacy`
+/// asks for it, the displays covered and the host's own input held back.
+#[derive(Debug, Clone)]
+struct LocalUser {
+    /// The notice.
+    notice: SessionNotice,
+    /// Whether privacy is asked for.
+    privacy: Privacy,
+    /// Privacy, while on.
+    covered: Arc<Mutex<Option<HostPrivacy>>>,
+}
+
+impl LocalUser {
+    /// Returns what the host's user sees of a session, covered as
+    /// `privacy` asks.
+    fn new(privacy: Privacy) -> Self {
+        Self {
+            notice: SessionNotice::default(),
+            privacy,
+            covered: Arc::default(),
+        }
+    }
+
+    /// Covers the displays if privacy is asked for, and tells the host's
+    /// user that the client at `peer` streams the screen.
+    ///
+    /// # Errors
+    ///
+    /// Fails if privacy is asked for and cannot be had, so that the session
+    /// does not stream an uncovered desktop.
+    async fn streaming(&self, peer: SocketAddr) -> Result<(), String> {
+        if self.privacy == Privacy::On {
+            let covered = qdp_desktop::host_privacy()?;
+            *self.covered.lock().unwrap_or_else(PoisonError::into_inner) = Some(covered);
+        }
+        self.notice.show(peer).await;
+        Ok(())
+    }
+
+    /// Uncovers the displays and takes the notice away, once the session
+    /// ended.
+    async fn ended(&self) {
+        *self.covered.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.notice.close().await;
     }
 }
 
