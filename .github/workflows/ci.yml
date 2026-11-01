@@ -156,6 +156,26 @@ jobs:
             qdp-linux-x86_64.rpm
           if-no-files-found: error
 
+      - name: Build and package the Linux app
+        if: github.event_name == 'push'
+        # The tarball is laid out as the app installs, under a prefix:
+        # extracting it into ~/.local installs it for one user.
+        run: |
+          cargo build --release --locked -p qdp-gtk
+          packaging/linux/stage-gtk.sh target/release/qdp-gtk qdp-gtk-stage
+          tar -czf qdp-gtk-linux-x86_64.tar.gz -C qdp-gtk-stage bin share
+          if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
+          packaging/linux/build-gtk-rpm.sh target/release/qdp-gtk "$release" qdp-gtk-linux-x86_64.rpm
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: qdp-gtk-linux-x86_64
+          path: |
+            qdp-gtk-linux-x86_64.tar.gz
+            qdp-gtk-linux-x86_64.rpm
+          if-no-files-found: error
+
       - name: Build and package the gateway
         if: github.event_name == 'push'
         run: |
@@ -401,6 +421,8 @@ jobs:
           | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
           | Linux (x86-64) | \`qdp-linux-x86_64.tar.gz\` |
           | Linux RPM (x86-64; Fedora 40 or later, openSUSE Tumbleweed) | \`qdp-linux-x86_64.rpm\` |
+          | Linux app (x86-64; GTK 4.14 and libadwaita 1.5 or later) | \`qdp-gtk-linux-x86_64.tar.gz\` |
+          | Linux app RPM (x86-64; Fedora 40 or later; needs the qdp RPM) | \`qdp-gtk-linux-x86_64.rpm\` |
           | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
           | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
           | Gateway for Linux (x86-64) | \`qdp-gateway-linux-x86_64.tar.gz\` |

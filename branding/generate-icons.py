@@ -73,6 +73,17 @@ ANDROID_CANVAS_DP = 108.0
 ANDROID_SAFE_RADIUS_DP = 33.0
 ANDROID_FOREGROUND = ROOT / "android/app/src/main/res/drawable/ic_launcher_foreground.xml"
 
+# Linux: freedesktop's hicolor theme, which GNOME, KDE Plasma and the other
+# desktops read app icons from, the icon named by the app's ID: a scalable
+# one, and pictures at the sizes menus and docks ask for. The tile fills
+# 112 of 128 units with a 16-unit corner, as GNOME's icon guidelines draw.
+LINUX_ICONS = ROOT / "crates/qdp-gtk/data/icons/hicolor"
+LINUX_ICON_NAME = "io.github.ianmarmour.qdp"
+LINUX_CANVAS = 128.0
+LINUX_INSET = 8.0
+LINUX_RADIUS = 16.0
+LINUX_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+
 # Windows: the sizes the shell and the window frames show an icon at, and
 # the tile's margin and corner as parts of the icon and of the tile.
 WINDOWS_SIZES = (16, 20, 24, 32, 40, 48, 64, 256)
@@ -438,12 +449,50 @@ def windows_icons(mark: Mark) -> None:
     save_png(windows_icon(mark, WINDOWS_PICTURE_SIZE), WINDOWS_ASSETS / "qdp.png")
 
 
+def linux_icon(mark: Mark, size: int) -> Image.Image:
+    """Draws the Linux icon at `size` pixels: the square as a rounded tile
+    within the canvas's margin."""
+    scale = size / LINUX_CANVAS
+    inset = LINUX_INSET * scale
+    side = size - 2 * inset
+    return picture(
+        size,
+        [
+            ([tile(inset, inset, side, LINUX_RADIUS * scale)], mark.background),
+            (mark.placed(inset, inset, side), mark.color),
+        ],
+    )
+
+
+def linux_icons(mark: Mark) -> None:
+    """Writes the Linux app icon to the hicolor theme: scalable, and a
+    picture at each size."""
+    side = LINUX_CANVAS - 2 * LINUX_INSET
+    scalable = LINUX_ICONS / "scalable/apps" / f"{LINUX_ICON_NAME}.svg"
+    scalable.parent.mkdir(parents=True, exist_ok=True)
+    scalable.write_text(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<!-- QDP's app icon, the Orbit Q of branding/qdp-orbit-q.svg on a rounded
+     tile. Written by branding/generate-icons.py. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="{LINUX_CANVAS:g}" height="{LINUX_CANVAS:g}" viewBox="0 0 {LINUX_CANVAS:g} {LINUX_CANVAS:g}">
+  <rect x="{LINUX_INSET:g}" y="{LINUX_INSET:g}" width="{side:g}" height="{side:g}" rx="{LINUX_RADIUS:g}" fill="{mark.background}"/>
+  <path transform="translate({LINUX_INSET:g} {LINUX_INSET:g}) scale({side / mark.side:.6f})" fill="{mark.color}" fill-rule="evenodd" d="{mark.path}"/>
+</svg>
+"""
+    )
+    for size in LINUX_SIZES:
+        path = LINUX_ICONS / f"{size}x{size}/apps" / f"{LINUX_ICON_NAME}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        save_png(linux_icon(mark, size), path)
+
+
 def main() -> None:
     mark = read_mark()
     ios_icons(mark)
     mac_icons(mark)
     android_foreground(mark)
     windows_icons(mark)
+    linux_icons(mark)
 
 
 if __name__ == "__main__":

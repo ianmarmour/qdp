@@ -482,12 +482,22 @@ with it by the code the host shows, and choosing a paired one streams at once,
 in the window `qdp connect` opens, which the app runs with `--events` and
 follows. It keeps the client's key and the hosts it paired with in
 `~/.local/share/qdp`, and runs the `qdp` installed beside it, or else the one
-on the `PATH`. Building it needs GTK's and libadwaita's development files, as
+on the `PATH`. The release's `qdp-gtk-linux-x86_64.rpm`, with `qdp`'s RPM,
+installs it with its desktop entry, icons and AppStream metadata, so that it
+shows in the desktop's menus and software center; its
+`qdp-gtk-linux-x86_64.tar.gz`, extracted into `~/.local`, installs it for one
+user. Building it needs GTK's and libadwaita's development files, as
 `libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu, or `gtk4-devel`
 and `libadwaita-devel` on Fedora:
 
 ```bash
 cargo build --release -p qdp-cli -p qdp-gtk && ./target/release/qdp-gtk
+```
+
+To install a build for yourself, with its menu entry and icons:
+
+```bash
+packaging/linux/stage-gtk.sh target/release/qdp-gtk ~/.local && cp target/release/qdp ~/.local/bin/
 ```
 
 ## Gateway

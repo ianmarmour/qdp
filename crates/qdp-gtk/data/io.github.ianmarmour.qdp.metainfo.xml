@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- QDP's Linux app, as software centers such as GNOME Software and KDE
+     Discover describe it. -->
+<component type="desktop-application">
+  <id>io.github.ianmarmour.qdp</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>QDP</name>
+  <summary>Stream the desktops of your computers</summary>
+  <developer id="io.github.ianmarmour">
+    <name>Ian Armour</name>
+  </developer>
+  <description>
+    <p>
+      QDP streams the desktops of your computers to this one over the network,
+      with low latency, in AV1 over QUIC. It lists the computers on your
+      network and those you paired with: choose a new one to pair with the
+      code it shows, and a paired one to stream from at once.
+    </p>
+    <p>
+      Each stream opens in a window of its own, which sends your keyboard,
+      mouse, touchpad and game controllers to the computer, plays its sound,
+      and shares the clipboard as you choose.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.ianmarmour.qdp.desktop</launchable>
+  <url type="homepage">https://github.com/ianmarmour/qdp</url>
+  <url type="bugtracker">https://github.com/ianmarmour/qdp/issues</url>
+  <url type="vcs-browser">https://github.com/ianmarmour/qdp</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/ianmarmour/qdp/main/crates/qdp-gtk/data/screenshots/computers.png</image>
+      <caption>Your computers, and those nearby</caption>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-01"/>
+  </releases>
+</component>

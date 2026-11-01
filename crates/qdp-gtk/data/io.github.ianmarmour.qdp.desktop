@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=QDP
+GenericName=Remote Desktop
+Comment=Stream the desktops of your computers
+Exec=qdp-gtk
+Icon=io.github.ianmarmour.qdp
+Terminal=false
+Categories=Network;RemoteAccess;GTK;
+Keywords=remote;desktop;stream;vnc;rdp;
+StartupNotify=true
+StartupWMClass=io.github.ianmarmour.qdp
+DBusActivatable=false

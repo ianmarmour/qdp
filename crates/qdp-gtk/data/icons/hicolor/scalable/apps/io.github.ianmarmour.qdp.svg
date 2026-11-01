@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- QDP's app icon, the Orbit Q of branding/qdp-orbit-q.svg on a rounded
+     tile. Written by branding/generate-icons.py. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="8" y="8" width="112" height="112" rx="16" fill="#025559"/>
+  <path transform="translate(8 8) scale(0.089314)" fill="#FCF5E3" fill-rule="evenodd" d="M627 246 C832 246 996 410 996 613 C996 692 970 764 925 824 L1031 952 C1038 960 1041 971 1038 980 C1034 995 1023 1005 1008 1005 H900 C889 1005 880 1001 873 992 L806 917 C751 954 684 975 614 975 C415 975 255 813 255 611 C255 410 422 246 627 246 Z M627 383 C756 383 861 486 861 614 C861 741 755 845 626 845 C497 845 393 741 393 614 C393 486 498 383 627 383 Z"/>
+</svg>
