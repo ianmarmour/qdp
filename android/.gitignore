@@ -1,2 +1,7 @@
 # Built by build-core.sh.
 /app/src/main/jniLibs/
+# Gradle.
+.gradle/
+build/
+/app/build/
+local.properties

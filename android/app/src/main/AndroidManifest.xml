@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Keeps Wi-Fi in its low-latency mode while streaming. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Gamepad rumble on the device's own motor. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Asked for only when the user turns the microphone on. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <application
+        android:appCategory="game"
+        android:icon="@drawable/ic_launcher"
+        android:isGame="true"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.DeviceDefault">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".StreamActivity"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|density|uiMode"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:windowSoftInputMode="adjustNothing|stateHidden" />
+    </application>
+</manifest>
