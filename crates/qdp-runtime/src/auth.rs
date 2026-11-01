@@ -332,9 +332,23 @@ impl<'a> HostAuthExchange<'a> {
         else {
             return AuthResponse::Reject;
         };
-        let Ok(start) = PairingStart::decode(auth_data) else {
+        let Ok(mut start) = PairingStart::decode(auth_data) else {
             return AuthResponse::Reject;
         };
+        // The name is the client's word, shown to the host's user and kept:
+        // control characters, which could forge lines or move a terminal's
+        // cursor, become spaces.
+        start.device_name = start
+            .device_name
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect();
         let now = Instant::now();
         let slot = match pairing.begin(&start.device_name, now) {
             Ok(slot) => slot,

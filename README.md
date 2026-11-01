@@ -38,21 +38,39 @@ Build the `qdp` command, which is both the host and the client:
 cargo build --release
 ```
 
-On the host, print the key pin that clients use to recognize it, then serve.
-The host creates its key in `./qdp-identity` the first time:
+On the host, serve. The host creates its key in `./qdp-identity` the first
+time, and listens on UDP port 4433 unless given `--listen`:
 
 ```bash
-./target/release/qdp pin
+./target/release/qdp serve
 ```
+
+On the client, pair with the host the first time: connect with `--pair`, and
+type the four-digit code the host prints (Section 4.4.9 of the spec). Add
+`:PORT` to the address for another port, and `--name` to choose the name the
+host keeps for this device. The stream opens in a window, and closing the
+window disconnects:
 
 ```bash
-./target/release/qdp serve --token my-secret
+./target/release/qdp connect 192.0.2.7 --pair
 ```
 
-On the client, connect with the host's address or name and its pin. The host
-listens on UDP port 4433 unless given `--listen`; add `:PORT` to the address
-for another port. The stream opens in a window, and closing the window
-disconnects:
+After that the two remember each other: the client keeps the host's key in
+`./qdp-client-identity/paired-hosts`, the host the client's in
+`./qdp-identity/paired-clients`, and connecting needs only the address:
+
+```bash
+./target/release/qdp connect 192.0.2.7
+```
+
+A code is good for 120 seconds and one try at a time; after three wrong codes
+in a row the host refuses pairing for 1, then 3, then 5 minutes, and twice as
+long after each further wrong code. `qdp clients` lists the paired clients, and
+`qdp clients remove NAME` forgets one, by its name or the start of its pin.
+
+A host can also be served with a token, as before pairing, and a client given
+its pin: `qdp pin` prints the host's pin, `qdp serve --token my-secret` accepts
+the token beside paired clients, and `--pairing off` turns pairing off:
 
 ```bash
 ./target/release/qdp connect 192.0.2.7 --pin PIN --token my-secret
