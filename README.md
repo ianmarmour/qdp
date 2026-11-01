@@ -234,8 +234,9 @@ button is held, its pointer reports the motion of each move along with the
 position, as a mouse does and in the desktop's own units at its interface
 scale, which the screen cast portal tells, so that games which follow the
 mouse's motion, as many do to drag their interface's elements, see the drag
-as far as the pointer goes. To allow
-both for members of the `input` group:
+as far as the pointer goes. The RPM below allows both for the user at the
+machine and members of the `input` group. Otherwise, to allow both for members
+of the `input` group:
 
 ```bash
 printf 'uinput\nuhid\n' | sudo tee /etc/modules-load.d/qdp.conf
@@ -414,7 +415,16 @@ it, and a run can be started on any branch from the Actions tab. It builds the
 every build passed it publishes them together as a GitHub release, numbered by
 the run (the ten newest are kept). The newest build's files are always at
 `https://github.com/ianmarmour/qdp/releases/latest/download/FILE`, such as
-`qdp-android-arm64.apk`. Pushing a version tag publishes a release of that
+`qdp-android-arm64.apk`. On Linux, `qdp-linux-x86_64.rpm` packages the `qdp`
+command for Fedora 40 or later and openSUSE Tumbleweed, with the udev rule and
+kernel modules its input needs:
+
+```bash
+sudo dnf install https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm
+```
+
+[`packaging/linux/build-rpm.sh`](packaging/linux/build-rpm.sh) builds it from a
+built `qdp`, with `rpmbuild`. Pushing a version tag publishes a release of that
 version, which is kept:
 
 ```bash
