@@ -26,7 +26,8 @@ screen-capture = [
     "dep:tokio",
     "dep:wayland-client",
     "dep:wayland-protocols",
-    "dep:wayland-protocols-plasma",
+    "dep:wayland-scanner",
+    "dep:bitflags",
     "dep:wayland-protocols-wlr",
 ]
 
@@ -46,7 +47,8 @@ pipewire = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
 wayland-client = { workspace = true, optional = true }
 wayland-protocols = { workspace = true, optional = true }
-wayland-protocols-plasma = { workspace = true, optional = true }
+wayland-scanner = { workspace = true, optional = true }
+bitflags = { workspace = true, optional = true }
 wayland-protocols-wlr = { workspace = true, optional = true }
 wl-clipboard-rs.workspace = true
 x11rb.workspace = true

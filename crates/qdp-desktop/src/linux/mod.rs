@@ -15,6 +15,8 @@ mod gamepad;
 mod hidraw;
 #[cfg(feature = "screen-capture")]
 mod kde_displays;
+#[cfg(feature = "screen-capture")]
+mod kde_protocols;
 mod keycodes;
 #[cfg(feature = "screen-capture")]
 mod monitor_matching;
