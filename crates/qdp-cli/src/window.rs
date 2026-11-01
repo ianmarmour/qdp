@@ -295,10 +295,19 @@ struct Display {
     /// The pen over the window, read until dropped, before the window is.
     #[cfg(windows)]
     _pen: Option<qdp_desktop::WindowPen>,
+    /// What draws the window's picture, dropped before the window.
+    painter: Painter,
     /// The window.
     window: Rc<Window>,
-    /// The surface pixels are drawn into.
-    surface: Surface<Rc<Window>, Rc<Window>>,
+}
+
+/// What draws a window's picture.
+enum Painter {
+    /// The processor, into a surface softbuffer shows.
+    Processor(Surface<Rc<Window>, Rc<Window>>),
+    /// The GPU, with Metal.
+    #[cfg(target_os = "macos")]
+    Metal(qdp_desktop::MetalVideo),
 }
 
 /// The application the window's event loop runs.
@@ -313,6 +322,8 @@ pub struct WindowApp {
     slot: FrameSlot,
     /// The frame drawn last, kept for redrawing after a resize.
     current: Option<RgbFrame>,
+    /// The size of the newest frame, once one arrived.
+    picture: Option<(usize, usize)>,
     /// Raised when the window closes.
     close: Arc<CloseSignal>,
     /// Why the window could not be shown, if it could not.
@@ -464,6 +475,7 @@ impl WindowApp {
             display: None,
             slot,
             current: None,
+            picture: None,
             close,
             error: None,
             scroll_remainder: (0.0, 0.0),
@@ -606,15 +618,10 @@ impl WindowApp {
     /// Returns where the picture sits in the window and the picture's size,
     /// once a frame has arrived.
     fn placement(&self) -> Option<(Placement, usize, usize)> {
-        let (display, frame) = (self.display.as_ref()?, self.current.as_ref()?);
+        let (display, (width, height)) = (self.display.as_ref()?, self.picture?);
         let size = display.window.inner_size();
-        let placement = Placement::fit(
-            frame.width,
-            frame.height,
-            size.width as usize,
-            size.height as usize,
-        )?;
-        Some((placement, frame.width, frame.height))
+        let placement = Placement::fit(width, height, size.width as usize, size.height as usize)?;
+        Some((placement, width, height))
     }
 
     /// Sets the window's pointer to the host's cursor, scaled with the
@@ -800,17 +807,8 @@ impl WindowApp {
     /// Returns where a position in the window falls on the host's monitor, in
     /// its pixels, or `None` while no picture is shown.
     fn monitor_position(&self, position: PhysicalPosition<f64>) -> Option<(f64, f64)> {
-        let (Some(display), Some(frame)) = (&self.display, &self.current) else {
-            return None;
-        };
-        let size = display.window.inner_size();
-        let placement = Placement::fit(
-            frame.width,
-            frame.height,
-            size.width as usize,
-            size.height as usize,
-        )?;
-        Some(placement.to_frame(position.x, position.y, frame.width, frame.height))
+        let (placement, width, height) = self.placement()?;
+        Some(placement.to_frame(position.x, position.y, width, height))
     }
 
     /// Sends a finger touching, moving or lifting. While fingers touch, the
@@ -918,6 +916,13 @@ impl WindowApp {
             .create_window(attributes)
             .map(Rc::new)
             .map_err(|error| format!("cannot open a window: {error}"))?;
+        #[cfg(target_os = "macos")]
+        if let Some(metal) = attach_metal(&window) {
+            return Ok(Display {
+                window,
+                painter: Painter::Metal(metal),
+            });
+        }
         let surface = Context::new(Rc::clone(&window))
             .and_then(|context| Surface::new(&context, Rc::clone(&window)))
             .map_err(|error| format!("cannot draw in the window: {error}"))?;
@@ -925,7 +930,7 @@ impl WindowApp {
             #[cfg(windows)]
             _pen: attach_pen(&window, self.proxy.clone()),
             window,
-            surface,
+            painter: Painter::Processor(surface),
         })
     }
 
@@ -961,12 +966,15 @@ impl WindowApp {
         let started = Instant::now();
         let newest = self.slot.take();
         if let Some((frame, _)) = &newest {
-            let resized = self.current.as_ref().is_none_or(|current| {
-                (current.width, current.height) != (frame.width(), frame.height())
-            });
-            self.current = Some(yuv420_to_rgb(frame));
-            if resized {
+            let size = (frame.width(), frame.height());
+            if self.picture != Some(size) {
                 self.cursor_stale = true;
+            }
+            self.picture = Some(size);
+            match self.display.as_mut().map(|display| &mut display.painter) {
+                Some(Painter::Processor(_)) | None => self.current = Some(yuv420_to_rgb(frame)),
+                #[cfg(target_os = "macos")]
+                Some(Painter::Metal(metal)) => metal.upload(frame),
             }
         }
         let presented_at = self.show();
@@ -991,6 +999,8 @@ impl WindowApp {
             }
             _ => None,
         };
+        #[cfg(target_os = "macos")]
+        let picture = self.placement().map(|(placement, _, _)| placement);
         let display = self.display.as_mut()?;
         let size = display.window.inner_size();
         let (Some(width), Some(height)) =
@@ -999,35 +1009,116 @@ impl WindowApp {
             // A minimized window has nothing to draw.
             return None;
         };
-        if let Err(error) = display.surface.resize(width, height) {
-            warn!(%error, "cannot resize the window's surface");
+        match &mut display.painter {
+            Painter::Processor(surface) => {
+                draw_on_processor(surface, self.current.as_ref(), (width, height), follow)
+            }
+            #[cfg(target_os = "macos")]
+            Painter::Metal(metal) => draw_with_metal(
+                metal,
+                (size.width, size.height),
+                display.window.scale_factor(),
+                picture,
+                follow,
+            ),
+        }
+    }
+}
+
+/// Draws `current`, and `follow`'s cursor at its position, into `surface`,
+/// of `size` pixels, returning when the picture reached the screen, if it
+/// did.
+fn draw_on_processor(
+    surface: &mut Surface<Rc<Window>, Rc<Window>>,
+    current: Option<&RgbFrame>,
+    (width, height): (NonZeroU32, NonZeroU32),
+    follow: Option<((f64, f64), ScaledCursor)>,
+) -> Option<Instant> {
+    if let Err(error) = surface.resize(width, height) {
+        warn!(%error, "cannot resize the window's surface");
+        return None;
+    }
+    let mut buffer = match surface.buffer_mut() {
+        Ok(buffer) => buffer,
+        Err(error) => {
+            warn!(%error, "cannot draw the window");
             return None;
         }
-        let mut buffer = match display.surface.buffer_mut() {
-            Ok(buffer) => buffer,
-            Err(error) => {
-                warn!(%error, "cannot draw the window");
-                return None;
-            }
-        };
-        match &self.current {
-            Some(frame) => scale_into(
-                frame,
-                &mut buffer,
-                size.width as usize,
-                size.height as usize,
-            ),
-            None => buffer.fill(0),
+    };
+    let (width, height) = (width.get() as usize, height.get() as usize);
+    match current {
+        Some(frame) => scale_into(frame, &mut buffer, width, height),
+        None => buffer.fill(0),
+    }
+    if let Some((position, cursor)) = follow {
+        cursor.draw_into(&mut buffer, width, position);
+    }
+    match buffer.present() {
+        Ok(()) => Some(Instant::now()),
+        Err(error) => {
+            warn!(%error, "cannot show the window's picture");
+            None
         }
-        if let Some((position, cursor)) = follow {
-            cursor.draw_into(&mut buffer, size.width as usize, position);
+    }
+}
+
+/// Draws the uploaded picture at `picture`, and `follow`'s cursor at its
+/// position, with Metal into a drawable of `size` pixels, `scale` of them to
+/// a point, returning when the picture was handed to the display, if it was.
+#[cfg(target_os = "macos")]
+fn draw_with_metal(
+    metal: &mut qdp_desktop::MetalVideo,
+    size: (u32, u32),
+    scale: f64,
+    picture: Option<Placement>,
+    follow: Option<((f64, f64), ScaledCursor)>,
+) -> Option<Instant> {
+    let picture = picture.map(|placement| qdp_desktop::PixelRect {
+        left: placement.left as f64,
+        top: placement.top as f64,
+        width: placement.width as f64,
+        height: placement.height as f64,
+    });
+    let overlay = follow
+        .as_ref()
+        .map(|((x, y), cursor)| qdp_desktop::Overlay {
+            width: cursor.width,
+            height: cursor.height,
+            rgba: &cursor.rgba,
+            left: x.round() - cursor.hotspot.0 as f64,
+            top: y.round() - cursor.hotspot.1 as f64,
+        });
+    match metal.draw(size, scale, picture, overlay) {
+        Ok(()) => Some(Instant::now()),
+        Err(error) => {
+            warn!(%error, "cannot show the window's picture");
+            None
         }
-        match buffer.present() {
-            Ok(()) => Some(Instant::now()),
-            Err(error) => {
-                warn!(%error, "cannot show the window's picture");
-                None
-            }
+    }
+}
+
+/// Draws the window's picture with Metal, or returns `None`, saying why, so
+/// that the processor draws it instead.
+#[cfg(target_os = "macos")]
+fn attach_metal(window: &Window) -> Option<qdp_desktop::MetalVideo> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    // SAFETY: the view is the window's, which winit runs on the main thread,
+    // and the painter is dropped before the window.
+    #[allow(unsafe_code)]
+    let attached =
+        unsafe { qdp_desktop::MetalVideo::attach(handle.ns_view, window.scale_factor()) };
+    match attached {
+        Ok(metal) => {
+            info!("drawing the video with Metal");
+            Some(metal)
+        }
+        Err(error) => {
+            warn!(%error, "drawing the video on the processor instead of with Metal");
+            None
         }
     }
 }

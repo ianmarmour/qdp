@@ -123,6 +123,12 @@ fails is replaced. It costs some speed, since each picture is copied between
 the processes: `cargo run --release -p qdp-codec --example
 decoder_process_benchmark` measures how much on a given machine.
 
+On macOS the client draws the video with Metal: each frame's planes go to the
+GPU, which converts their colours and scales them into the window, and the
+window asks a ProMotion display for up to 120 Hz. Elsewhere, or if Metal
+cannot start, it converts and scales frames on every processor. The client
+logs each second how many frames it drew and how long drawing them took.
+
 The client draws the host's pointer as its own, so moving it has no network
 latency, and follows the host's pointer when an application moves it. Hosts
 report the pointer apart from the video on Windows, on macOS, and on Linux
