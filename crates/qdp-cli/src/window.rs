@@ -731,6 +731,22 @@ impl WindowApp {
         }
     }
 
+    /// Draws a new frame, or one put off: at once with Metal, which never
+    /// waits for a drawable, rather than at the window's next redraw, which
+    /// may come a refresh later, after a newer frame replaced it; at the
+    /// next redraw otherwise.
+    fn frame_ready(&mut self) {
+        #[cfg(target_os = "macos")]
+        if matches!(
+            self.display.as_ref().map(|display| &display.painter),
+            Some(Painter::Metal(_))
+        ) {
+            self.draw();
+            return;
+        }
+        self.request_redraw();
+    }
+
     /// Returns when a drawing put off is drawn regardless, should the one
     /// before it never be said to reach the screen.
     fn redraw_at(&self) -> Option<Instant> {
@@ -1212,7 +1228,7 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, message: WindowMessage) {
         match message {
-            WindowMessage::Frame => self.request_redraw(),
+            WindowMessage::Frame => self.frame_ready(),
             WindowMessage::Cursor(cursor) => {
                 self.cursor = cursor;
                 self.cursor_stale = true;
