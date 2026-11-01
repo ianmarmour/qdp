@@ -1,5 +1,5 @@
 # Checks every change merged into main on Linux, Windows and macOS, builds
-# the qdp command for each and the Android app, and publishes them all as a
+# the qdp command for each, the Android app and the Apple apps, and publishes them all as a
 # GitHub release once every job passed: a numbered build for each change
 # merged into main, and a version for each tag such as v0.2.0. Pull requests
 # are not checked here, so that merging never waits for it; a run can be
@@ -211,12 +211,16 @@ jobs:
           path: qdp-android-arm64.apk
           if-no-files-found: error
 
+  apple:
+    name: Apple
+    uses: ./.github/workflows/apple.yml
+
   release:
     name: Release
     # Every change merged into main and every version tag is released once
     # all the builds passed; runs started by hand are not.
     if: github.event_name == 'push'
-    needs: [linux, windows, macos, android]
+    needs: [linux, windows, macos, android, apple]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -247,14 +251,17 @@ jobs:
           | Platform | Download |
           |---|---|
           | Android (64-bit ARM, Android 10 or later) | \`qdp-android-arm64.apk\` |
+          | Mac app (Apple silicon, macOS 26 or later) | \`qdp-macos-app.zip\` |
+          | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
           | Linux (x86-64) | \`qdp-linux-x86_64.tar.gz\` |
           | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
           | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
 
           The newest build is always at
           \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/FILE\`.
-          On macOS, a downloaded \`qdp\` needs \`xattr -d com.apple.quarantine qdp\`
-          before it runs, since it is not notarized.
+          The Mac app and \`qdp\` are not notarized yet: open the app once from
+          Privacy & Security settings, and run \`xattr -d com.apple.quarantine qdp\`
+          before \`qdp\`.
           NOTES
           gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "$title" --notes-file notes.md --generate-notes

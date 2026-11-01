@@ -42,7 +42,6 @@ jobs:
       - name: Build the core
         run: ./apple/build-core.sh
 
-
       - name: Generate the Xcode project
         working-directory: apple
         run: |

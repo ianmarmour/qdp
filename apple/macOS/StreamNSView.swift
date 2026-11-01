@@ -132,7 +132,8 @@ final class StreamNSView: NSView {
         let area = NSTrackingArea(
             rect: .zero,
             options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect, .cursorUpdate],
-            owner: self
+            owner: self,
+            userInfo: nil
         )
         addTrackingArea(area)
         trackingArea = area

@@ -142,7 +142,7 @@ enum SettingsKey {
 func requestedDisplay(pixels: CGSize, scale: CGFloat, resolution: Resolution) -> (width: UInt32, height: UInt32, scalePercent: UInt32) {
     let width = max(pixels.width, 1)
     let height = max(pixels.height, 1)
-    guard let target = resolution.height.map(CGFloat.init), target < height else {
+    guard let target = resolution.height.map({ CGFloat($0) }), target < height else {
         return (UInt32(width.rounded()), UInt32(height.rounded()), UInt32((scale * 100).rounded()))
     }
     let shrink = target / height
