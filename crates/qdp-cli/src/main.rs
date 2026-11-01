@@ -352,6 +352,13 @@ async fn serve(args: ServeArgs) -> CliResult {
     if tokio::time::timeout(SHUTDOWN_GRACE, ended).await.is_err() {
         warn!("sessions did not end in time");
     }
+    if match_display == DisplayMatching::On {
+        // A session that did not end in time left the monitor changed.
+        let directory = Arc::clone(&state_directory);
+        let _ =
+            tokio::task::spawn_blocking(move || qdp_desktop::restore_monitor_settings(&directory))
+                .await;
+    }
     let _ = tokio::time::timeout(SHUTDOWN_GRACE, endpoint.wait_idle()).await;
     Ok(())
 }
