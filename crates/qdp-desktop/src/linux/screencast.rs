@@ -23,7 +23,8 @@
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,16 @@ use crate::latest_frame::LatestFrame;
 
 /// The name of the thread that holds the portal session.
 const PORTAL_THREAD: &str = "qdp-portal";
+
+/// The name of the portal runtime's threads.
+const PORTAL_RUNTIME_THREAD: &str = "qdp-portal-runtime";
+
+/// The portal runtime's worker threads: its requests are few and small.
+const PORTAL_WORKERS: usize = 1;
+
+/// How long the portal takes to share a monitor before the host says it
+/// may be asking the user on the host's screen.
+const PORTAL_ANSWER_HINT: Duration = Duration::from_secs(5);
 
 /// The name of the thread that runs PipeWire.
 const PIPEWIRE_THREAD: &str = "qdp-pipewire";
@@ -513,6 +524,29 @@ impl Drop for ScreenCapture {
 /// The portal session's thread and the signal that ends it.
 type PortalThread = (PortalStream, oneshot::Sender<()>, JoinHandle<()>);
 
+/// Returns the runtime the portal's requests run on, for the life of the
+/// process.
+///
+/// ashpd keeps one D-Bus connection for the whole process, and zbus runs the
+/// task that reads its replies on the runtime that opened it. A runtime of a
+/// session's own ended that task with the session, so that every later
+/// session's requests waited for replies forever: a client that reconnected
+/// was never shown the desktop.
+fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    if let Some(runtime) = RUNTIME.get() {
+        return Ok(runtime);
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(PORTAL_WORKERS)
+        .thread_name(PORTAL_RUNTIME_THREAD)
+        .enable_all()
+        .build()
+        .map_err(|error| format!("cannot start the portal's runtime: {error}"))?;
+    // Another thread may have made one meanwhile; this one is then dropped.
+    Ok(RUNTIME.get_or_init(|| runtime))
+}
+
 /// Starts a ScreenCast portal session on a thread of its own, which keeps
 /// the session open until told to stop.
 fn start_portal(restore_token: Option<String>) -> Result<PortalThread, String> {
@@ -521,13 +555,10 @@ fn start_portal(restore_token: Option<String>) -> Result<PortalThread, String> {
     let thread = std::thread::Builder::new()
         .name(PORTAL_THREAD.to_owned())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
+            let runtime = match portal_runtime() {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    let _ = started.send(Err(error.to_string()));
+                    let _ = started.send(Err(error));
                     return;
                 }
             };
@@ -558,9 +589,19 @@ fn start_portal(restore_token: Option<String>) -> Result<PortalThread, String> {
             });
         })
         .map_err(|error| error.to_string())?;
-    let stream = started_receiver
-        .recv()
-        .map_err(|_| "the portal thread stopped".to_owned())??;
+    let stream = match started_receiver.recv_timeout(PORTAL_ANSWER_HINT) {
+        Ok(stream) => stream,
+        Err(RecvTimeoutError::Timeout) => {
+            warn!(
+                "the desktop has not shared a monitor yet; it may be asking on the host's \
+                 screen which one to share"
+            );
+            started_receiver
+                .recv()
+                .map_err(|_| "the portal thread stopped".to_owned())?
+        }
+        Err(RecvTimeoutError::Disconnected) => return Err("the portal thread stopped".to_owned()),
+    }?;
     Ok((stream, stop, thread))
 }
 
@@ -1235,6 +1276,27 @@ fn read_linear(frame: &DmaBufFrame) -> Option<Yuv420Frame> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A task a session's portal work spawns, as zbus spawns the one that
+    /// reads its shared connection's replies, keeps running for later
+    /// sessions, on the one runtime they all share.
+    #[test]
+    fn keeps_tasks_spawned_by_a_session() {
+        let runtime = portal_runtime().unwrap();
+        let (requests, mut incoming) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        let (replies, answered) = std::sync::mpsc::channel();
+        runtime.block_on(async move {
+            tokio::spawn(async move {
+                while let Some(request) = incoming.recv().await {
+                    let _ = replies.send(request);
+                }
+            });
+        });
+        // The first session's work is done; a later one is still answered.
+        requests.send(7).unwrap();
+        assert_eq!(answered.recv_timeout(Duration::from_secs(1)), Ok(7));
+        assert!(std::ptr::eq(runtime, portal_runtime().unwrap()));
+    }
 
     /// Premultiplied bitmaps in each byte order become straight RGBA.
     #[test]
