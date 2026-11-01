@@ -136,11 +136,22 @@ jobs:
         if: github.event_name == 'push'
         run: tar -czf qdp-linux-x86_64.tar.gz -C target/release qdp
 
+      - name: Package as an RPM
+        if: github.event_name == 'push'
+        # A version tag is the version's first release; a build of main is
+        # numbered by its run, so that each upgrades the last.
+        run: |
+          sudo apt-get install -y --no-install-recommends rpm
+          if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
+          packaging/linux/build-rpm.sh target/release/qdp "$release" qdp-linux-x86_64.rpm
+
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
         with:
           name: qdp-linux-x86_64
-          path: qdp-linux-x86_64.tar.gz
+          path: |
+            qdp-linux-x86_64.tar.gz
+            qdp-linux-x86_64.rpm
           if-no-files-found: error
 
   windows:
@@ -356,6 +367,7 @@ jobs:
           | Mac app (Apple silicon, macOS 26 or later) | \`qdp-macos-app.zip\` |
           | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
           | Linux (x86-64) | \`qdp-linux-x86_64.tar.gz\` |
+          | Linux RPM (x86-64; Fedora 40 or later, openSUSE Tumbleweed) | \`qdp-linux-x86_64.rpm\` |
           | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
           | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
 

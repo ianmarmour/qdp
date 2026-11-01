@@ -1,0 +1,6 @@
+# Lets the user at the machine, and members of the input group, create the
+# virtual devices QDP plays a client's input through: keyboards, mice, touch
+# and pens through uinput, and devices passed through as they are through
+# uhid. The nodes exist before their modules load, which opening them loads.
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput"
+KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="input", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uhid"
