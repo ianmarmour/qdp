@@ -40,6 +40,9 @@ qdp-codec.workspace = true
 qdp-desktop.workspace = true
 qdp-quic.workspace = true
 qdp-runtime.workspace = true
+rpassword.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 softbuffer = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tracing.workspace = true

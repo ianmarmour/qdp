@@ -25,6 +25,7 @@ use tokio::net::UdpSocket;
 
 use crate::config::{Config, Enrollment};
 use crate::directory::{Directory, DirectoryError, DirectoryUser};
+use crate::enrollments::PendingEnrollments;
 use crate::keys::GatewayKeys;
 use crate::limiter::FailureLimiter;
 use crate::policy::{self, RoutedTarget};
@@ -101,6 +102,8 @@ pub struct Gateway<D> {
     keys: GatewayKeys,
     /// The users' TOTP secrets.
     totp: Mutex<TotpStore>,
+    /// The secrets offered to users enrolling.
+    enrollments: Mutex<PendingEnrollments>,
     /// Failed sign-ins.
     limiter: Mutex<FailureLimiter>,
     /// Session tokens issued.
@@ -119,6 +122,7 @@ impl<D: Directory> Gateway<D> {
             directory,
             keys,
             totp: Mutex::new(totp),
+            enrollments: Mutex::new(PendingEnrollments::default()),
             tunnels: AtomicUsize::new(0),
         }
     }
@@ -513,7 +517,7 @@ impl<D: Directory> Session<'_, D> {
         let enrolling = if enrolled {
             None
         } else if self.gateway.config.totp.enrollment == Enrollment::FirstLogin {
-            match TotpSecret::generate() {
+            match lock(&self.gateway.enrollments).offer(&user.name, now) {
                 Ok(secret) => Some(secret),
                 Err(_) => return Outcome::Failed(FAILED_REASON),
             }
@@ -556,9 +560,11 @@ impl<D: Directory> Session<'_, D> {
             return Outcome::Failed(FAILED_REASON);
         };
         let kept = match enrolling {
-            Some(secret) => totp
-                .set(&user.name, secret)
-                .and_then(|()| totp.accept(&user.name, step)),
+            Some(secret) => {
+                lock(&self.gateway.enrollments).enrolled(&user.name);
+                totp.set(&user.name, secret)
+                    .and_then(|()| totp.accept(&user.name, step))
+            }
             None => totp.accept(&user.name, step),
         };
         drop(totp);

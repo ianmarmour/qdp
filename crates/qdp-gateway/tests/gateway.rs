@@ -1,12 +1,13 @@
 //! The gateway end to end, over QUIC on the loopback interface: users sign in
 //! with a password and a TOTP code, enrolling a secret the first time, open
 //! hosts by ID and by address, and their datagrams reach a host, here an
-//! echo, through the tunnel.
+//! echo, through the tunnel; and the clients' own sign-in, `qdp-runtime`'s,
+//! against it.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -585,5 +586,117 @@ async fn carries_a_quic_connection_to_a_host_end_to_end() {
         )
         .await;
     assert!(refused.is_err());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Returns the secret of the `otpauth://` URI `uri`.
+fn enrolled_secret(uri: &str) -> TotpSecret {
+    uri.split(['?', '&'])
+        .find_map(|field| field.strip_prefix("secret="))
+        .map(|secret| TotpSecret::from_base32(secret).unwrap())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn clients_sign_in_retype_a_code_and_come_back_with_their_token() {
+    use qdp_runtime::{
+        Credentials, GatewayRoute, SignInAnswer, SignInPrompt, SignInRequest, open_tunnel,
+    };
+
+    let directory = state_directory("client");
+    let (host, host_pin) = start_quic_host().await;
+    let gateway = start(
+        &directory,
+        &format!(
+            "[[host]]\nid = \"desk\"\nname = \"Desk\"\naddress = \"{host}\"\npin = \"{}\"\ngroups = [\"QDP Users\"]\n",
+            host_pin.to_hex()
+        ),
+    )
+    .await;
+    let identity = TlsIdentity::generate_self_signed(vec!["qdp-client".to_owned()]).unwrap();
+    let route = GatewayRoute {
+        address: gateway.address,
+        server_name: "qdp-gateway".to_owned(),
+        verification: HostVerification::PinnedKeys(vec![gateway.pin]),
+        target: "desk".to_owned(),
+    };
+    // The user types their password, scans the QR code, mistypes the first
+    // code, then types the right one.
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let prompt = {
+        let asked = Arc::clone(&asked);
+        SignInPrompt::new(move |request| {
+            let mut asked = asked.lock().unwrap();
+            let answer = match &request {
+                SignInRequest::Credentials { .. } => SignInAnswer::Credentials(Credentials {
+                    user: "alice".to_owned(),
+                    password: "wonderland".to_owned(),
+                }),
+                SignInRequest::Code { retry: None, .. } => SignInAnswer::Code("12345x".to_owned()),
+                SignInRequest::Code {
+                    enrollment: Some(uri),
+                    ..
+                } => SignInAnswer::Code(String::from_utf8(code(&enrolled_secret(uri))).unwrap()),
+                SignInRequest::Code { .. } => panic!("no enrollment to type a code from"),
+            };
+            asked.push(request);
+            Box::pin(async move { Some(answer) })
+        })
+    };
+    let tunnel = open_tunnel(&route, &identity, "test", None, &prompt)
+        .await
+        .unwrap();
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 3, "{asked:?}");
+    assert!(
+        matches!(&asked[0], SignInRequest::Credentials { gateway, retry: None } if gateway == "Example Corp")
+    );
+    // The password is not asked again after the wrong code, and the same
+    // secret is offered, so that the user scans one QR code.
+    let SignInRequest::Code {
+        enrollment: Some(first),
+        ..
+    } = &asked[1]
+    else {
+        panic!("expected an enrollment");
+    };
+    let SignInRequest::Code {
+        enrollment: Some(again),
+        retry: Some(_),
+        ..
+    } = &asked[2]
+    else {
+        panic!("expected the code asked again");
+    };
+    assert_eq!(first, again);
+    assert_eq!(tunnel.host_pin, Some(host_pin));
+    assert!(tunnel.assertion.is_some());
+    let token = tunnel.session_token.expect("a session token");
+
+    // The session connects through the tunnel, verifying the host's key.
+    let inner = tunnel
+        .endpoint
+        .connect(
+            tunnel.address,
+            &tunnel.server_name,
+            HostVerification::PinnedKeys(vec![host_pin]),
+        )
+        .await
+        .unwrap();
+    inner.send_datagram(vec![0x42; 900]).unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        inner.quic().read_datagram(),
+    )
+    .await
+    .expect("no echo through the tunnel")
+    .unwrap();
+
+    // Later, the token signs the client in without asking anything.
+    let silent = SignInPrompt::new(|request| panic!("asked {request:?}"));
+    let again = open_tunnel(&route, &identity, "test", Some(&token.token), &silent)
+        .await
+        .unwrap();
+    assert_eq!(again.host_pin, Some(host_pin));
     let _ = std::fs::remove_dir_all(directory);
 }

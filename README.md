@@ -537,7 +537,22 @@ sudo qdp-gateway keys                   # the pin clients pin, the key hosts tru
 sudo qdp-gateway service install        # start it, now and at every boot
 ```
 
-Hosts behind it admit its users with `qdp serve --gateway-key KEY`.
+Hosts behind it admit its users with `qdp serve --gateway-key KEY`. Users
+connect through it with `qdp connect`, naming the host by its ID on the
+gateway or its name inside the network:
+
+```bash
+qdp connect build-01 --gateway gw.corp.example.com --user alice
+```
+
+The first time, it asks for alice's domain password and shows a QR code to
+scan with her authenticator app, then a code from the app; a mistyped code is
+asked for again with the same QR code. The gateway then vouches for her to the
+host, which verifies the host's key with the pin the gateway knows. Later
+connections sign in with the session token kept in the client's identity
+directory, without asking, until it expires. `--gateway-pin` pins the
+gateway's key, from `qdp-gateway keys`, where its certificate is not from a
+certificate authority the system trusts.
 
 ## Builds and releases
 

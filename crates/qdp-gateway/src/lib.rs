@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod directory;
+pub mod enrollments;
 pub mod keys;
 pub mod limiter;
 pub mod locations;

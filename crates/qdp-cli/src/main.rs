@@ -10,6 +10,7 @@ mod args;
 #[cfg(feature = "window")]
 mod color;
 mod discover;
+mod gateway;
 #[cfg(feature = "window")]
 mod identity;
 mod paired;
@@ -32,13 +33,13 @@ use qdp_desktop::{
     Advertisement, Advertising, DisplayMatching, FrameMemory, HostPrivacy, Notification,
     ScreenOptions, Urgency,
 };
-use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
+use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdentity};
 use qdp_runtime::{
     Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
     ClipboardDirections, DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource,
-    GatewayTrust, HostAudio, HostAuthenticator, HostDesktop, HostOptions, InputQueue,
-    OpenedDesktop, Pairing, PairingEvent, PairingOutcome, PairingPrompt, ResumptionSlot,
-    RuntimeError, SharedClipboard, TestPattern,
+    GatewayFailure, GatewayRoute, GatewayTrust, HostAudio, HostAuthenticator, HostDesktop,
+    HostOptions, InputQueue, OpenedDesktop, Pairing, PairingEvent, PairingOutcome, PairingPrompt,
+    ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt, TestPattern, Tunnel, open_tunnel,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -51,10 +52,11 @@ use qdp_app::events::{CodeRequest, Event};
 
 use crate::app_events::EventLines;
 use crate::args::{
-    AdvertiseMode, Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, GpuCapture,
-    HostTrust, LockPolicy, PairedAction, PairingMode, Presentation, Privacy, ServeArgs, SourceKind,
-    USAGE, format_pin, parse_args,
+    AdvertiseMode, Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, Destination,
+    GatewayArgs, GpuCapture, HostTrust, LockPolicy, PairedAction, PairingMode, Presentation,
+    Privacy, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
 };
+use crate::gateway::GatewaySessions;
 use crate::identity::Role;
 use crate::paired::{Paired, PairedFile};
 use crate::sink::CliSink;
@@ -975,7 +977,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
     let resolution = args.resolution;
     let slot = FrameSlot::default();
     let close = Arc::new(CloseSignal::default());
-    let title = format!("QDP: {}", args.address);
+    let title = format!("QDP: {}", args.destination.label());
     let microphone = args.microphone;
     let proxy = event_loop.create_proxy();
     let mut sink = WindowSink::new(sink, slot.clone(), proxy.clone(), Arc::clone(&close));
@@ -1053,12 +1055,14 @@ async fn interrupted() {
     }
 }
 
-/// Connects to the host and presents its stream in `sink`, shown on
-/// `display`, until the sink stops, the host closes, or `stop` completes,
-/// sending the user's input from `input`, if given. A connection that is
-/// lost is resumed with the host's resumption token, if it gave one, while
-/// the token is valid (Section 4.4.7). Returns the session's summary, or
-/// `None` if `stop` cut it off.
+/// Connects to the host, directly or through a gateway, and presents its
+/// stream in `sink`, shown on `display`, until the sink stops, the host
+/// closes, or `stop` completes, sending the user's input from `input`, if
+/// given. A connection that is lost is resumed with the host's resumption
+/// token, if it gave one, while the token is valid (Section 4.4.7); through
+/// a gateway, by a new tunnel, which the gateway's session token opens
+/// without asking the user again. Returns the session's summary, or `None`
+/// if `stop` cut it off.
 async fn receive(
     args: &ConnectArgs,
     display: DisplaySize,
@@ -1069,56 +1073,68 @@ async fn receive(
     let pairs = args.trust == HostTrust::Pair;
     let events = EventLines::new(args.events);
     events.send(&Event::Connecting);
-    let local = if args.address.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0u16; 8], 0))
+    let gateway = match &args.destination {
+        Destination::Gateway(gateway) => Some(gateway),
+        Destination::Direct(_) => None,
     };
-    let mut endpoint = ClientEndpoint::bind(local).map_err(|error| error.to_string())?;
-    // The client presents its certificate only when it authenticates with
-    // it, so that other hosts do not learn its key.
+    // Through a gateway, --user names the gateway's user, for whom the
+    // gateway vouches to the host.
+    let host_user = args.user.as_ref().filter(|_| gateway.is_none());
     // A token from the environment stays out of the command line, which
     // other users can read.
     let token = args.token.clone().or_else(|| {
-        (!pairs && args.user.is_none())
+        (!pairs && host_user.is_none())
             .then(token_from_environment)
             .flatten()
     });
-    let client_key = if pairs || (token.is_none() && args.user.is_none()) {
-        let identity = identity::load_or_create(&args.identity, Role::Client)
-            .map_err(|error| format!("cannot load the client identity: {error}"))?;
-        let pin = identity.key_pin().map_err(|error| error.to_string())?;
-        if !pairs {
-            info!(
-                pin = format_pin(pin),
-                "authenticating with this client's key; hosts accept it with --client-key {}",
-                format_pin(pin)
-            );
-        }
-        endpoint.set_identity(identity);
-        Some(pin)
+    // The client presents its certificate only when it authenticates with
+    // it, so that other hosts do not learn its key, and always through a
+    // gateway, which binds the host's assertion to it.
+    let certificate = token.is_none() && host_user.is_none();
+    let identity = if pairs || certificate || gateway.is_some() {
+        Some(
+            identity::load_or_create(&args.identity, Role::Client)
+                .map_err(|error| format!("cannot load the client identity: {error}"))?,
+        )
     } else {
         None
     };
+    let client_key = identity
+        .as_ref()
+        .map(|identity| identity.key_pin().map_err(|error| error.to_string()))
+        .transpose()?;
+    if let Some(pin) = client_key
+        && certificate
+        && !pairs
+        && gateway.is_none()
+    {
+        info!(
+            pin = format_pin(pin),
+            "authenticating with this client's key; hosts accept it with --client-key {}",
+            format_pin(pin)
+        );
+    }
     let hosts = PairedFile::hosts(&args.identity);
-    let host_label = args.address.to_string();
+    let host_label = args.destination.label();
+    // How the host is verified, unless a gateway knows its key.
     let mut verification = match args.trust {
-        HostTrust::Pinned(pin) => HostVerification::PinnedKeys(vec![pin]),
-        HostTrust::Pair => HostVerification::Pairing,
-        HostTrust::Remembered => {
-            let host = hosts
-                .find(&host_label)
-                .map_err(|error| format!("cannot read the paired hosts: {error}"))?
-                .ok_or_else(|| {
-                    format!(
-                        "this client has not paired with {host_label}: pass --pair to pair \
-                         with it, or --pin with its key pin"
-                    )
-                })?;
-            HostVerification::PinnedKeys(vec![host.pin])
-        }
+        HostTrust::Pinned(pin) => Some(HostVerification::PinnedKeys(vec![pin])),
+        HostTrust::Pair => Some(HostVerification::Pairing),
+        HostTrust::Remembered => match hosts
+            .find(&host_label)
+            .map_err(|error| format!("cannot read the paired hosts: {error}"))?
+        {
+            Some(host) => Some(HostVerification::PinnedKeys(vec![host.pin])),
+            None if gateway.is_some() => None,
+            None => {
+                return Err(format!(
+                    "this client has not paired with {host_label}: pass --pair to pair \
+                     with it, or --pin with its key pin"
+                ));
+            }
+        },
     };
-    let credentials = match (&token, &args.user, client_key) {
+    let credentials = match (&token, host_user, client_key) {
         (Some(token), _, _) => ClientCredentials::Token(token.as_bytes().to_vec()),
         (None, Some(user), _) => ClientCredentials::Password {
             username: user.clone(),
@@ -1130,6 +1146,33 @@ async fn receive(
         },
         (None, None, _) => ClientCredentials::Certificate,
     };
+    // A direct connection's endpoint serves every attempt; a gateway's
+    // tunnel, one each.
+    let direct = match args.destination {
+        Destination::Direct(address) => {
+            let local = if address.is_ipv4() {
+                SocketAddr::from(([0, 0, 0, 0], 0))
+            } else {
+                SocketAddr::from(([0u16; 8], 0))
+            };
+            let mut endpoint = ClientEndpoint::bind(local).map_err(|error| error.to_string())?;
+            if let Some(identity) = identity.as_ref().filter(|_| pairs || certificate) {
+                endpoint.set_identity(identity.clone_key());
+            }
+            Some((Arc::new(endpoint), address))
+        }
+        Destination::Gateway(_) => None,
+    };
+    // The endpoint of the attempt under way, which closes when the viewer
+    // stops.
+    let current = Mutex::new(direct.as_ref().map(|(endpoint, _)| Arc::clone(endpoint)));
+    // An app reading the events signs in from a session token the
+    // terminal's sign-in kept.
+    let sign_in = if events.enabled() {
+        SignInPrompt::new(|_| Box::pin(async { None }))
+    } else {
+        gateway::terminal_prompt(args.user.clone(), password().ok())
+    };
     // The host's key, once pairing succeeded; later connections pin it.
     let paired_host = Arc::new(Mutex::new(None));
     let pairing_prompt = pairs.then(|| prompt_for_code(hosts, host_label, &paired_host, events));
@@ -1140,27 +1183,49 @@ async fn receive(
         let mut deadline = None;
         let mut delay = FIRST_RECONNECT_DELAY;
         loop {
-            let options = ClientOptions {
-                client_name: CLIENT_NAME.to_owned(),
-                credentials: credentials.clone(),
-                display,
-                decoder_threads: 0,
-                decoder: args.decoder,
-                decoder_process: decoder_process(args)?,
-                keyboard_info: qdp_desktop::keyboard_info(),
-                resumption: resumption.clone(),
-                pairing_prompt: pairing_prompt.clone(),
+            let attempt = match (&direct, gateway, &identity) {
+                (Some((endpoint, address)), _, _) => Ok(Attempt {
+                    endpoint: Arc::clone(endpoint),
+                    address: *address,
+                    server_name: args.server_name.clone(),
+                    verification: verification.clone(),
+                    credentials: credentials.clone(),
+                }),
+                (None, Some(gateway), Some(identity)) => {
+                    let resuming = deadline.is_some();
+                    through_gateway(
+                        gateway,
+                        identity,
+                        &GatewaySessions::new(&args.identity),
+                        &sign_in,
+                        Attempt::assertion_replaces(&credentials, resuming),
+                    )
+                    .await
+                    .map(|tunnel| Attempt::through(tunnel, &verification, &credentials, resuming))
+                }
+                _ => return Err("a gateway connection needs the client's identity".to_owned()),
             };
-            let attempt = connect_once(
-                args,
-                &endpoint,
-                &verification,
-                &options,
-                sink,
-                input.as_mut(),
-            );
-            let error = match attempt.await {
-                Ok(summary) => return Ok(summary),
+            let error = match attempt {
+                Ok(attempt) => {
+                    *current.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(Arc::clone(&attempt.endpoint));
+                    let options = ClientOptions {
+                        client_name: CLIENT_NAME.to_owned(),
+                        credentials: attempt.credentials.clone(),
+                        display,
+                        decoder_threads: 0,
+                        decoder: args.decoder,
+                        decoder_process: decoder_process(args)?,
+                        keyboard_info: qdp_desktop::keyboard_info(),
+                        resumption: resumption.clone(),
+                        pairing_prompt: pairing_prompt.clone(),
+                    };
+                    match connect_once(args, &attempt, &options, sink, input.as_mut()).await {
+                        Ok(summary) => return Ok(summary),
+                        Err(Failure::Fatal(error)) => return Err(error),
+                        Err(Failure::Lost(error)) => error,
+                    }
+                }
                 Err(Failure::Fatal(error)) => return Err(error),
                 Err(Failure::Lost(error)) => error,
             };
@@ -1172,7 +1237,7 @@ async fn receive(
                 .take();
             if let Some(host_key) = host_key {
                 credentials = ClientCredentials::Certificate;
-                verification = HostVerification::PinnedKeys(vec![host_key]);
+                verification = Some(HostVerification::PinnedKeys(vec![host_key]));
             }
             // A session that became active left a fresh token to resume it
             // with; otherwise the token in hand is tried until it expires,
@@ -1208,13 +1273,139 @@ async fn receive(
                 // the connection closes normally first, so that the host
                 // knows the client left rather than the network dropping,
                 // and leaves the desktop unlocked (Section 11.4).
-                endpoint.close(VIEWER_CLOSED);
+                if let Some(endpoint) = current.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                    endpoint.close(VIEWER_CLOSED);
+                }
                 None
             }
         }
     };
-    endpoint.wait_idle().await;
+    let endpoint = current
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some(endpoint) = endpoint {
+        endpoint.wait_idle().await;
+    }
     Ok(summary)
+}
+
+/// Where one attempt connects, and how it verifies and authenticates to the
+/// host.
+struct Attempt {
+    /// The endpoint it connects from: the client's own, or a tunnel's.
+    endpoint: Arc<ClientEndpoint>,
+    /// The host's address, or the tunnel's.
+    address: SocketAddr,
+    /// The name sent in the TLS handshake.
+    server_name: String,
+    /// How the host is verified, if known.
+    verification: Option<HostVerification>,
+    /// What the client authenticates with.
+    credentials: ClientCredentials,
+}
+
+impl Attempt {
+    /// Returns whether a gateway's assertion takes the place of
+    /// `credentials`: those of a client that would present its key alone,
+    /// unless it resumes a session.
+    fn assertion_replaces(credentials: &ClientCredentials, resuming: bool) -> bool {
+        !resuming && *credentials == ClientCredentials::Certificate
+    }
+
+    /// Returns the attempt through `tunnel`: verifying the host by the key
+    /// the gateway knows, unless the client pairs or the gateway knows none,
+    /// and authenticating with the gateway's assertion where it replaces
+    /// `credentials`.
+    fn through(
+        tunnel: Tunnel,
+        verification: &Option<HostVerification>,
+        credentials: &ClientCredentials,
+        resuming: bool,
+    ) -> Self {
+        let verification = match (verification, tunnel.host_pin) {
+            (Some(HostVerification::Pairing), _) => Some(HostVerification::Pairing),
+            (_, Some(pin)) => Some(HostVerification::PinnedKeys(vec![pin])),
+            (known, None) => known.clone(),
+        };
+        let credentials = match tunnel.assertion {
+            Some(assertion) if Self::assertion_replaces(credentials, resuming) => {
+                ClientCredentials::Token(assertion)
+            }
+            _ => credentials.clone(),
+        };
+        Self {
+            endpoint: Arc::new(tunnel.endpoint),
+            address: tunnel.address,
+            server_name: tunnel.server_name,
+            verification,
+            credentials,
+        }
+    }
+}
+
+/// Signs in to `gateway` as the client with `identity`, with its session
+/// token from `sessions` or else what `prompt` asks, keeps the token it
+/// gives, and opens the tunnel to the host. Says so if the host needs the
+/// gateway's assertion, `wants_assertion`, and the gateway gave none.
+async fn through_gateway(
+    gateway: &GatewayArgs,
+    identity: &TlsIdentity,
+    sessions: &GatewaySessions,
+    prompt: &SignInPrompt,
+    wants_assertion: bool,
+) -> Result<Tunnel, Failure> {
+    let verification = match gateway.pin {
+        Some(pin) => HostVerification::PinnedKeys(vec![pin]),
+        None => HostVerification::WebPki(Arc::new(system_roots())),
+    };
+    let route = GatewayRoute {
+        address: gateway.address,
+        server_name: gateway.name.clone(),
+        verification,
+        target: gateway.target.clone(),
+    };
+    let label = gateway.label();
+    let saved = sessions.token(&label);
+    let tunnel = open_tunnel(&route, identity, CLIENT_NAME, saved.as_deref(), prompt)
+        .await
+        .map_err(|error| match error {
+            GatewayFailure::Unreachable(_) => Failure::Lost(error.to_string()),
+            GatewayFailure::Refused(_) | GatewayFailure::Cancelled => {
+                Failure::Fatal(error.to_string())
+            }
+        })?;
+    info!(
+        gateway = label,
+        host = gateway.target,
+        "opened through the gateway"
+    );
+    if let Some(token) = &tunnel.session_token
+        && let Err(error) = sessions.keep(&label, &token.token, token.lifetime)
+    {
+        warn!(%error, "signed in, but the gateway's session cannot be kept for later");
+    }
+    if wants_assertion && tunnel.assertion.is_none() {
+        // A gateway vouches only to hosts whose keys it knows (Section 13.7).
+        warn!(
+            host = gateway.target,
+            "the gateway does not vouch for you to this host, as it does not know the host's \
+             key: authenticate with --token, or pair with --pair"
+        );
+    }
+    Ok(tunnel)
+}
+
+/// Returns the system's certificate authorities, which verify a gateway
+/// given without its pin.
+fn system_roots() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    let found = rustls_native_certs::load_native_certs();
+    for error in &found.errors {
+        debug!(%error, "a certificate authority of the system cannot be read");
+    }
+    roots.add_parsable_certificates(found.certs);
+    roots
 }
 
 /// Returns the prompt with which a client pairs: it asks on the terminal, or
@@ -1306,21 +1497,27 @@ enum Failure {
     Fatal(String),
 }
 
-/// Connects to the host once and runs a session with `options` until it
-/// ends.
+/// Connects to the host once, as `attempt` says, and runs a session with
+/// `options` until it ends.
 async fn connect_once(
     args: &ConnectArgs,
-    endpoint: &ClientEndpoint,
-    verification: &HostVerification,
+    attempt: &Attempt,
     options: &ClientOptions,
     sink: &mut dyn FrameSink,
     input: Option<&mut InputQueue>,
 ) -> Result<ClientSummary, Failure> {
-    let connection = endpoint
-        .connect(args.address, &args.server_name, verification.clone())
+    let host = args.destination.label();
+    let verification = attempt.verification.clone().ok_or_else(|| {
+        Failure::Fatal(format!(
+            "the gateway does not know the key of {host}: pass --pin with it, or --pair"
+        ))
+    })?;
+    let connection = attempt
+        .endpoint
+        .connect(attempt.address, &attempt.server_name, verification)
         .await
-        .map_err(|error| Failure::Lost(format!("cannot connect to {}: {error}", args.address)))?;
-    info!(address = %args.address, "connected");
+        .map_err(|error| Failure::Lost(format!("cannot connect to {host}: {error}")))?;
+    info!(host, "connected");
     EventLines::new(args.events).send(&Event::Connected);
     qdp_runtime::run(
         connection,
