@@ -12,6 +12,10 @@ pub enum DecodedPicture {
     /// draws from directly.
     #[cfg(target_os = "macos")]
     PixelBuffer(crate::PixelBufferPicture),
+    /// A picture MediaCodec decoded, rendered into the app's video surface
+    /// when shown.
+    #[cfg(target_os = "android")]
+    Surface(crate::SurfacePicture),
 }
 
 impl DecodedPicture {
@@ -21,6 +25,8 @@ impl DecodedPicture {
             Self::Memory(frame) => (frame.width(), frame.height()),
             #[cfg(target_os = "macos")]
             Self::PixelBuffer(picture) => picture.visible_size(),
+            #[cfg(target_os = "android")]
+            Self::Surface(picture) => picture.visible_size(),
         }
     }
 
@@ -31,6 +37,8 @@ impl DecodedPicture {
             Self::Memory(frame) => Self::Memory(frame.cropped(width, height)),
             #[cfg(target_os = "macos")]
             Self::PixelBuffer(picture) => Self::PixelBuffer(picture.cropped(width, height)),
+            #[cfg(target_os = "android")]
+            Self::Surface(picture) => Self::Surface(picture.cropped(width, height)),
         }
     }
 
@@ -40,6 +48,8 @@ impl DecodedPicture {
             Self::Memory(frame) => Some(frame),
             #[cfg(target_os = "macos")]
             Self::PixelBuffer(_) => None,
+            #[cfg(target_os = "android")]
+            Self::Surface(_) => None,
         }
     }
 
@@ -53,6 +63,8 @@ impl DecodedPicture {
             Self::Memory(frame) => Ok(use_frame(frame)),
             #[cfg(target_os = "macos")]
             Self::PixelBuffer(picture) => Ok(use_frame(&picture.to_memory()?)),
+            #[cfg(target_os = "android")]
+            Self::Surface(_) => Err(surface_unreadable()),
         }
     }
 
@@ -62,8 +74,19 @@ impl DecodedPicture {
             Self::Memory(frame) => Ok(frame),
             #[cfg(target_os = "macos")]
             Self::PixelBuffer(picture) => picture.to_memory(),
+            #[cfg(target_os = "android")]
+            Self::Surface(_) => Err(surface_unreadable()),
         }
     }
+}
+
+/// Returns the error for reading a picture MediaCodec rendered into the
+/// video surface, which the processor cannot read.
+#[cfg(target_os = "android")]
+fn surface_unreadable() -> CodecError {
+    CodecError::HardwareUnavailable(
+        "a picture MediaCodec decodes into the video surface cannot be read".to_owned(),
+    )
 }
 
 impl From<Yuv420Frame> for DecodedPicture {

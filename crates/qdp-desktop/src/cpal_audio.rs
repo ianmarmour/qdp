@@ -20,6 +20,7 @@ const SPEAKER_CHANNELS: u16 = 2;
 const MICROPHONE_CHANNELS: u16 = 1;
 
 /// The channels the desktop's sound is captured in.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 const DESKTOP_CHANNELS: u16 = 2;
 
 /// The largest value of a 16-bit sample.

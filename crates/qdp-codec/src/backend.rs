@@ -212,8 +212,15 @@ fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
     Ok(Box::new(crate::videotoolbox::VideoToolboxDecoder::new()?))
 }
 
+/// Opens the platform's hardware decoder: MediaCodec on Android, rendering
+/// into the app's video surface.
+#[cfg(target_os = "android")]
+fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
+    Ok(Box::new(crate::MediaCodecDecoder::new()?))
+}
+
 /// Opens the platform's hardware decoder; this platform has none yet.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "android")))]
 fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
     Err(CodecError::HardwareUnavailable(
         "hardware decoding is not supported on this platform yet".to_owned(),
