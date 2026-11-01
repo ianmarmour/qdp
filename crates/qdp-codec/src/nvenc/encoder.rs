@@ -29,7 +29,7 @@ use super::ffi::{self, FunctionList, Handle, Status};
 use crate::backend::VideoEncoder;
 use crate::d3d11va::create_for_vendor;
 use crate::obu::{ObuType, parse_obus};
-use crate::sequence::{ColorDescription, SequenceHeader};
+use crate::stream_check::check_first_key_frame;
 use crate::{
     CodecError, EncodedFrame, EncoderSettings, KeyFrameRequest, NO_LEVEL, TileCount, Yuv420Frame,
     level_for, tile_count, to_qdp_temporal_unit,
@@ -43,14 +43,6 @@ const MAX_TILE_COLUMNS: u32 = 4;
 
 /// The lowest quantizer used: 0 would make frames lossless.
 const MIN_QUANTIZER: u8 = 1;
-
-/// The colour description clients expect, which the other encoders write:
-/// BT.709 primaries and matrix, and the sRGB transfer.
-const COLOR_DESCRIPTION: ColorDescription = ColorDescription {
-    primaries: ffi::COLOR_PRIMARIES_BT709 as u8,
-    transfer: ffi::TRANSFER_SRGB as u8,
-    matrix: ffi::MATRIX_BT709 as u8,
-};
 
 /// The driver's NVENC library, loaded from System32 only, so that no copy
 /// elsewhere on the search path is loaded in its place.
@@ -366,41 +358,19 @@ impl NvencEncoder {
         Ok(())
     }
 
-    /// Encodes a black key frame and checks that its sequence header is one
-    /// clients take (Section 6.4.1): profile 0, 8-bit 4:2:0, the colour
-    /// description of the other encoders in limited range, a level no higher
-    /// than `level`, and neither super-resolution nor film grain. The stream
-    /// starts afresh with its first frame.
+    /// Encodes a black key frame and checks that it suits clients, as
+    /// [`check_first_key_frame`] does. The stream starts afresh with its
+    /// first frame.
     fn check_stream(&mut self, level: u8) -> Result<(), CodecError> {
         let pitch = self.upload(&Yuv420Frame::black(self.width, self.height))?;
         let (packet, is_key_frame) = self
             .encode_input(0, pitch, true)?
             .ok_or_else(|| unavailable("NVENC held back its first frame"))?;
-        let header = SequenceHeader::find(&packet)?
-            .ok_or_else(|| unavailable("NVENC's key frame has no sequence header"))?;
-        let checks = [
-            ("frame type", is_key_frame),
-            ("profile", header.profile == 0),
-            ("bit depth", header.bit_depth == 8),
-            (
-                "chroma subsampling",
-                !header.monochrome && header.subsampling_x && header.subsampling_y,
-            ),
-            (
-                "color description",
-                header.color_description == Some(COLOR_DESCRIPTION),
-            ),
-            ("color range", !header.full_range),
-            ("level", header.level <= level),
-            ("super-resolution", !header.superres),
-            ("film grain", !header.film_grain),
-        ];
-        if let Some((field, _)) = checks.into_iter().find(|(_, suits)| !suits) {
-            return Err(unavailable(&format!(
-                "NVENC's stream does not suit clients: its {field} is not the one asked for"
-            )));
-        }
-        self.sequence_header = header.obu().to_vec();
+        let unit = to_qdp_temporal_unit(&packet, is_key_frame, &[])?;
+        self.sequence_header = check_first_key_frame(&unit, self.width, self.height, level)
+            .map_err(|problem| {
+                unavailable(&format!("NVENC's stream does not suit clients: {problem}"))
+            })?;
         Ok(())
     }
 
