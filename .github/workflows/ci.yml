@@ -91,8 +91,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The streaming tests encode, send and decode video and audio in real
+      # time, a host and a client each; run together on a Windows runner they
+      # fall behind, as audio_flows_both_ways once did, hearing its tone
+      # slowed, so they run one at a time.
       - name: Tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
 
       - name: Build the qdp command
         run: cargo build --release --locked -p qdp-cli
