@@ -7,11 +7,17 @@
 //! as RDNA 3 pads 1080 rows to 1082; the frame headers always carry the
 //! stream's size as the render size, so receivers show only that.
 //!
+//! Frames in memory are written into the encoder's input surface by the
+//! processor. Frames the GPU holds, as DMA-BUFs, are converted into it by
+//! the GPU's video processor instead, where the driver has one that can
+//! import them (see the `conversion` module).
+//!
 //! VA-API is a C interface, so this module and its `ffi` module use `unsafe`:
 //! each block states the contract it relies on, from libva's documentation.
 
 #![allow(unsafe_code)]
 
+mod conversion;
 mod ffi;
 
 use std::ffi::{CStr, c_int, c_void};
@@ -22,9 +28,10 @@ use std::time::{Duration, Instant};
 
 use tracing::debug;
 
+use self::conversion::GpuConversion;
 use self::ffi::{
     ConfigAttrib, Image, ImageFormat, LibVa, PackedHeaderParameters, PictureParameters,
-    SequenceParameters, TileGroupParameters, VaDisplay, VaId, VaStatus, Zeroed,
+    SequenceParameters, SurfaceAttrib, TileGroupParameters, VaDisplay, VaId, VaStatus, Zeroed,
 };
 use crate::frame::workers;
 use crate::headers::{
@@ -33,8 +40,8 @@ use crate::headers::{
     StreamFormat, TileLayout, TxMode, frame_header_obu, sequence_header_obu,
 };
 use crate::{
-    CodecError, EncodedFrame, EncoderSettings, KeyFrameRequest, VideoEncoder, Yuv420Frame,
-    level_for, tile_count, to_qdp_temporal_unit,
+    CodecError, DmaBufFrame, EncodedFrame, EncoderSettings, KeyFrameRequest, VideoEncoder,
+    Yuv420Frame, level_for, tile_count, to_qdp_temporal_unit,
 };
 
 /// The directory of the GPUs' device nodes.
@@ -148,28 +155,73 @@ impl Display {
         }
     }
 
-    /// Returns the AV1 encoding entrypoint the driver offers, if any.
-    fn av1_entrypoint(&self) -> Option<c_int> {
+    /// Returns the entrypoints the driver offers for `profile`, none if it
+    /// does not support the profile.
+    fn entrypoints(&self, profile: c_int) -> Vec<c_int> {
         // SAFETY: the display is initialized.
         let capacity = unsafe { (self.va.max_num_entrypoints)(self.handle) };
-        let mut entrypoints = vec![0; usize::try_from(capacity).ok()?];
+        let Ok(capacity) = usize::try_from(capacity) else {
+            return Vec::new();
+        };
+        let mut entrypoints = vec![0; capacity];
         let mut count = 0;
         // SAFETY: `entrypoints` holds `capacity` entries, as libva requires.
         let status = unsafe {
             (self.va.query_config_entrypoints)(
                 self.handle,
-                ffi::PROFILE_AV1_MAIN,
+                profile,
                 entrypoints.as_mut_ptr(),
                 &mut count,
             )
         };
         if status != ffi::VA_STATUS_SUCCESS {
-            return None;
+            return Vec::new();
         }
-        entrypoints.truncate(usize::try_from(count).unwrap_or(0));
+        entrypoints.truncate(usize::try_from(count).unwrap_or(0).min(capacity));
+        entrypoints
+    }
+
+    /// Returns whether the driver offers `entrypoint` for `profile`.
+    fn has_entrypoint(&self, profile: c_int, entrypoint: c_int) -> bool {
+        self.entrypoints(profile).contains(&entrypoint)
+    }
+
+    /// Returns the AV1 encoding entrypoint the driver offers, if any.
+    fn av1_entrypoint(&self) -> Option<c_int> {
+        let entrypoints = self.entrypoints(ffi::PROFILE_AV1_MAIN);
         [ffi::ENTRYPOINT_ENCODE, ffi::ENTRYPOINT_ENCODE_LOW_POWER]
             .into_iter()
             .find(|entrypoint| entrypoints.contains(entrypoint))
+    }
+
+    /// Returns the attributes surfaces of `config` can have.
+    fn surface_attributes(&self, config: VaId) -> Result<Vec<SurfaceAttrib>, CodecError> {
+        let mut count = 0;
+        // SAFETY: with no list, libva only writes how many attributes there
+        // are.
+        let status = unsafe {
+            (self.va.query_surface_attributes)(
+                self.handle,
+                config,
+                std::ptr::null_mut(),
+                &mut count,
+            )
+        };
+        self.check(status, "vaQuerySurfaceAttributes")?;
+        let empty = SurfaceAttrib::integer(0, 0);
+        let mut attributes = vec![empty; count as usize];
+        // SAFETY: `attributes` holds `count` entries.
+        let status = unsafe {
+            (self.va.query_surface_attributes)(
+                self.handle,
+                config,
+                attributes.as_mut_ptr(),
+                &mut count,
+            )
+        };
+        self.check(status, "vaQuerySurfaceAttributes")?;
+        attributes.truncate(count as usize);
+        Ok(attributes)
     }
 
     /// Creates a parameter or data buffer holding `size` bytes at `data`.
@@ -281,6 +333,8 @@ fn encoder_error(message: impl Into<String>) -> CodecError {
 ///
 /// Each call to [`VideoEncoder::encode`] uploads the frame, encodes it and
 /// waits for the result, which takes a few milliseconds on current GPUs.
+/// [`VideoEncoder::encode_dma_buf`] converts a frame the GPU holds on the
+/// GPU instead of uploading it.
 pub struct VaapiEncoder {
     /// The GPU's display.
     display: Display,
@@ -318,6 +372,9 @@ pub struct VaapiEncoder {
     staging: Option<Image>,
     /// How long the encoder's stages took lately.
     timing: StageTiming,
+    /// Converts frames the GPU holds into the input surface, or why the
+    /// driver cannot.
+    gpu: Result<GpuConversion, String>,
 }
 
 /// How long an encoder's stages took over an interval, logged when it ends.
@@ -327,7 +384,8 @@ struct StageTiming {
     started: Instant,
     /// The frames encoded in it.
     frames: u32,
-    /// Writing frames to the GPU.
+    /// Writing frames into the input surface: uploading frames in memory,
+    /// or converting frames the GPU holds.
     upload: Duration,
     /// Encoding them, until the GPU finished.
     encode: Duration,
@@ -554,13 +612,16 @@ impl VaapiEncoder {
             description,
             staging: None,
             timing: StageTiming::new(Instant::now()),
+            gpu: Err("not set up".to_owned()),
         };
         encoder.create_resources(settings)?;
+        encoder.gpu = GpuConversion::new(&encoder.display, encoder.input, width, height);
         debug!(
             encoder = encoder.description,
             level = format.level,
             tiles = tiles.count(),
             packed_headers = support.packed_headers,
+            gpu_frames = ?encoder.gpu.as_ref().err(),
             "hardware encoder ready"
         );
         Ok(encoder)
@@ -959,6 +1020,46 @@ impl VideoEncoder for VaapiEncoder {
         {
             return Err(CodecError::FrameSize);
         }
+        let started = Instant::now();
+        self.upload(frame)?;
+        self.encode_input(request, started)
+    }
+
+    fn takes_dma_bufs(&self) -> bool {
+        self.gpu.is_ok()
+    }
+
+    fn encode_dma_buf(
+        &mut self,
+        frame: &DmaBufFrame,
+        request: KeyFrameRequest,
+    ) -> Result<Vec<EncodedFrame>, CodecError> {
+        let started = Instant::now();
+        match &mut self.gpu {
+            Ok(conversion) => conversion.convert(&self.display, frame)?,
+            Err(reason) => return Err(CodecError::DmaBufUnsupported(reason.clone())),
+        }
+        self.encode_input(request, started)
+    }
+
+    fn set_quantizer(&mut self, quantizer: u8) {
+        // A `base_q_idx` of 0 would make frames lossless.
+        self.base_q_idx = quantizer.max(1);
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+impl VaapiEncoder {
+    /// Encodes the frame in the input surface, which was being written since
+    /// `started`.
+    fn encode_input(
+        &mut self,
+        request: KeyFrameRequest,
+        started: Instant,
+    ) -> Result<Vec<EncodedFrame>, CodecError> {
         let kind = match (request, self.previous) {
             (KeyFrameRequest::Auto, Some(_)) => FrameKind::Inter,
             _ => FrameKind::Key,
@@ -976,8 +1077,6 @@ impl VideoEncoder for VaapiEncoder {
             tiles: self.tiles,
             tile_size_bytes: self.support.tile_size_bytes,
         };
-        let started = Instant::now();
-        self.upload(frame)?;
         let uploaded = Instant::now();
         // A failed frame leaves no usable reference, so the next is a key frame.
         self.previous = None;
@@ -998,19 +1097,14 @@ impl VideoEncoder for VaapiEncoder {
             is_key_frame,
         }])
     }
-
-    fn set_quantizer(&mut self, quantizer: u8) {
-        // A `base_q_idx` of 0 would make frames lossless.
-        self.base_q_idx = quantizer.max(1);
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
 }
 
 impl Drop for VaapiEncoder {
     fn drop(&mut self) {
+        if let Ok(conversion) = &mut self.gpu {
+            // Its context renders to the input surface, so it goes first.
+            conversion.destroy(&self.display);
+        }
         let va = self.display.va;
         let display = self.display.handle;
         // SAFETY: every object belongs to this display and is no longer used;
