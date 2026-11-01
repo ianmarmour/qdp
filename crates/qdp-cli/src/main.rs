@@ -23,8 +23,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use qdp_codec::DecoderCommand;
-use qdp_desktop::DisplayMatching;
+use qdp_codec::{CodecPreference, DecoderCommand};
+use qdp_desktop::{DisplayMatching, FrameMemory, ScreenOptions};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
 use qdp_runtime::{
     Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
@@ -39,8 +39,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::args::{
-    Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, LockPolicy, Presentation,
-    ServeArgs, SourceKind, USAGE, format_pin, parse_args,
+    Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, GpuCapture, LockPolicy,
+    Presentation, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
 };
 use crate::identity::Role;
 use crate::sink::CliSink;
@@ -259,6 +259,10 @@ async fn serve(args: ServeArgs) -> CliResult {
     let audio_setting = args.audio;
     let lock_policy = args.lock;
     let match_display = args.match_display;
+    let screen = ScreenOptions {
+        matching: match_display,
+        frames: frame_memory(args.gpu_capture, args.encoder).await,
+    };
     let state_directory = Arc::new(args.identity.clone());
     if match_display == DisplayMatching::On {
         // A host that stopped without putting the monitor back left its
@@ -322,7 +326,7 @@ async fn serve(args: ServeArgs) -> CliResult {
                                 (width, height),
                                 state_directory,
                                 lock_policy,
-                                match_display,
+                                screen,
                             ))
                         }),
                     };
@@ -397,9 +401,9 @@ async fn open_desktop(
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
     lock: LockPolicy,
-    matching: DisplayMatching,
+    screen: ScreenOptions,
 ) -> Result<OpenedDesktop, RuntimeError> {
-    let (source, streamed) = open_source(kind, size, state_directory, matching)
+    let (source, streamed) = open_source(kind, size, state_directory, screen)
         .await
         .map_err(RuntimeError::Capture)?;
     let (width, height) = source.size();
@@ -432,14 +436,15 @@ enum Streamed {
 }
 
 /// Opens what a session streams: the screen, which takes the client's
-/// display if `matching` says, or a `size` test pattern. Capturing the screen
+/// display and delivers frames as `screen` says, or a `size` test pattern.
+/// Capturing the screen
 /// can wait for the user to choose a monitor, so it runs on a blocking
 /// thread.
 async fn open_source(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
-    matching: DisplayMatching,
+    screen: ScreenOptions,
 ) -> Result<(Box<dyn FrameSource>, Streamed), String> {
     let test_pattern = || {
         let pattern = Box::new(TestPattern::new(size.0, size.1)) as Box<dyn FrameSource>;
@@ -449,7 +454,7 @@ async fn open_source(
         return Ok(test_pattern());
     }
     let screen =
-        tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory, matching))
+        tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory, screen))
             .await
             .map_err(|error| error.to_string())?;
     match (screen, kind) {
@@ -460,6 +465,34 @@ async fn open_source(
         }
         (Err(error), _) => Err(error),
     }
+}
+
+/// Returns where captured screens deliver their frames: in GPU memory when
+/// `gpu_capture` allows and the encoder `preference` opens reads frames
+/// there, which finding out opens once, and in memory otherwise.
+#[cfg(target_os = "linux")]
+async fn frame_memory(gpu_capture: GpuCapture, preference: CodecPreference) -> FrameMemory {
+    if gpu_capture == GpuCapture::Off {
+        return FrameMemory::System;
+    }
+    let takes_dma_bufs =
+        tokio::task::spawn_blocking(move || qdp_codec::encoder_takes_dma_bufs(preference))
+            .await
+            .unwrap_or(false);
+    if takes_dma_bufs {
+        info!("screen frames go to the encoder in GPU memory where the desktop allows");
+        FrameMemory::Gpu
+    } else {
+        info!("screen frames go to the encoder through memory");
+        FrameMemory::System
+    }
+}
+
+/// Returns where captured screens deliver their frames: in memory, the only
+/// place this platform's encoders read them.
+#[cfg(not(target_os = "linux"))]
+async fn frame_memory(_gpu_capture: GpuCapture, _preference: CodecPreference) -> FrameMemory {
+    FrameMemory::System
 }
 
 /// Returns this machine's name for `HOST_HELLO`, or an empty name if unknown.

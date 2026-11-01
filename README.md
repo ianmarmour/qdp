@@ -113,6 +113,19 @@ distributions install with Mesa (`mesa-va-drivers`) or Intel's media driver
 `VAEntrypointEncSlice` when hardware encoding is available. The host logs which
 encoder it uses, and `--encoder software` or `--encoder hardware` forces one.
 
+With hardware encoding, the screen stays in GPU memory from the compositor to
+the encoder: the desktop shares it as DMA-BUFs, and the GPU's video processor
+converts and scales it for the encoder, so no pixel passes through the
+processor. This is what lets the host keep up at high resolutions and frame
+rates, such as 4K at 120 frames a second. It needs a desktop that shares its
+screen in GPU buffers (GNOME, KDE Plasma and wlroots compositors do) and a
+VA-API driver with a video processor (`VAEntrypointVideoProc` under
+`VAProfileNone` in `vainfo`). The host logs "encoding frames straight from the
+GPU" when it does, and copies frames through memory otherwise, or from the
+moment the driver cannot read one; `qdp serve --gpu-capture off` always
+copies them. `QDP_LOG=info,qdp_codec=debug` logs how long each frame takes to
+reach the encoder's input, encode and read back.
+
 Clients decode on the GPU where they can: on Macs with hardware AV1 decoding
 (Apple M3 and newer) through VideoToolbox, falling back to software decoding
 elsewhere or if the hardware cannot handle a stream. `--decoder software` or

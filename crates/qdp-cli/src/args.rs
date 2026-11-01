@@ -43,6 +43,10 @@ Serve options:
   --fps N              Frames per second (default 60)
   --encoder KIND       auto, hardware or software (default auto: the GPU's
                        encoder when it has one, otherwise software)
+  --gpu-capture on|off Hand the screen to the GPU's encoder in the GPU's own
+                       memory, without copying it through the processor,
+                       where the desktop and the driver allow; on Linux
+                       (default on; off copies every frame through memory)
   --speed N            Software encoder speed preset, 0 to 10 (default 10)
   --quantizer N        Encoder quantizer, 1 to 255 (default 100)
   --clipboard WAY      both, send, receive or off: share the clipboard's text
@@ -204,6 +208,8 @@ pub struct ServeArgs {
     /// What happens to the desktop when a session ends other than by its
     /// client disconnecting.
     pub lock: LockPolicy,
+    /// Whether the screen may reach the encoder in GPU memory.
+    pub gpu_capture: GpuCapture,
 }
 
 /// What a host does with its desktop when a session ends other than by its
@@ -214,6 +220,15 @@ pub enum LockPolicy {
     Lock,
     /// The desktop is left as it is.
     Leave,
+}
+
+/// Whether the screen may reach a hardware encoder in GPU memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuCapture {
+    /// Where the desktop and the encoder allow.
+    On,
+    /// Never: every frame is copied through memory.
+    Off,
 }
 
 /// What the client's touchpad does (Section 8.4.6).
@@ -459,6 +474,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
         passthrough: PassthroughPolicy::GameControllers,
         resumption: Some(qdp_runtime::DEFAULT_RESUMPTION_LIFETIME),
         lock: LockPolicy::Lock,
+        gpu_capture: GpuCapture::On,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -511,6 +527,17 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     other => {
                         return Err(error(format!(
                             "--match-display must be on or off, not {other}"
+                        )));
+                    }
+                }
+            }
+            "--gpu-capture" => {
+                serve.gpu_capture = match value("--gpu-capture", &mut arguments)?.as_str() {
+                    "on" => GpuCapture::On,
+                    "off" => GpuCapture::Off,
+                    other => {
+                        return Err(error(format!(
+                            "--gpu-capture must be on or off, not {other}"
                         )));
                     }
                 }
@@ -739,6 +766,13 @@ mod tests {
         };
         assert_eq!(serve.match_display, DisplayMatching::On);
         assert!(parse_line("serve --token abc --match-display maybe").is_err());
+        assert_eq!(serve.gpu_capture, GpuCapture::On);
+        let Command::Serve(serve) = parse_line("serve --token abc --gpu-capture off").unwrap()
+        else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.gpu_capture, GpuCapture::Off);
+        assert!(parse_line("serve --token abc --gpu-capture maybe").is_err());
         assert!(parse_line("serve").is_err());
         let pin = "ab".repeat(PIN_HEX_LENGTH / 2);
         let Command::Serve(serve) = parse_line(&format!("serve --client-key {pin}")).unwrap()
