@@ -343,7 +343,8 @@ impl ClientSession {
                     self.phase = Phase::Configuring;
                 } else {
                     // The host discards pipelined configuration after a failed
-                    // attempt, so it must be sent again (Section 4.4.6).
+                    // attempt, or one that needs another factor, so it must be
+                    // sent again (Sections 4.4.1 and 4.4.6).
                     self.ready_sent_at = None;
                 }
                 self.events.push_back(ClientEvent::AuthResult(result));

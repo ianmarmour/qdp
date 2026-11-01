@@ -61,6 +61,10 @@ connection presents the host's certificate and a changed pin always takes effect
   pairing may be tried, backing off exponentially after failures, and show every
   pairing request to their user, who can notice requests they did not make. A host that shows the code where people other
   than its user can see it, such as on a shared screen, lets them pair.
+- A one-time password ([Section 4.4.10](04-session.md#4410-totp-0x09)) adds a
+  factor an attacker who learned a password or copied a client's key does not
+  have, and a code seen by someone else is useless once used. Its secret is shared
+  with the verifier, which therefore protects it as it would a password database.
 - Hosts MUST limit failed attempts per connection
   ([Section 4.4.1](04-session.md#441-messages)) and SHOULD limit them per source
   address and per user across connections. Hosts SHOULD send the same `Reason` for

@@ -110,13 +110,13 @@ plain cancellation of the stream.
 
 | Field | Values |
 |---|---|
-| Authentication method | 0x01 `CLIENT_CERTIFICATE`, 0x02 `TOKEN`, 0x03 `SCRAM_SHA_256_PLUS`, 0x04 `ANONYMOUS`, 0x05 `PASSWORD`, 0x06 `PAIRING` |
+| Authentication method | 0x01 `CLIENT_CERTIFICATE`, 0x02 `TOKEN`, 0x03 `SCRAM_SHA_256_PLUS`, 0x04 `ANONYMOUS`, 0x05 `PASSWORD`, 0x06 `PAIRING`, 0x09 `TOTP` |
 | `HDR` capability formats (mask) | 0x01 BT.2020 with PQ, 0x02 BT.2020 with HLG |
 | Video stream flags (mask) | 0x01 `FULL_RANGE`, 0x02 `LOSSLESS` |
 | Video fragment flags (mask) | 0x01 `KEY_FRAME`, 0x02 `RECOVERY`, 0x04 `RETRANSMISSION`, 0x08 `LAST` |
 | Monitor flags (mask) | 0x01 `PRIMARY`, 0x02 `VRR_CAPABLE`, 0x04 `HDR_PQ`, 0x08 `HDR_HLG` (Client Monitor); 0x01 `PRIMARY` (Host Monitor) |
 | `DISPLAY_TIMING` flags (mask) | 0x01 `VRR_ACTIVE` |
-| Authentication status | 0x00 `SUCCESS`, 0x01 `FAILED_RETRY`, 0x02 `FAILED_FINAL` |
+| Authentication status | 0x00 `SUCCESS`, 0x01 `FAILED_RETRY`, 0x02 `FAILED_FINAL`, 0x03 `NEXT_FACTOR` |
 | Video codec | 0x01 AV1 |
 | Audio codec | 0x01 Opus, 0x02 PCM L16, 0x03 PCM L24 |
 | Video layer | 0x00 `MOTION`, 0x01 `REFINEMENT` |
@@ -146,3 +146,15 @@ plain cancellation of the stream.
 | Touchpad buttons (mask) | 0x01 primary, 0x02 secondary |
 | Pen flags (mask) | 0x01 in range, 0x02 tip switch, 0x04 barrel switch, 0x08 eraser, 0x10 invert |
 | Device features (mask) | see the table in [Section 8.2.1](08-input.md#821-device_attach-0x31) |
+
+## 12.8 Gateway protocol
+
+The gateway protocol ([Section 13](13-gateway.md)) runs on its own connections,
+with its own ALPN token, so its code points are a separate space from those above.
+
+| Field | Values |
+|---|---|
+| Gateway control message types | 0x01 `GATEWAY_HELLO`, 0x02 `GATEWAY_WELCOME`, 0x03 `AUTH_START`, 0x04 `AUTH_CONTINUE`, 0x05 `AUTH_RESULT`, 0x06 `SESSION_TOKEN`, 0x07 `HOSTS_REQUEST`, 0x08 `HOSTS`, 0x09 `OPEN`, 0x0A `OPENED`, 0x0B `OPEN_FAILED` |
+| `OPEN_FAILED` codes | 0x01 `UNKNOWN_HOST`, 0x02 `UNREACHABLE`, 0x03 `BUSY` |
+| Gateway error codes | 0x00 `GATEWAY_NO_ERROR`, 0x01 `GATEWAY_INTERNAL_ERROR`, 0x02 `GATEWAY_PROTOCOL_VIOLATION`, 0x03 `GATEWAY_AUTH_FAILED`, 0x04 `GATEWAY_VERSION`, 0x05 `GATEWAY_IDLE`, 0x06 `GATEWAY_PATH_TOO_SMALL`, 0x07 `GATEWAY_POLICY`, 0x08 `GATEWAY_SHUTDOWN` |
+| Identity assertion magic | 0x51444741 (`QDGA`) |

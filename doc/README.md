@@ -25,6 +25,7 @@ Implementations of this draft identify themselves with the ALPN token
 | [10. Clipboard](spec/10-clipboard.md) | Lazy, announce-then-fetch clipboard sharing. |
 | [11. Security](spec/11-security.md) | Authentication, replay, privacy, microphone and clipboard consent, untrusted media, HID passthrough, resource limits. |
 | [12. Registries](spec/12-registries.md) | Every code point in one place. |
+| [13. Gateways](spec/13-gateway.md) | Reaching hosts in a private network through a gateway: directory and TOTP authentication, a tunnel for the end-to-end QDP connection, and identity assertions hosts can trust. |
 
 ## Reading order
 

@@ -339,7 +339,10 @@ result motivated the refinement layer.
 - Sessions shared by several clients.
 - Local prediction of scrolling and window dragging on the client.
 - AV2 support once hardware decoders ship.
-- Relays, NAT traversal and connection brokers.
+- NAT traversal, and relays for hosts no gateway reaches. Gateways, which
+  tunnel end-to-end sessions into private networks after authenticating users
+  against their directory with a second factor, are specified in
+  [Section 13](spec/13-gateway.md) of the specification.
 - An AV1 encoder path that uses the host's changed-block map to skip unchanged
   areas, so that software encoding costs scale with what changed rather than with
   screen size ([Section 10](#10-implementation)).
