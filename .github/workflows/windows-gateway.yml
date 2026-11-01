@@ -44,7 +44,8 @@ jobs:
         shell: pwsh
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
-          wix extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION"
+          wix extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION" `
+            "WixToolset.Util.wixext/$env:WIX_VERSION"
 
       - name: Build the gateway
         shell: bash

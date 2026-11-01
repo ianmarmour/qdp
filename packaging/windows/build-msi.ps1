@@ -10,8 +10,9 @@
 # The installer's version is Cargo.toml's major and minor version and BUILD,
 # by default the CI run's number, which only grows, so that each build
 # upgrades the one before it. It needs the wix tool (dotnet tool install
-# --global wix --version 5.0.2) and, for the gateway, its firewall extension
-# (wix extension add --global WixToolset.Firewall.wixext/5.0.2).
+# --global wix --version 5.0.2) and, for the gateway, its firewall and
+# utility extensions (wix extension add --global
+# WixToolset.Firewall.wixext/5.0.2 WixToolset.Util.wixext/5.0.2).
 param(
     [Parameter(Mandatory)] [ValidateSet('app', 'gateway')] [string] $Installer,
     [Parameter(Mandatory)] [string] $Output,
@@ -35,7 +36,8 @@ $arguments = switch ($Installer) {
             '-d', "QdpExe=$(Find 'target\release\qdp.exe')")
     }
     'gateway' {
-        @((Find 'packaging\windows\QDPGateway.wxs'), '-ext', 'WixToolset.Firewall.wixext') + $common + @(
+        @((Find 'packaging\windows\QDPGateway.wxs'), '-ext', 'WixToolset.Firewall.wixext',
+            '-ext', 'WixToolset.Util.wixext') + $common + @(
             '-d', "GatewayExe=$(Find 'target\release\qdp-gateway.exe')",
             '-d', "ExampleConfig=$(Find 'packaging\gateway.toml')")
     }

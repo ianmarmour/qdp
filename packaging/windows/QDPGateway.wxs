@@ -10,12 +10,13 @@
   windows-gateway.yml, from absolute paths:
 
     wix build packaging/windows/QDPGateway.wxs -arch x64 -ext WixToolset.Firewall.wixext
-      -d Version=0.1.42 -d GatewayExe=C:\src\qdp\target\release\qdp-gateway.exe
+      -ext WixToolset.Util.wixext -d Version=0.1.42 -d GatewayExe=C:\src\qdp\target\release\qdp-gateway.exe
       -d ExampleConfig=C:\src\qdp\packaging\gateway.toml
       -d Icon=C:\src\qdp\windows\QDP\Assets\qdp.ico -o qdp-gateway-windows-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="QDP Gateway" Manufacturer="Ian Armour" Version="$(Version)"
            UpgradeCode="9B2F7E41-3C6D-4A5E-8F1B-2D4C6E8A0B13" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of the QDP gateway is already installed." />
@@ -47,11 +48,11 @@
                         Type="ownProcess" Start="auto" ErrorControl="normal"
                         Account="NT AUTHORITY\LocalService"
                         Arguments="service run --config &quot;[DATAFOLDER]gateway.toml&quot;">
-          <ServiceConfigFailureActions OnInstall="yes" OnReinstall="yes" ResetPeriod="86400">
-            <Failure Action="restartService" Delay="5000" />
-            <Failure Action="restartService" Delay="5000" />
-            <Failure Action="restartService" Delay="5000" />
-          </ServiceConfigFailureActions>
+          <!-- Restarts after failures. Windows Installer's own failure
+               actions cannot restart a service: setting them is refused. -->
+          <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart" RestartServiceDelayInSeconds="5"
+                              ResetPeriodInDays="1" />
         </ServiceInstall>
         <ServiceControl Id="StopGateway" Name="qdp-gateway" Stop="both" Remove="uninstall"
                         Wait="yes" />
