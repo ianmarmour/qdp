@@ -1526,6 +1526,8 @@ impl AudioOutput for RecordingOutput {
 struct AudioWatcher {
     /// The client's speakers.
     speakers: RecordingOutput,
+    /// The host's virtual microphone.
+    host_microphone: RecordingOutput,
     /// The frames presented.
     frames: usize,
 }
@@ -1534,7 +1536,13 @@ impl FrameSink for AudioWatcher {
     fn present(&mut self, _frame: DecodedPicture, _info: FrameInfo) -> SinkControl {
         self.frames += 1;
         let played = self.speakers.recorded.lock().unwrap().len();
-        if played >= SAMPLE_RATE as usize * 3 / 2 || self.frames >= CLIPBOARD_FRAMES {
+        // The devices play silence until the audio arrives, which a slow
+        // machine's may do late: the session lasts until both tones can be
+        // told.
+        let told = played >= SAMPLE_RATE as usize * 3 / 2
+            && self.speakers.frequency().is_some()
+            && self.host_microphone.frequency().is_some();
+        if told || self.frames >= CLIPBOARD_FRAMES {
             SinkControl::Stop
         } else {
             SinkControl::Continue
@@ -1583,6 +1591,7 @@ async fn audio_flows_both_ways() {
         .unwrap();
     let mut watcher = AudioWatcher {
         speakers: speakers.clone(),
+        host_microphone: host_microphone.clone(),
         frames: 0,
     };
     let options = client_options(ClientCredentials::Token(TOKEN.to_vec()));
@@ -1624,7 +1633,10 @@ impl FrameSink for MicrophoneSwitch {
             self.heard_before = Some(heard);
             assert!(self.input.send(UserInput::Microphone(Microphone::On)));
         }
-        if heard >= SAMPLE_RATE as usize / 2 || self.frames >= CLIPBOARD_FRAMES {
+        // The host's microphone plays silence until the client's audio
+        // arrives: the session lasts until its tone can be told.
+        let told = heard >= SAMPLE_RATE as usize / 2 && self.host_microphone.frequency().is_some();
+        if told || self.frames >= CLIPBOARD_FRAMES {
             SinkControl::Stop
         } else {
             SinkControl::Continue

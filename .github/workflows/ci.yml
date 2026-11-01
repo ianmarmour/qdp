@@ -1,5 +1,5 @@
 # Checks every change merged into main on Linux, Windows and macOS, builds
-# the qdp command for each, the Android app and the Apple apps, and publishes them all as a
+# the qdp command for each, the Android, Apple and Windows apps, and publishes them all as a
 # GitHub release once every job passed: a numbered build for each change
 # merged into main, and a version for each tag such as v0.2.0. Pull requests
 # are not checked here, so that merging never waits for it; a run can be
@@ -220,12 +220,16 @@ jobs:
     name: Apple
     uses: ./.github/workflows/apple.yml
 
+  windows-app:
+    name: Windows app
+    uses: ./.github/workflows/windows-app.yml
+
   release:
     name: Release
     # Every change merged into main and every version tag is released once
     # all the builds passed; runs started by hand are not.
     if: github.event_name == 'push'
-    needs: [linux, windows, macos, android, apple]
+    needs: [linux, windows, macos, android, apple, windows-app]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -238,6 +242,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: qdp-*
           merge-multiple: true
 
       - name: Publish the release
@@ -255,6 +260,7 @@ jobs:
           cat > notes.md <<NOTES
           | Platform | Download |
           |---|---|
+          | Windows app (x86-64, Windows 10 or later) | \`qdp-windows-app-x64.zip\` |
           | Android (64-bit ARM, Android 10 or later) | \`qdp-android-arm64.apk\` |
           | Mac app (Apple silicon, macOS 26 or later) | \`qdp-macos-app.zip\` |
           | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
