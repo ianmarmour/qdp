@@ -604,11 +604,11 @@ impl AudioPlayer {
 }
 
 impl Drop for AudioPlayer {
+    /// Stops the thread without waiting for it: a device that does not
+    /// answer, as Core Audio can take seconds to fail to start one, must
+    /// not hold up the session's end.
     fn drop(&mut self) {
         let _ = self.signals.send(PlayerSignal::Stop);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 
@@ -621,17 +621,26 @@ fn play(
     playout: &Playout,
     signalled: &Receiver<PlayerSignal>,
 ) {
+    // The last failure to start, which is not logged again while it repeats.
+    let mut last_failure: Option<String> = None;
     loop {
-        let device = output
-            .start(channels, playout.clone())
-            .inspect_err(|error| {
-                warn!(
-                    error,
-                    device = output.description(),
-                    "audio playback failed; trying again"
-                );
-            })
-            .ok();
+        let device = match output.start(channels, playout.clone()) {
+            Ok(device) => {
+                last_failure = None;
+                Some(device)
+            }
+            Err(error) => {
+                if last_failure.as_ref() != Some(&error) {
+                    warn!(
+                        error,
+                        device = output.description(),
+                        "audio playback failed; trying again"
+                    );
+                }
+                last_failure = Some(error);
+                None
+            }
+        };
         let signal = match device {
             Some(_) => signalled.recv().ok(),
             None => match signalled.recv_timeout(PLAYBACK_RETRY) {
