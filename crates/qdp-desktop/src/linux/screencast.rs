@@ -174,9 +174,8 @@ impl ScreenCapture {
         capture.portal = Some(portal);
         capture.restore_token = stream.restore_token;
         capture.desktop_size = stream.desktop_size;
-        if let Some((position, size)) = stream.desktop_position.zip(stream.desktop_size) {
-            (capture.monitor_name, capture.placement) = portal_monitor(position, size);
-        }
+        (capture.monitor_name, capture.placement) =
+            portal_monitor(stream.desktop_position, stream.desktop_size);
         if stream.cursor_mode == CursorMode::Hidden {
             if let Ok(mut cursor) = capture.cursor.lock() {
                 cursor.state = Some(CursorState {
@@ -382,21 +381,13 @@ impl FrameSource for ScreenCapture {
 }
 
 /// Returns the name of the monitor the portal described, at `position` and
-/// of `size` in the desktop's coordinates, and where it is among the
-/// desktop's monitors, as far as they are known.
+/// of `size` in the desktop's coordinates as far as it said, and where it is
+/// among the desktop's monitors, as far as they are known. Without its
+/// position, the monitor is the one of its size, or the desktop's only one.
 fn portal_monitor(
-    position: (i32, i32),
-    size: (i32, i32),
+    position: Option<(i32, i32)>,
+    size: Option<(i32, i32)>,
 ) -> (Option<String>, Option<MonitorPlacement>) {
-    let (Ok(width), Ok(height)) = (u32::try_from(size.0), u32::try_from(size.1)) else {
-        return (None, None);
-    };
-    let monitor = LayoutRect {
-        x: position.0,
-        y: position.1,
-        width,
-        height,
-    };
     let outputs = match desktop_layout::outputs() {
         Ok(outputs) => outputs,
         Err(error) => {
@@ -404,11 +395,37 @@ fn portal_monitor(
             return (None, None);
         }
     };
-    let name = outputs
-        .iter()
-        .find(|output| (output.rect.x, output.rect.y) == (monitor.x, monitor.y))
-        .map(|output| output.name.clone());
-    let placement = desktop_layout::placement(monitor, &outputs);
+    let described = position.zip(size).and_then(|((x, y), (width, height))| {
+        Some(LayoutRect {
+            x,
+            y,
+            width: u32::try_from(width).ok()?,
+            height: u32::try_from(height).ok()?,
+        })
+    });
+    let of_size = |output: &&desktop_layout::OutputLayout| {
+        size.is_some_and(|(width, height)| {
+            (i64::from(output.rect.width), i64::from(output.rect.height))
+                == (i64::from(width), i64::from(height))
+        })
+    };
+    let output = match described {
+        Some(rect) => outputs
+            .iter()
+            .find(|output| (output.rect.x, output.rect.y) == (rect.x, rect.y)),
+        None => {
+            let sized: Vec<_> = outputs.iter().filter(of_size).collect();
+            match (sized.as_slice(), outputs.as_slice()) {
+                ([one], _) => Some(*one),
+                (_, [only]) => Some(only),
+                _ => None,
+            }
+        }
+    };
+    let name = output.map(|output| output.name.clone());
+    let placement = described
+        .or(output.map(|output| output.rect))
+        .and_then(|rect| desktop_layout::placement(rect, &outputs));
     info!(monitor = ?name, ?placement, "the captured monitor's place in the desktop");
     (name, placement)
 }
