@@ -1,6 +1,6 @@
 //! Choosing between the platform's hardware codecs and the software ones.
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[cfg(target_os = "linux")]
 use crate::DmaBufFrame;
@@ -124,7 +124,7 @@ pub fn encoder_takes_dma_bufs(preference: CodecPreference) -> bool {
         match open_hardware_encoder(settings) {
             Ok(encoder) => encoder.takes_dma_bufs(),
             Err(error) => {
-                debug!(%error, "no hardware encoder to take frames the GPU holds");
+                tracing::debug!(%error, "no hardware encoder to take frames the GPU holds");
                 false
             }
         }

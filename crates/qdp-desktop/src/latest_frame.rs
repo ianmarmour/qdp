@@ -4,14 +4,13 @@
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-use qdp_codec::Yuv420Frame;
-use qdp_runtime::FrameArrivals;
+use qdp_runtime::{CapturedFrame, FrameArrivals};
 
 /// The newest frame, or why capture stopped.
 #[derive(Debug, Default)]
 struct State {
     /// The newest frame, shared with the captures that returned it.
-    frame: Option<Arc<Yuv420Frame>>,
+    frame: Option<CapturedFrame>,
     /// Why capture stopped, if it did.
     error: Option<String>,
 }
@@ -30,9 +29,9 @@ pub(crate) struct LatestFrame {
 
 impl LatestFrame {
     /// Stores a new frame, and tells the host it arrived if it watches.
-    pub(crate) fn store(&self, frame: Yuv420Frame) {
+    pub(crate) fn store(&self, frame: CapturedFrame) {
         if let Ok(mut state) = self.state.lock() {
-            state.frame = Some(Arc::new(frame));
+            state.frame = Some(frame);
         }
         self.arrived.notify_all();
         if let Some(arrivals) = self.arrivals.get() {
@@ -57,7 +56,7 @@ impl LatestFrame {
     }
 
     /// Waits up to `timeout` for a frame and returns the newest, shared.
-    pub(crate) fn wait(&self, timeout: Duration) -> Result<Arc<Yuv420Frame>, String> {
+    pub(crate) fn wait(&self, timeout: Duration) -> Result<CapturedFrame, String> {
         let state = self
             .state
             .lock()
@@ -81,16 +80,20 @@ impl LatestFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qdp_codec::Yuv420Frame;
 
     /// The newest frame is returned, and an error ends waiting.
     #[test]
     fn keeps_the_newest_frame() {
         let latest = LatestFrame::default();
         assert!(latest.wait(Duration::from_millis(1)).is_err());
-        latest.store(Yuv420Frame::black(2, 2));
-        latest.store(Yuv420Frame::black(4, 2));
-        assert_eq!(latest.wait(Duration::ZERO).unwrap().width(), 4);
+        latest.store(Yuv420Frame::black(2, 2).into());
+        latest.store(Yuv420Frame::black(4, 2).into());
+        assert_eq!(latest.wait(Duration::ZERO).unwrap().size(), (4, 2));
         latest.fail("stopped".to_owned());
-        assert_eq!(latest.wait(Duration::ZERO), Err("stopped".to_owned()));
+        assert_eq!(
+            latest.wait(Duration::ZERO).unwrap_err(),
+            "stopped".to_owned()
+        );
     }
 }

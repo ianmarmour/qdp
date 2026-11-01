@@ -29,7 +29,7 @@ use pw::spa;
 use pw::spa::buffer::meta::MetaCursor;
 use qdp_codec::{Rgb32Order, Yuv420Frame};
 use qdp_runtime::{
-    CursorShape, CursorState, DesktopScale, FrameArrivals, FrameSource, LayoutRect,
+    CapturedFrame, CursorShape, CursorState, DesktopScale, FrameArrivals, FrameSource, LayoutRect,
     MonitorPlacement, PointerPosition, RuntimeError, WantedDisplay,
 };
 use tokio::sync::oneshot;
@@ -261,7 +261,7 @@ impl ScreenCapture {
         let deadline = Instant::now() + MODE_CHANGE_TIMEOUT;
         loop {
             if let Ok(frame) = self.wait_for_frame(MODE_CHANGE_POLL) {
-                self.size = (frame.width(), frame.height());
+                self.size = frame.size();
             }
             if self.size == size || self.size == (size.1, size.0) {
                 return true;
@@ -300,7 +300,7 @@ impl ScreenCapture {
     /// Waits for the first frame and takes the monitor's size from it.
     fn wait_for_first_frame(&mut self) -> Result<(), String> {
         let first = self.wait_for_frame(FIRST_FRAME_TIMEOUT)?;
-        self.size = (first.width(), first.height());
+        self.size = first.size();
         info!(
             width = self.size.0,
             height = self.size.1,
@@ -316,7 +316,7 @@ impl ScreenCapture {
     }
 
     /// Waits up to `timeout` for a frame and returns the newest.
-    fn wait_for_frame(&self, timeout: Duration) -> Result<Arc<Yuv420Frame>, String> {
+    fn wait_for_frame(&self, timeout: Duration) -> Result<CapturedFrame, String> {
         self.shared.wait(timeout)
     }
 }
@@ -326,7 +326,7 @@ impl FrameSource for ScreenCapture {
         self.size
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         // The compositor sends frames only when the screen changes, so the
         // newest frame is the current screen.
         let frame = self
@@ -334,7 +334,7 @@ impl FrameSource for ScreenCapture {
             .map_err(RuntimeError::Capture)?;
         // A monitor that changes size sends frames of its new size, which
         // the host follows with a new stream.
-        self.size = (frame.width(), frame.height());
+        self.size = frame.size();
         Ok(frame)
     }
 
@@ -857,7 +857,7 @@ fn run_pipewire(
                 order,
                 image,
             ) {
-                Some(frame) => frame_shared.store(frame),
+                Some(frame) => frame_shared.store(frame.into()),
                 None => debug!(size, stride, "incomplete screen buffer skipped"),
             }
         })

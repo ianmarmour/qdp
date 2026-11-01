@@ -26,7 +26,7 @@ use objc2_screen_capture_kit::{
     SCStreamOutput, SCStreamOutputType,
 };
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{CursorState, FrameArrivals, FrameSource, RuntimeError};
+use qdp_runtime::{CapturedFrame, CursorState, FrameArrivals, FrameSource, RuntimeError};
 use tracing::{debug, info};
 
 use super::cursor::SystemCursor;
@@ -77,7 +77,7 @@ define_class!(
                 return;
             };
             match convert(&image) {
-                Some(frame) => self.ivars().store(frame),
+                Some(frame) => self.ivars().store(frame.into()),
                 None => debug!("unreadable screen frame skipped"),
             }
         }
@@ -272,11 +272,11 @@ impl FrameSource for MacScreenCapture {
         self.size
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         let frame = self.latest.wait(TIMEOUT).map_err(RuntimeError::Capture)?;
         // A display that changes size sends frames of its new size, which
         // the host follows with a new stream.
-        self.size = (frame.width(), frame.height());
+        self.size = frame.size();
         Ok(frame)
     }
 

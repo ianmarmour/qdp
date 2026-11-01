@@ -106,6 +106,6 @@ fn captures_the_screen() {
     assert!(width > 0 && height > 0);
     for _ in 0..3 {
         let frame = capture.capture().unwrap();
-        assert_eq!((frame.width(), frame.height()), (width, height));
+        assert_eq!(frame.size(), (width, height));
     }
 }

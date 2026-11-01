@@ -20,16 +20,16 @@ use qdp::wire::{SignedVarInt, VarInt};
 use qdp_codec::{CodecPreference, Yuv420Frame};
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdentity};
 use qdp_runtime::{
-    ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, ClientAudio, ClientCredentials,
-    ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState, CursorWarp,
-    DesktopScale, DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest, FrameArrivals,
-    FrameInfo, FrameSink, FrameSource, GamepadFeedback, HostAudio, HostAuthenticator, HostDesktop,
-    HostOptions, InputAction, InputHandle, InputInjector, InputQueue, Microphone, NoInput,
-    OpenedDesktop, PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect,
-    Playout, PointerButton, PointerPosition, Presentation, PresentationTiming, RefreshMode,
-    ResumptionSlot, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
-    TouchPhase, TouchPoint, UserInput, WantedDisplay, WarpKind, input_channel, input_classes, run,
-    serve,
+    ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, CapturedFrame, ClientAudio,
+    ClientCredentials, ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState,
+    CursorWarp, DesktopScale, DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest,
+    FrameArrivals, FrameInfo, FrameSink, FrameSource, GamepadFeedback, HostAudio,
+    HostAuthenticator, HostDesktop, HostOptions, InputAction, InputHandle, InputInjector,
+    InputQueue, Microphone, NoInput, OpenedDesktop, PassthroughDevice, PassthroughFeedback,
+    PassthroughPolicy, PenInput, PixelRect, Playout, PointerButton, PointerPosition, Presentation,
+    PresentationTiming, RefreshMode, ResumptionSlot, RuntimeError, SAMPLE_RATE, SharedClipboard,
+    SinkControl, TestPattern, TouchPhase, TouchPoint, UserInput, WantedDisplay, WarpKind,
+    input_channel, input_classes, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -119,7 +119,7 @@ impl FrameSource for CursorPattern {
         self.pattern.size()
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         self.captures += 1;
         self.pattern.capture()
     }
@@ -570,7 +570,7 @@ impl FrameSource for ArrivingPattern {
         self.pattern.size()
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         self.pattern.capture()
     }
 
@@ -979,7 +979,7 @@ impl FrameSource for MatchingPattern {
         self.pattern.size()
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         self.pattern.capture()
     }
 
@@ -1128,14 +1128,10 @@ impl FrameSource for ShrinkingPattern {
         }
     }
 
-    fn capture(&mut self) -> Result<Arc<Yuv420Frame>, RuntimeError> {
+    fn capture(&mut self) -> Result<CapturedFrame, RuntimeError> {
         let (width, height) = self.size();
         self.captures += 1;
-        Ok(Arc::new(TestPattern::frame(
-            width,
-            height,
-            self.captures as u64,
-        )))
+        Ok(TestPattern::frame(width, height, self.captures as u64).into())
     }
 }
 
