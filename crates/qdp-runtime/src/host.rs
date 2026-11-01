@@ -43,6 +43,7 @@ use crate::host_passthrough::{
 use crate::layout::VideoLayout;
 use crate::media::{CursorState, DesktopScale, FrameArrivals, FrameSource, MonitorPlacement};
 use crate::rate_control::{QueueDetector, RateControl};
+use crate::recovery_bases::RecoveryBases;
 use crate::send_stats::{SendStats, decode_window, queue_delay};
 use crate::stream_ids::StreamIds;
 use crate::{HostAuthenticator, RuntimeError, close_on_error, is_normal_close};
@@ -211,6 +212,9 @@ struct ActiveHost {
     decoder_lag: DecoderLag,
     /// When the last frame was sent, once one has been.
     frame_sent_at: Option<Instant>,
+    /// The encoded frames sent lately, which recovery frames may be
+    /// predicted from.
+    recovery_bases: RecoveryBases,
     /// Where the captured monitor is in the desktop, and its size, as the
     /// injector was last told.
     placement: Option<(MonitorPlacement, (usize, usize))>,
@@ -547,6 +551,7 @@ async fn serve_session(
         queue: QueueDetector::default(),
         decoder_lag: DecoderLag::default(),
         frame_sent_at: None,
+        recovery_bases: RecoveryBases::default(),
         placement,
         desktop_scale,
         summary: HostSummary::default(),
@@ -855,6 +860,7 @@ impl ActiveHost {
                 self.pending_since
                     .map(|since| now.saturating_duration_since(since)),
                 self.rate.quantizer(),
+                self.arrivals.as_ref().map(|arrivals| arrivals.count()),
             );
         }
     }
@@ -1131,18 +1137,24 @@ impl ActiveHost {
         }
     }
 
-    /// Asks the encoder thread for the next frame: a key frame for the first one
-    /// and whenever the client needs to recover.
+    /// Asks the encoder thread for the next frame: a key frame for the first
+    /// one, and whenever the client needs to recover, a frame predicted from
+    /// the one it decoded last where the encoder still holds that one, or a
+    /// key frame otherwise.
     fn request_frame(&mut self, now: Instant) -> Result<(), RuntimeError> {
-        let recovery = self.sender.recovery_needed(now).is_some();
+        let needed = self.sender.recovery_needed(now);
+        let recovery = needed.is_some();
         let request = if self.frames_requested == 0 || recovery {
             KeyFrameRequest::Force
         } else {
             KeyFrameRequest::Auto
         };
+        let recover_from =
+            needed.and_then(|base| self.recovery_bases.base(self.display.stream_id(), base));
         self.encoder.request(EncodeJob {
             request,
             recovery,
+            recover_from,
             stream_id: self.display.stream_id(),
             settings: self.display.plan().encoder_settings(&self.tuning),
             quantizer: self.rate.quantizer(),
@@ -1233,10 +1245,19 @@ impl ActiveHost {
                 .capture_resized(output.capture_size, &mut self.stream_ids)?;
             return self.reconfigure(change);
         }
-        let kind = match (output.frame.is_key_frame, output.job.recovery) {
-            (true, true) => FrameKind::KeyRecovery,
-            (true, false) => FrameKind::Key,
-            (false, _) => FrameKind::Delta,
+        let kind = match (
+            output.frame.is_key_frame,
+            output.job.recovery,
+            output.frame.recovered_from,
+            output.job.recover_from,
+        ) {
+            (true, true, ..) => FrameKind::KeyRecovery,
+            (true, false, ..) => FrameKind::Key,
+            // A frame predicted from the client's last decoded frame.
+            (false, true, Some(_), Some(base)) => FrameKind::Recovery {
+                base: base.frame_number,
+            },
+            _ => FrameKind::Delta,
         };
         let header = FrameHeader {
             capture_timestamp: self.clock.timestamp(output.captured_at),
@@ -1252,9 +1273,14 @@ impl ActiveHost {
             max_datagram_size,
             now,
         )?;
+        self.recovery_bases
+            .sent(self.display.stream_id(), sent.frame_number, output.id);
         self.summary.frames_sent += 1;
         if output.frame.is_key_frame {
             self.summary.key_frames_sent += 1;
+        }
+        if matches!(kind, FrameKind::Recovery { .. }) {
+            self.stats.recovered();
         }
         self.stats.frame_sent(
             output.frame.temporal_unit.len(),

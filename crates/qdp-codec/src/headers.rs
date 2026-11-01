@@ -62,9 +62,6 @@ pub(crate) const ALL_REFERENCE_SLOTS: u8 = 0xff;
 /// The number of references an inter frame names (`REFS_PER_FRAME`).
 pub(crate) const REFS_PER_FRAME: usize = 7;
 
-/// The reference slot every reference of an inter frame names.
-pub(crate) const PREVIOUS_FRAME_SLOT: u8 = 0;
-
 /// `interpolation_filter` for the regular eight-tap filter.
 pub(crate) const INTERPOLATION_EIGHTTAP: u8 = 0;
 
@@ -278,10 +275,17 @@ pub(crate) fn sequence_header_obu(format: &StreamFormat) -> Vec<u8> {
 /// The type of a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum FrameKind {
-    /// A key frame, which refers to no other frame.
+    /// A key frame, which refers to no other frame and refreshes every
+    /// reference slot.
     Key,
-    /// An inter frame, which refers to the previous frame.
-    Inter,
+    /// An inter frame.
+    Inter {
+        /// The reference slot of the frame it is predicted from, which every
+        /// reference names.
+        reference_slot: u8,
+        /// The reference slots it refreshes (`refresh_frame_flags`).
+        refresh_frame_flags: u8,
+    },
 }
 
 /// Whether the encoder may choose a transform size per block.
@@ -324,7 +328,7 @@ pub(crate) fn frame_header_obu(format: &StreamFormat, frame: &FrameHeader) -> Ve
     writer.bits(
         match frame.kind {
             FrameKind::Key => KEY_FRAME_TYPE,
-            FrameKind::Inter => INTER_FRAME_TYPE,
+            FrameKind::Inter { .. } => INTER_FRAME_TYPE,
         },
         2,
     ); // frame_type
@@ -336,12 +340,16 @@ pub(crate) fn frame_header_obu(format: &StreamFormat, frame: &FrameHeader) -> Ve
     writer.bit(false); // disable_cdf_update
     writer.bit(false); // frame_size_override_flag
     writer.bits(u64::from(frame.order_hint), ORDER_HINT_BITS); // order_hint
-    if !intra {
+    if let FrameKind::Inter {
+        reference_slot,
+        refresh_frame_flags,
+    } = frame.kind
+    {
         writer.bits(u64::from(PRIMARY_REF_LAST), 3); // primary_ref_frame
-        writer.bits(u64::from(ALL_REFERENCE_SLOTS), 8); // refresh_frame_flags
+        writer.bits(u64::from(refresh_frame_flags), 8); // refresh_frame_flags
         writer.bit(false); // frame_refs_short_signaling
         for _ in 0..REFS_PER_FRAME {
-            writer.bits(u64::from(PREVIOUS_FRAME_SLOT), 3); // ref_frame_idx[i]
+            writer.bits(u64::from(reference_slot), 3); // ref_frame_idx[i]
         }
     }
     // render_size()
@@ -450,7 +458,10 @@ mod tests {
                 0x40, 0x00, 0x50
             ]
         );
-        frame.kind = FrameKind::Inter;
+        frame.kind = FrameKind::Inter {
+            reference_slot: 0,
+            refresh_frame_flags: ALL_REFERENCE_SLOTS,
+        };
         frame.order_hint = 1;
         assert_eq!(
             frame_header_obu(&format, &frame),
@@ -459,5 +470,51 @@ mod tests {
                 0x90, 0x03, 0x0c, 0x30, 0xc0, 0x80, 0x00, 0x80, 0x20
             ]
         );
+    }
+
+    /// An inter frame names its reference slot in every reference and
+    /// refreshes the slots it says, at the places of the syntax.
+    #[test]
+    fn inter_frames_name_their_slots() {
+        let tiles = TileLayout::new(1920, 1080, 2);
+        let format = StreamFormat {
+            width: 1920,
+            height: 1080,
+            level: level_for(1920, 1080, 60, tiles.count_and_columns()),
+        };
+        let frame = FrameHeader {
+            kind: FrameKind::Inter {
+                reference_slot: 5,
+                refresh_frame_flags: 1 << 3,
+            },
+            order_hint: 9,
+            base_q_idx: 100,
+            loop_filter_level: 12,
+            tx_mode: TxMode::Select,
+            tiles,
+            tile_size_bytes: 4,
+        };
+        let obu = frame_header_obu(&format, &frame);
+        // The OBU header and a one-byte size come first.
+        let payload = &obu[2..];
+        let bits = |start: usize, count: usize| {
+            (start..start + count).fold(0, |value, bit| {
+                (value << 1) | u32::from(payload[bit / 8] >> (7 - bit % 8) & 1)
+            })
+        };
+        // show_existing_frame, frame_type, show_frame, error_resilient_mode,
+        // disable_cdf_update, frame_size_override_flag and order_hint come
+        // before primary_ref_frame, at bit 15.
+        assert_eq!(bits(7, 8), 9, "order_hint");
+        assert_eq!(
+            bits(15, 3),
+            u32::from(PRIMARY_REF_LAST),
+            "primary_ref_frame"
+        );
+        assert_eq!(bits(18, 8), 1 << 3, "refresh_frame_flags");
+        assert_eq!(bits(26, 1), 0, "frame_refs_short_signaling");
+        for reference in 0..REFS_PER_FRAME {
+            assert_eq!(bits(27 + 3 * reference, 3), 5, "ref_frame_idx[{reference}]");
+        }
     }
 }

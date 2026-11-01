@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use qdp::message::{BlockGrid, BlockSet, StreamId};
+use qdp::message::{BlockGrid, BlockSet, FrameNumber, StreamId};
 #[cfg(target_os = "linux")]
 use qdp_codec::CodecError;
 use qdp_codec::{
@@ -40,6 +40,10 @@ pub(crate) struct EncodeJob {
     pub(crate) request: KeyFrameRequest,
     /// Whether the frame answers a loss, so that it is flagged `RECOVERY`.
     pub(crate) recovery: bool,
+    /// The frame the client decoded last, from which a recovery frame may
+    /// be predicted rather than be a key frame, if the host knows which
+    /// encoded frame it was.
+    pub(crate) recover_from: Option<RecoveryBase>,
     /// The stream the frame is for.
     pub(crate) stream_id: StreamId,
     /// The stream's encoder settings, whose size the captured frame is
@@ -53,6 +57,25 @@ pub(crate) struct EncodeJob {
     pub(crate) display: Option<WantedDisplay>,
 }
 
+/// Which encoded frame a frame is: the encoder that encoded it, counted from
+/// the first the thread opened, and its input index there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct EncodedId {
+    /// The encoder, counting reopenings.
+    pub(crate) encoder: u64,
+    /// The frame's input index in that encoder.
+    pub(crate) input_index: u64,
+}
+
+/// The frame a recovery frame is predicted from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct RecoveryBase {
+    /// Its frame number: the Last Decoded Frame of the client's `LOSS`.
+    pub(crate) frame_number: FrameNumber,
+    /// Which encoded frame it was.
+    pub(crate) encoded: EncodedId,
+}
+
 /// One frame the encoder produced.
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedOutput {
@@ -60,6 +83,8 @@ pub(crate) struct EncodedOutput {
     pub(crate) job: EncodeJob,
     /// The encoded frame.
     pub(crate) frame: EncodedFrame,
+    /// Which encoded frame it is.
+    pub(crate) id: EncodedId,
     /// The blocks that changed since the previous frame: all of them for a key
     /// frame, or when the change is not known.
     pub(crate) blocks: BlockSet,
@@ -123,7 +148,11 @@ impl EncoderThread {
                     }
                 };
                 let _ = opened_sender.send(Ok(encoder.description().to_owned()));
-                let opened = OpenEncoder { encoder, settings };
+                let opened = OpenEncoder {
+                    encoder,
+                    settings,
+                    generation: 0,
+                };
                 let source = MatchingSource { source, matched };
                 run(source, opened, preference, &jobs, &result_sender, &notify);
             })
@@ -181,6 +210,21 @@ struct OpenEncoder {
     encoder: Box<dyn VideoEncoder>,
     /// Its settings.
     settings: EncoderSettings,
+    /// How many encoders the thread opened before this one.
+    generation: u64,
+}
+
+impl OpenEncoder {
+    /// Returns what the encoder is asked for `job`'s frame: to recover from
+    /// the job's base, if this encoder encoded it, or as the job says.
+    fn request(&self, job: &EncodeJob) -> KeyFrameRequest {
+        match job.recover_from {
+            Some(base) if base.encoded.encoder == self.generation => {
+                KeyFrameRequest::RecoverFrom(base.encoded.input_index)
+            }
+            _ => job.request,
+        }
+    }
 }
 
 /// A source, and the display it was last asked to match.
@@ -266,17 +310,26 @@ fn run(
                     // The encoder returns each frame immediately; if it ever
                     // returned an earlier one, marking every block changed is
                     // always correct.
+                    // A recovery frame's blocks are those changed since its
+                    // base, which all of them always include.
                     let blocks = match &changed {
                         Some(changed)
-                            if !frame.is_key_frame && frame.input_index == input_index =>
+                            if !frame.is_key_frame
+                                && frame.recovered_from.is_none()
+                                && frame.input_index == input_index =>
                         {
                             changed.clone()
                         }
                         _ => BlockSet::full(grid.len()),
                     };
+                    let id = EncodedId {
+                        encoder: captured.encoder,
+                        input_index: frame.input_index,
+                    };
                     EncodedOutput {
                         job,
                         frame,
+                        id,
                         blocks,
                         captured_at,
                         scale_time: captured.scale_time,
@@ -318,6 +371,8 @@ struct Encoded {
     scale_time: Duration,
     /// The encoded frames.
     encoded: Vec<EncodedFrame>,
+    /// The generation of the encoder that encoded them.
+    encoder: u64,
 }
 
 /// The last frame captured, and the frame it was scaled to for encoding.
@@ -345,9 +400,11 @@ fn encode_one(
         *opened = OpenEncoder {
             encoder,
             settings: job.settings,
+            generation: opened.generation + 1,
         };
     }
     opened.encoder.set_quantizer(job.quantizer);
+    let request = opened.request(&job);
     let capture_started_at = Instant::now();
     let captured = source.capture()?;
     #[cfg(target_os = "linux")]
@@ -356,7 +413,7 @@ fn encode_one(
             // The encoder scales the frame as it encodes it, so capturing is
             // all that comes before.
             let capture_time = capture_started_at.elapsed();
-            match encode_dma_buf(&mut *opened.encoder, &frame, job.request)? {
+            match encode_dma_buf(&mut *opened.encoder, &frame, request)? {
                 Some(encoded) => {
                     let capture_size = (frame.width(), frame.height());
                     return Ok(Encoded {
@@ -367,6 +424,7 @@ fn encode_one(
                         desktop_scale: source.desktop_scale(),
                         scale_time: capture_time,
                         encoded,
+                        encoder: opened.generation,
                     });
                 }
                 None => {
@@ -403,7 +461,7 @@ fn encode_one(
     let placement = source.monitor_placement();
     let desktop_scale = source.desktop_scale();
     let scale_time = capture_started_at.elapsed();
-    let encoded = opened.encoder.encode(&frame, job.request)?;
+    let encoded = opened.encoder.encode(&frame, request)?;
     Ok(Encoded {
         frame: CapturedFrame::Memory(frame),
         capture_size,
@@ -412,6 +470,7 @@ fn encode_one(
         desktop_scale,
         scale_time,
         encoded,
+        encoder: opened.generation,
     })
 }
 
@@ -484,6 +543,7 @@ mod tests {
         let job = |request, stream_id, settings: EncoderSettings| EncodeJob {
             request,
             recovery: false,
+            recover_from: None,
             stream_id,
             settings,
             quantizer: settings.quantizer,
@@ -599,6 +659,7 @@ mod tests {
             .request(EncodeJob {
                 request: KeyFrameRequest::Force,
                 recovery: false,
+                recover_from: None,
                 stream_id: StreamId(VarInt::from_u32(1)),
                 settings,
                 quantizer: settings.quantizer,

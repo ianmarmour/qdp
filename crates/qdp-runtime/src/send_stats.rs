@@ -84,6 +84,9 @@ pub(crate) struct SendStats {
     frames: u64,
     /// The key frames among them.
     key_frames: u64,
+    /// The recovery frames among them predicted from the client's last
+    /// decoded frame rather than key frames.
+    recoveries: u64,
     /// The frames sent that showed a new screen, not the one before again.
     new_frames: u64,
     /// The frames skipped because the network was behind.
@@ -104,6 +107,9 @@ pub(crate) struct SendStats {
     scale_total: Duration,
     /// The path's statistics when the interval started.
     path_at_start: PathStats,
+    /// How many frames the source had delivered when the interval started,
+    /// for sources that say when frames arrive, once known.
+    arrivals_at_start: Option<u64>,
 }
 
 impl SendStats {
@@ -113,6 +119,7 @@ impl SendStats {
             started: now,
             frames: 0,
             key_frames: 0,
+            recoveries: 0,
             new_frames: 0,
             skipped: 0,
             decode_waits: 0,
@@ -122,6 +129,7 @@ impl SendStats {
             encode_max: Duration::ZERO,
             scale_total: Duration::ZERO,
             path_at_start: path,
+            arrivals_at_start: None,
         }
     }
 
@@ -146,6 +154,12 @@ impl SendStats {
     /// again.
     pub(crate) fn new_screen(&mut self) {
         self.new_frames += 1;
+    }
+
+    /// Counts a recovery frame sent that is predicted from the client's last
+    /// decoded frame.
+    pub(crate) fn recovered(&mut self) {
+        self.recoveries += 1;
     }
 
     /// Counts a frame skipped because the network was behind.
@@ -180,12 +194,17 @@ impl SendStats {
         queued_bytes: usize,
         encoder_wait: Option<Duration>,
         quantizer: u8,
+        arrivals: Option<u64>,
     ) {
         let elapsed = now.saturating_duration_since(self.started);
         if elapsed < STATS_INTERVAL {
             return;
         }
         let seconds = elapsed.as_secs_f64();
+        // The frames the source delivered, against which those sent compare.
+        let arrived_fps = arrivals
+            .zip(self.arrivals_at_start)
+            .map(|(now, start)| format!("{:.1}", now.saturating_sub(start) as f64 / seconds));
         let lost_packets = path
             .lost_packets
             .saturating_sub(self.path_at_start.lost_packets);
@@ -203,11 +222,13 @@ impl SendStats {
         info!(
             fps = format!("{:.1}", self.frames as f64 / seconds),
             new_fps = format!("{:.1}", self.new_frames as f64 / seconds),
+            arrived_fps,
             mbps = format!(
                 "{:.2}",
                 self.bytes as f64 * 8.0 / seconds / BITS_PER_MEGABIT
             ),
             key_frames = self.key_frames,
+            recoveries = self.recoveries,
             skipped = self.skipped,
             decode_waits = self.decode_waits,
             quantizer,
@@ -232,6 +253,7 @@ impl SendStats {
             );
         }
         *self = Self::new(now, path);
+        self.arrivals_at_start = arrivals;
     }
 }
 
@@ -306,16 +328,22 @@ mod tests {
         assert_eq!(stats.bytes, 1500);
         assert_eq!(stats.encode_max, Duration::from_millis(4));
         assert_eq!(stats.scale_total, Duration::from_millis(2));
+        stats.recovered();
+        assert_eq!(stats.recoveries, 1);
         stats.log_if_due(
             start + Duration::from_millis(500),
             path(10_000),
             0,
             None,
             100,
+            Some(10),
         );
         assert_eq!(stats.frames, 2);
         let later = start + STATS_INTERVAL;
-        stats.log_if_due(later, path(10_000), 0, None, 100);
-        assert_eq!(stats, SendStats::new(later, path(10_000)));
+        stats.log_if_due(later, path(10_000), 0, None, 100, Some(130));
+        // A new interval starts, counting arrivals from those already seen.
+        let mut fresh = SendStats::new(later, path(10_000));
+        fresh.arrivals_at_start = Some(130);
+        assert_eq!(stats, fresh);
     }
 }
