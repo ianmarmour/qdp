@@ -30,7 +30,7 @@ public class HostRowsTests
     public void ListsUnseenPairedHostsLast()
     {
         var rows = HostRows.Build([new DiscoveredHost("Laptop", "10.0.0.9:4433", PinB, true)], [Desk]);
-        Assert.Equal(["Laptop", "Desk"], rows.Select(row => row.Name));
+        Assert.Equal(new[] { "Laptop", "Desk" }, rows.Select(row => row.Name));
         Assert.Equal(HostStatus.NotSeen, rows[1].Status);
         Assert.Equal("10.0.0.2:4433", rows[1].Target!.Address);
     }
@@ -83,6 +83,6 @@ public class HostRowsTests
                 new DiscoveredHost("Alpha", "10.0.0.4:4433", null, true),
             ],
             []);
-        Assert.Equal(["Alpha", "zeta"], rows.Select(row => row.Name));
+        Assert.Equal(new[] { "Alpha", "zeta" }, rows.Select(row => row.Name));
     }
 }
