@@ -322,7 +322,9 @@ codes show only in the log.
 To serve the console from boot, before anyone logs in, run the host as a system
 service. `sudo qdp service install` writes a systemd unit that runs
 `qdp serve --source console` as root with the `serve` options given after it,
-turns it on and starts it; `sudo qdp service status` shows how it is doing, and
+turns it on and starts it; a `qdp` run from outside the system's programs, such
+as a build in a home directory, which SELinux keeps services from running, is
+installed as `/usr/local/bin/qdp` for the service to run; `sudo qdp service status` shows how it is doing, and
 `sudo qdp service uninstall` removes it. The RPM ships the same service, off
 until `sudo systemctl enable --now qdp`. The service keeps the host's key and
 paired devices in `/var/lib/qdp`, so `sudo qdp clients --identity /var/lib/qdp`

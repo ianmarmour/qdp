@@ -20,8 +20,8 @@ pub fn run(action: ServiceAction) -> Result<(), String> {
 mod platform {
     use std::fs::{self, OpenOptions};
     use std::io::{ErrorKind, Write};
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::path::Path;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use crate::args::ServiceAction;
@@ -48,6 +48,22 @@ mod platform {
     /// Where the service keeps the host's key and paired devices.
     const STATE_DIRECTORY: &str = "/var/lib/qdp";
 
+    /// Where `qdp service install` installs this command when it runs from
+    /// elsewhere, such as a build in a home directory, which services may
+    /// not run: SELinux, on Fedora among others, keeps them from running
+    /// programs in home directories.
+    const INSTALLED_COMMAND: &str = "/usr/local/bin/qdp";
+
+    /// Where the command is copied to before taking the installed one's
+    /// place, so that a running service keeps its own until it restarts.
+    const INSTALLING_COMMAND: &str = "/usr/local/bin/.qdp.installing";
+
+    /// The directories of programs that services may run as they are.
+    const SYSTEM_PROGRAM_DIRECTORIES: [&str; 2] = ["/usr/", "/opt/"];
+
+    /// The installed command's permissions.
+    const COMMAND_MODE: u32 = 0o755;
+
     /// The unit's permissions: its options may hold a token, so only root
     /// reads it.
     const UNIT_MODE: u32 = 0o600;
@@ -67,9 +83,7 @@ mod platform {
     /// Writes the unit, running this command with `options`, and starts the
     /// service now and at every boot.
     fn install(options: &[String]) -> Result<(), String> {
-        let command = std::env::current_exe()
-            .and_then(|path| path.canonicalize())
-            .map_err(|error| format!("cannot find this command: {error}"))?;
+        let command = service_command()?;
         let unit = unit(&command.to_string_lossy(), options)?;
         let mut file = OpenOptions::new()
             .write(true)
@@ -94,6 +108,37 @@ mod platform {
              `journalctl -u qdp -f`."
         );
         Ok(())
+    }
+
+    /// Returns the command the service runs: this one if it is among the
+    /// system's programs, as the package's is, and otherwise a copy of it
+    /// installed there, replacing the copy an earlier install made.
+    fn service_command() -> Result<PathBuf, String> {
+        let current = std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .map_err(|error| format!("cannot find this command: {error}"))?;
+        let path = current.to_string_lossy();
+        if SYSTEM_PROGRAM_DIRECTORIES
+            .iter()
+            .any(|directory| path.starts_with(directory))
+        {
+            return Ok(current);
+        }
+        let installed = PathBuf::from(INSTALLED_COMMAND);
+        let failed = |error: std::io::Error| match error.kind() {
+            ErrorKind::PermissionDenied => {
+                "installing the service needs root: run it with sudo".to_owned()
+            }
+            _ => format!("cannot install this command as {INSTALLED_COMMAND}: {error}"),
+        };
+        // A new file takes the directory's security label, which a moved
+        // one would not; the rename replaces the old copy at once.
+        fs::copy(&current, INSTALLING_COMMAND).map_err(failed)?;
+        fs::set_permissions(INSTALLING_COMMAND, fs::Permissions::from_mode(COMMAND_MODE))
+            .map_err(failed)?;
+        fs::rename(INSTALLING_COMMAND, &installed).map_err(failed)?;
+        println!("Installed this command as {INSTALLED_COMMAND}, which the service runs.");
+        Ok(installed)
     }
 
     /// Stops the service and removes the unit written by `install`. The
