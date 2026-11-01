@@ -13,12 +13,19 @@
 //!   clients that draw them, the desktop client among them.
 //! - `keymap`, with the `winit` feature, reports the keys of winit's windows
 //!   as HID usages, for the desktop clients.
+//! - [`placement`] fits the picture in the app's view, keeping its shape.
+//! - `window_input`, with the `winit` feature, converts the input of winit's
+//!   windows to QDP's and measures the display they show, for the desktop
+//!   clients.
 
 pub mod cursor;
 pub mod events;
 pub mod gamepad;
 #[cfg(feature = "winit")]
 pub mod keymap;
+pub mod placement;
 pub mod session;
 pub mod settings;
 pub mod sink;
+#[cfg(feature = "winit")]
+pub mod window_input;

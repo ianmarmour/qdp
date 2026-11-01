@@ -11,10 +11,7 @@
 //! where the system draws no pointer, as for touch input on iOS.
 //!
 //! The C functions exist only on macOS and iOS; the placement of the
-//! picture, which they use, builds everywhere, so that it is tested with
-//! the workspace.
-
-pub mod placement;
+//! picture they use is [`qdp_app::placement`], tested with the workspace.
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod ffi;

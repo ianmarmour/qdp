@@ -21,8 +21,8 @@ tracing.workspace = true
 winit = { workspace = true, optional = true }
 
 [features]
-# The physical keys of winit's windows as HID usages, for the desktop
-# clients, which draw their windows with winit.
+# The physical keys of winit's windows as HID usages, and their other input
+# as QDP's, for the desktop clients, which draw their windows with winit.
 winit = ["dep:winit"]
 
 [lints]
