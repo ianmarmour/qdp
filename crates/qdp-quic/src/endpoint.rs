@@ -164,4 +164,12 @@ impl ClientEndpoint {
     pub async fn wait_idle(&self) {
         self.endpoint.wait_idle().await;
     }
+
+    /// Ends the endpoint's sessions normally, with `QDP_NO_ERROR` and
+    /// `reason`, as when the viewer closes before a session ends on its own.
+    pub fn close(&self, reason: &str) {
+        let code = quinn::VarInt::from_u64(ErrorCode::NO_ERROR.0.into_inner())
+            .unwrap_or(quinn::VarInt::MAX);
+        self.endpoint.close(code, reason.as_bytes());
+    }
 }

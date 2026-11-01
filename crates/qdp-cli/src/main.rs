@@ -87,10 +87,13 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(8);
 const DISPLAY_WAIT: Duration = Duration::from_secs(5);
 
 /// How long the session may take to end on its own after the window closes,
-/// before it is cut off. It normally ends at the next frame, saying goodbye to
-/// the host.
+/// before the client closes it. It normally ends at the next frame, saying
+/// goodbye to the host.
 #[cfg(feature = "window")]
 const CLOSE_GRACE: Duration = Duration::from_millis(500);
+
+/// The reason a client gives the host when the viewer stops the session.
+const VIEWER_CLOSED: &str = "viewer closed";
 
 /// How long the host waits, when it shuts down, for its sessions to return
 /// the client's devices to rest and for the clients to learn why the
@@ -676,9 +679,21 @@ async fn receive(
             delay = (delay * 2).min(MAX_RECONNECT_DELAY);
         }
     };
-    let summary = tokio::select! {
-        result = sessions => result.map(Some)?,
-        () = stop => None,
+    // The session is dropped, with its streams, only at the end of this
+    // block, after the connection was closed.
+    let summary = {
+        let mut sessions = std::pin::pin!(sessions);
+        tokio::select! {
+            result = &mut sessions => result.map(Some)?,
+            () = stop => {
+                // The viewer stopped before the session ended on its own:
+                // the connection closes normally first, so that the host
+                // knows the client left rather than the network dropping,
+                // and leaves the desktop unlocked (Section 11.4).
+                endpoint.close(VIEWER_CLOSED);
+                None
+            }
+        }
     };
     endpoint.wait_idle().await;
     Ok(summary)
