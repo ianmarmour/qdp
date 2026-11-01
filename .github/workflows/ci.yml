@@ -1,8 +1,9 @@
-# Checks every change merged into main on Linux, builds the qdp command for
-# Linux and the Android app, and publishes both as a GitHub release when a
-# version tag such as v0.2.0 is pushed. Pull requests are not checked here,
-# so that merging never waits for it; a run can be started on any branch by
-# hand.
+# Checks every change merged into main on Linux, Windows and macOS, builds
+# the qdp command for each and the Android app, and publishes them all as a
+# GitHub release once every job passed: a numbered build for each change
+# merged into main, and a version for each tag such as v0.2.0. Pull requests
+# are not checked here, so that merging never waits for it; a run can be
+# started on any branch by hand, which builds without releasing.
 name: CI
 
 on:
@@ -68,9 +69,79 @@ jobs:
           path: qdp-linux-x86_64.tar.gz
           if-no-files-found: error
 
+  windows:
+    name: Windows
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # NASM for the codecs' assembly.
+      - uses: ilammy/setup-nasm@v1
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Build the qdp command
+        run: cargo build --release --locked -p qdp-cli
+
+      - name: Package
+        run: 7z a qdp-windows-x86_64.zip ./target/release/qdp.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qdp-windows-x86_64
+          path: qdp-windows-x86_64.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Build the qdp command
+        run: cargo build --release --locked -p qdp-cli
+
+      - name: Package
+        run: tar -czf qdp-macos-arm64.tar.gz -C target/release qdp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qdp-macos-arm64
+          path: qdp-macos-arm64.tar.gz
+          if-no-files-found: error
+
   android:
     name: Android
     runs-on: ubuntu-24.04
+    env:
+      HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -91,6 +162,16 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Without the signing secrets, builds are signed with Gradle's debug
+      # key. Keeping that key between runs lets each build install over the
+      # last until the secrets are set, as long as the cache keeps it.
+      - name: Keep the debug signing key
+        if: env.HAS_KEYSTORE != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Clippy for Android
         run: |
           . android/ndk-env.sh
@@ -100,7 +181,7 @@ jobs:
         working-directory: android
         # With the signing secrets set, every build is signed with the same
         # key, so that each installs over the last; without them, builds are
-        # signed with a throwaway debug key.
+        # signed with the debug key kept above.
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           QDP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -129,12 +210,19 @@ jobs:
 
   release:
     name: Release
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [linux, android]
+    # Every change merged into main and every version tag is released once
+    # all the builds passed; runs started by hand are not.
+    if: github.event_name == 'push'
+    needs: [linux, windows, macos, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      # How many numbered builds are kept; versions are all kept.
+      KEPT_BUILDS: 10
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -144,5 +232,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+            title="QDP ${GITHUB_REF_NAME#v}"
+          else
+            tag="build-$GITHUB_RUN_NUMBER"
+            title="QDP $version, build $GITHUB_RUN_NUMBER"
+          fi
+          cat > notes.md <<NOTES
+          | Platform | Download |
+          |---|---|
+          | Android (64-bit ARM, Android 10 or later) | \`qdp-android-arm64.apk\` |
+          | Linux (x86-64) | \`qdp-linux-x86_64.tar.gz\` |
+          | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
+          | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
+
+          The newest build is always at
+          \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/FILE\`.
+          On macOS, a downloaded \`qdp\` needs \`xattr -d com.apple.quarantine qdp\`
+          before it runs, since it is not notarized.
+          NOTES
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$title" --notes-file notes.md --generate-notes
+
+      - name: Remove old builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' \
+            | grep '^build-[0-9]*$' | sort -t- -k2 -n -r | tail -n +$((KEPT_BUILDS + 1)) \
+            | while read -r old; do
+                gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              done
