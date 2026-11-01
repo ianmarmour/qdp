@@ -25,6 +25,7 @@
 //! [`notify`] shows the host's user a notification.
 
 mod advertise;
+mod browse;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod clipboard;
 #[cfg(all(
@@ -69,6 +70,7 @@ use qdp_runtime::{
 use tracing::warn;
 
 pub use advertise::{Advertisement, Advertising, advertise};
+pub use browse::{Discovery, FoundHost, browse};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub use clipboard::SystemClipboard;
 #[cfg(target_os = "linux")]

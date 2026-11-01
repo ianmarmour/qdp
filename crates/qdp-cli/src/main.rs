@@ -5,6 +5,7 @@
 //! stream in a window, with the host's cursor as its pointer, or with
 //! `--headless` only logs statistics and can write it to a YUV4MPEG2 file.
 
+mod app_events;
 mod args;
 #[cfg(feature = "window")]
 mod color;
@@ -16,18 +17,20 @@ mod sink;
 #[cfg(feature = "window")]
 mod window;
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use qdp::discovery::{PairingOffer, ServiceRecord};
 use qdp_codec::{CodecPreference, DecoderCommand};
 use qdp_desktop::{
-    Advertisement, Advertising, DisplayMatching, FrameMemory, HostPrivacy, Notification,
-    ScreenOptions, Urgency,
+    Advertisement, Advertising, Discovery, DisplayMatching, FoundHost, FrameMemory, HostPrivacy,
+    Notification, ScreenOptions, Urgency,
 };
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
 use qdp_runtime::{
@@ -44,6 +47,9 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use qdp_app::events::{CodeRequest, Event};
+
+use crate::app_events::EventLines;
 use crate::args::{
     AdvertiseMode, Audio, ClientsAction, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement,
     GpuCapture, HostTrust, LockPolicy, PairingMode, Presentation, Privacy, ServeArgs, SourceKind,
@@ -137,6 +143,7 @@ fn main() -> ExitCode {
             run_async(serve(args))
         }
         Command::Connect(args) => connect(args),
+        Command::Discover => run_async(discover()),
         Command::Decoder => qdp_codec::serve_decoder_on_stdio()
             .map_err(|error| format!("the decoder process failed: {error}")),
         Command::SessionHelper => qdp_desktop::run_session_helper(),
@@ -878,6 +885,15 @@ fn clients(identity: &Path, action: ClientsAction) -> CliResult {
 /// Runs `qdp connect`: shows the host's stream until the frame limit, an
 /// interrupt, the window closing, or the host closing.
 fn connect(args: ConnectArgs) -> CliResult {
+    let events = EventLines::new(args.events);
+    let result = connect_with_sink(args);
+    events.ended(&result);
+    result
+}
+
+/// Connects as [`connect`] does, writing frames to the output file if one
+/// is asked for.
+fn connect_with_sink(args: ConnectArgs) -> CliResult {
     let sink = CliSink::new(args.output.as_deref(), args.frames)
         .map_err(|error| format!("cannot create the output file: {error}"))?;
     match args.presentation {
@@ -992,6 +1008,51 @@ async fn window_closed(close: &window::CloseSignal) {
     tokio::time::sleep(CLOSE_GRACE).await;
 }
 
+/// How long `qdp discover` listens for hosts.
+const DISCOVERY_WAIT: Duration = Duration::from_secs(3);
+
+/// Lists the hosts that advertise on the local network within
+/// [`DISCOVERY_WAIT`], one a line: its name, address and whether it offers
+/// pairing.
+async fn discover() -> CliResult {
+    let found = Arc::new(Mutex::new(BTreeMap::<String, FoundHost>::new()));
+    let hosts = Arc::clone(&found);
+    let browsing = qdp_desktop::browse(move |discovery| {
+        let mut hosts = hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        match discovery {
+            // A host found on several interfaces is listed once, at an
+            // IPv4 address if it has one.
+            Discovery::Found(host) => {
+                let better = hosts
+                    .get(&host.name)
+                    .is_none_or(|known| !known.address.is_ipv4() && host.address.is_ipv4());
+                if better {
+                    hosts.insert(host.name.clone(), host);
+                }
+            }
+            Discovery::Lost(name) => {
+                hosts.remove(&name);
+            }
+        }
+    });
+    if let Ok(Err(error)) = tokio::time::timeout(DISCOVERY_WAIT, browsing).await {
+        return Err(error);
+    }
+    let hosts = found.lock().unwrap_or_else(PoisonError::into_inner);
+    if hosts.is_empty() {
+        println!("No host advertises on the local network.");
+    }
+    for host in hosts.values() {
+        let pairing = match host.record.as_ref().map(|record| record.pairing) {
+            Some(PairingOffer::Offered) => "offers pairing",
+            Some(PairingOffer::NotOffered) => "does not offer pairing",
+            None => "unreadable record",
+        };
+        println!("{}  {}  {pairing}", host.name, host.address);
+    }
+    Ok(())
+}
+
 /// Completes on Ctrl-C, or never if the interrupt cannot be watched.
 async fn interrupted() {
     if tokio::signal::ctrl_c().await.is_err() {
@@ -1013,6 +1074,8 @@ async fn receive(
     mut input: Option<InputQueue>,
 ) -> Result<Option<ClientSummary>, String> {
     let pairs = args.trust == HostTrust::Pair;
+    let events = EventLines::new(args.events);
+    events.send(&Event::Connecting);
     let local = if args.address.is_ipv4() {
         SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
@@ -1069,7 +1132,7 @@ async fn receive(
     };
     // The host's key, once pairing succeeded; later connections pin it.
     let paired_host = Arc::new(Mutex::new(None));
-    let pairing_prompt = pairs.then(|| prompt_for_code(hosts, host_label, &paired_host));
+    let pairing_prompt = pairs.then(|| prompt_for_code(hosts, host_label, &paired_host, events));
     let resumption = ResumptionSlot::default();
     let sessions = async {
         let mut credentials = credentials;
@@ -1126,6 +1189,10 @@ async fn receive(
                 return Err(error);
             }
             warn!(%error, retry_in = ?delay, "connection lost; reconnecting");
+            events.send(&Event::Reconnecting {
+                delay,
+                error: error.clone(),
+            });
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(MAX_RECONNECT_DELAY);
         }
@@ -1150,19 +1217,42 @@ async fn receive(
     Ok(summary)
 }
 
-/// Returns the prompt with which a client pairs: it asks on the terminal for
-/// the code the host shows, and once the host proved it showed it, keeps the
-/// host's key in `hosts`, labelled `host_label`, and in `paired_host` for the
-/// connections that follow.
+/// Returns the prompt with which a client pairs: it asks on the terminal, or
+/// the app reading `events`, for the code the host shows, and once the host
+/// proved it showed it, keeps the host's key in `hosts`, labelled
+/// `host_label`, and in `paired_host` for the connections that follow.
 fn prompt_for_code(
     hosts: PairedFile,
     host_label: String,
     paired_host: &Arc<Mutex<Option<KeyPin>>>,
+    events: EventLines,
 ) -> PairingPrompt {
     let paired_host = Arc::clone(paired_host);
+    // Whether a code was asked for before, which the app tells the user did
+    // not work.
+    let asked = Arc::new(AtomicBool::new(false));
     PairingPrompt::new(
-        || Box::pin(async { tokio::task::spawn_blocking(read_code).await.ok().flatten() }),
+        move || {
+            let asked = Arc::clone(&asked);
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    if !events.enabled() {
+                        return read_code();
+                    }
+                    let request = if asked.swap(true, Ordering::Relaxed) {
+                        CodeRequest::Retry
+                    } else {
+                        CodeRequest::First
+                    };
+                    events.ask_code(request)
+                })
+                .await
+                .ok()
+                .flatten()
+            })
+        },
         move |host_key| {
+            events.send(&Event::Paired(host_key));
             let host = Paired {
                 pin: host_key,
                 label: host_label.clone(),
@@ -1231,6 +1321,7 @@ async fn connect_once(
         .await
         .map_err(|error| Failure::Lost(format!("cannot connect to {}: {error}", args.address)))?;
     info!(address = %args.address, "connected");
+    EventLines::new(args.events).send(&Event::Connected);
     qdp_runtime::run(
         connection,
         options,
