@@ -1,6 +1,6 @@
 [package]
 name = "qdp-codec"
-description = "AV1 software encoding and decoding for the Quick Desktop Protocol (QDP), built on rav1e and rav1d"
+description = "AV1 encoding and decoding for the Quick Desktop Protocol (QDP), in software with rav1e and rav1d and in the platforms' hardware"
 readme = "../../README.md"
 keywords = ["remote-desktop", "av1", "video"]
 categories = ["multimedia::video", "multimedia::encoding"]
@@ -27,6 +27,9 @@ objc2-core-foundation.workspace = true
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk.workspace = true
