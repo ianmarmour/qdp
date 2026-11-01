@@ -1,7 +1,9 @@
 //! Desktop notifications, which show the host's user what needs them, such
 //! as the code a device pairs with (Section 4.4.9): through the freedesktop
 //! notification service on Linux, which GNOME, KDE, Xfce and the
-//! notification daemons of other desktops, such as mako and dunst, provide.
+//! notification daemons of other desktops, such as mako and dunst, provide,
+//! and on Windows as a banner over the screen that screen captures leave
+//! out, so that a device streaming the screen does not see it.
 
 use std::time::Duration;
 
@@ -20,6 +22,9 @@ pub struct Notification {
     /// The platform's notification.
     #[cfg(all(target_os = "linux", feature = "notifications"))]
     inner: crate::linux::notifications::Notification,
+    /// The banner.
+    #[cfg(all(windows, feature = "notifications"))]
+    inner: crate::win32::Notice,
 }
 
 impl Notification {
@@ -27,6 +32,8 @@ impl Notification {
     pub async fn close(self) {
         #[cfg(all(target_os = "linux", feature = "notifications"))]
         self.inner.close().await;
+        #[cfg(all(windows, feature = "notifications"))]
+        self.inner.close();
     }
 }
 
@@ -49,7 +56,12 @@ pub async fn notify(
             .await
             .map(|inner| Notification { inner })
     }
-    #[cfg(not(all(target_os = "linux", feature = "notifications")))]
+    #[cfg(all(windows, feature = "notifications"))]
+    {
+        crate::win32::Notice::show(summary, body, lifetime, urgency)
+            .map(|inner| Notification { inner })
+    }
+    #[cfg(not(all(any(target_os = "linux", windows), feature = "notifications")))]
     {
         let _ = (summary, body, lifetime, urgency);
         Err("this system has no desktop notifications yet".to_owned())
