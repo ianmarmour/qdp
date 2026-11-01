@@ -8,8 +8,10 @@
 //! shows the desktop beneath them. Windows before 10 version 2004 cannot
 //! leave a window out of captures, so privacy does not start there, as its
 //! covers would hide the desktop from the stream too. Low-level keyboard
-//! and mouse hooks hold back every event but those injected, as a
-//! session's are. Ctrl+Alt+Delete, which no program can hold back, still
+//! and mouse hooks hold back the computer's own presses, moves and
+//! scrolling, but not the session's, which are injected, nor releases, so
+//! that a key held as privacy starts does not stay down. Ctrl+Alt+Delete,
+//! which no program can hold back, still
 //! reaches Windows, which shows its secure screen over the covers, from
 //! which the computer can be locked.
 //!
@@ -34,11 +36,12 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-    GetWindowDisplayAffinity, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED,
-    LWA_ALPHA, MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassW, SW_SHOWNOACTIVATE,
-    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowsHookExW, ShowWindow,
-    UnhookWindowsHookEx, WDA_EXCLUDEFROMCAPTURE, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP,
-    WM_DISPLAYCHANGE, WM_PAINT, WM_QUIT, WNDCLASSW, WS_POPUP,
+    GetWindowDisplayAffinity, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_UP,
+    LLMHF_INJECTED, LWA_ALPHA, MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassW,
+    SW_SHOWNOACTIVATE, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowsHookExW,
+    ShowWindow, UnhookWindowsHookEx, WDA_EXCLUDEFROMCAPTURE, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP,
+    WM_DISPLAYCHANGE, WM_LBUTTONUP, WM_MBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONUP, WM_XBUTTONUP,
+    WNDCLASSW, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -98,10 +101,21 @@ enum Origin {
     Injected,
 }
 
-/// Returns whether an input event from `origin` is held back from Windows:
-/// those of the computer's own keyboard and mouse are.
-fn holds_back(origin: Origin) -> bool {
-    origin == Origin::Local
+/// What an input event does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    /// Presses a key or button, moves the pointer or scrolls.
+    Acts,
+    /// Releases a key or button, ending what a press began.
+    Releases,
+}
+
+/// Returns whether an input event from `origin` that does `action` is held
+/// back from Windows: the computer's own keyboard and mouse act on nothing,
+/// but their releases pass, so that a key or button held as privacy starts
+/// does not stay down for the session.
+fn holds_back(origin: Origin, action: Action) -> bool {
+    origin == Origin::Local && action == Action::Acts
 }
 
 thread_local! {
@@ -368,13 +382,21 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         } else {
             Origin::Local
         };
-        if holds_back(origin) {
+        let action = if event.flags.contains(LLKHF_UP) {
+            Action::Releases
+        } else {
+            Action::Acts
+        };
+        if holds_back(origin, action) {
             return LRESULT(1);
         }
     }
     // SAFETY: the arguments are the hook's own.
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
+
+/// The mouse messages that release a button.
+const BUTTON_RELEASES: [u32; 4] = [WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP, WM_XBUTTONUP];
 
 /// The mouse's hook: holds back the computer's own mouse.
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -386,7 +408,12 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         } else {
             Origin::Local
         };
-        if holds_back(origin) {
+        let action = if BUTTON_RELEASES.contains(&(wparam.0 as u32)) {
+            Action::Releases
+        } else {
+            Action::Acts
+        };
+        if holds_back(origin, action) {
             return LRESULT(1);
         }
     }
@@ -545,9 +572,11 @@ mod tests {
     }
 
     #[test]
-    fn holds_back_only_the_computers_own_input() {
-        assert!(holds_back(Origin::Local));
-        assert!(!holds_back(Origin::Injected));
+    fn holds_back_only_the_computers_own_presses() {
+        assert!(holds_back(Origin::Local, Action::Acts));
+        assert!(!holds_back(Origin::Local, Action::Releases));
+        assert!(!holds_back(Origin::Injected, Action::Acts));
+        assert!(!holds_back(Origin::Injected, Action::Releases));
     }
 
     #[test]
