@@ -26,7 +26,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -59,6 +59,8 @@ use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
 use objc2_quartz_core::{CALayer, CAMetalDrawable, CAMetalLayer, CATransaction};
 use qdp_codec::{DecodedPicture, PixelBufferPicture, Yuv420Frame};
 use tracing::{debug, warn};
+
+use crate::video_scene::{Fate, Overlay, PixelRect, Scene};
 
 /// The render thread's name.
 const RENDER_THREAD: &str = "qdp-metal-render";
@@ -167,34 +169,6 @@ const LUMA_PLANE: usize = 0;
 /// The interleaved chroma plane of an NV12 pixel buffer.
 const CHROMA_PLANE: usize = 1;
 
-/// A rectangle in the drawable's pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PixelRect {
-    /// Its left edge.
-    pub left: f64,
-    /// Its top edge.
-    pub top: f64,
-    /// Its width.
-    pub width: f64,
-    /// Its height.
-    pub height: f64,
-}
-
-/// An image drawn over the picture, such as the host's cursor.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Overlay {
-    /// Its width in pixels.
-    pub width: usize,
-    /// Its height in pixels.
-    pub height: usize,
-    /// Its RGBA pixels with straight alpha, row by row.
-    pub rgba: Arc<[u8]>,
-    /// Its top-left corner in the drawable's pixels.
-    pub left: f64,
-    /// Its top edge.
-    pub top: f64,
-}
-
 /// A texture and the size it was made for.
 struct SizedTexture {
     /// Its width and height in pixels.
@@ -274,35 +248,6 @@ impl FrameRateDemand {
         // SAFETY: `init` is NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
     }
-}
-
-/// What to draw besides the picture, and where.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Scene {
-    /// The drawable's width and height in pixels.
-    pub size: (u32, u32),
-    /// Where the picture goes, if one is shown.
-    pub picture: Option<PixelRect>,
-    /// What is drawn over the picture, if anything.
-    pub overlay: Option<Overlay>,
-}
-
-/// What became of a picture handed to the render thread, tagged as it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fate<T> {
-    /// It was drawn and handed to the display.
-    Shown {
-        /// Its tag.
-        tag: T,
-        /// When it was handed to the display.
-        at: Instant,
-        /// How long drawing it took, once a drawable was free.
-        drew_in: Duration,
-        /// How long the render thread waited for a free drawable.
-        waited: Duration,
-    },
-    /// A newer picture replaced it before it was drawn, or it could not be.
-    Unshown(T),
 }
 
 /// What the main thread asks the render thread for.

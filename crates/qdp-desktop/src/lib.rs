@@ -51,6 +51,8 @@ mod monitor_modes;
 mod notification;
 mod passthrough;
 mod touchpad;
+#[cfg(any(target_os = "macos", target_os = "ios", windows))]
+mod video_scene;
 #[cfg(windows)]
 mod win32;
 
@@ -83,9 +85,13 @@ pub use linux::UinputInjector;
 #[cfg(target_os = "macos")]
 pub use macos::{MacScreenCapture, QuartzInjector, mac_key_usage};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub use metal_video::{Fate, MetalVideo, Overlay, PixelRect, Scene, Submitter};
+pub use metal_video::{MetalVideo, Submitter};
+#[cfg(any(target_os = "macos", target_os = "ios", windows))]
+pub use video_scene::{Fate, Overlay, PixelRect, Scene};
 #[cfg(windows)]
-pub use win32::{DesktopDuplication, SendInputInjector, WindowPen};
+pub use win32::{
+    D3d11Video, DesktopDuplication, SendInputInjector, Submitter, SyncMode, WindowPen,
+};
 
 /// The file, in the host's state directory, that keeps the token restoring the
 /// user's choice of monitor.

@@ -308,6 +308,22 @@ enum Painter {
     /// The GPU, with Metal.
     #[cfg(target_os = "macos")]
     Metal(Box<qdp_desktop::MetalVideo<FrameId>>),
+    /// The GPU, with Direct3D 11.
+    #[cfg(windows)]
+    D3d11(Box<qdp_desktop::D3d11Video<FrameId>>),
+}
+
+impl Painter {
+    /// Returns whether the GPU draws, on a render thread of its own.
+    fn on_gpu(&self) -> bool {
+        match self {
+            Self::Processor(_) => false,
+            #[cfg(target_os = "macos")]
+            Self::Metal(_) => true,
+            #[cfg(windows)]
+            Self::D3d11(_) => true,
+        }
+    }
 }
 
 /// The application the window's event loop runs.
@@ -722,20 +738,23 @@ impl WindowApp {
         }
     }
 
-    /// Draws a new frame: at once with Metal, which hands it to its render
+    /// Draws a new frame: at once on the GPU, which hands it to its render
     /// thread, rather than at the window's next redraw, which may come a
     /// refresh later, after a newer frame replaced it; at the next redraw
     /// otherwise.
     fn frame_ready(&mut self) {
-        #[cfg(target_os = "macos")]
-        if matches!(
-            self.display.as_ref().map(|display| &display.painter),
-            Some(Painter::Metal(_))
-        ) {
+        if self.on_gpu() {
             self.draw();
             return;
         }
         self.request_redraw();
+    }
+
+    /// Returns whether the GPU draws the window's picture.
+    fn on_gpu(&self) -> bool {
+        self.display
+            .as_ref()
+            .is_some_and(|display| display.painter.on_gpu())
     }
 
     /// Returns when the pending warp may be applied.
@@ -956,6 +975,14 @@ impl WindowApp {
                 painter: Painter::Metal(Box::new(metal)),
             });
         }
+        #[cfg(windows)]
+        if let Some(video) = attach_d3d11(&window, self.slot.clone()) {
+            return Ok(Display {
+                _pen: attach_pen(&window, self.proxy.clone()),
+                window,
+                painter: Painter::D3d11(Box::new(video)),
+            });
+        }
         let surface = Context::new(Rc::clone(&window))
             .and_then(|context| Surface::new(&context, Rc::clone(&window)))
             .map_err(|error| format!("cannot draw in the window: {error}"))?;
@@ -1005,14 +1032,11 @@ impl WindowApp {
             }
             self.picture = Some(size);
         }
-        // A picture the GPU holds is drawn where it is, on Metal's render
+        // A picture the GPU holds is drawn where it is, on the GPU's render
         // thread, which says when.
-        #[cfg(target_os = "macos")]
-        if matches!(
-            self.display.as_ref().map(|display| &display.painter),
-            Some(Painter::Metal(_))
-        ) {
-            self.show_with_metal(newest);
+        #[cfg(any(target_os = "macos", windows))]
+        if self.on_gpu() {
+            self.show_on_gpu(newest);
             self.slot.set_display_timing(qdp_desktop::display_timing());
             return;
         }
@@ -1067,13 +1091,15 @@ impl WindowApp {
             }
             #[cfg(target_os = "macos")]
             Painter::Metal(_) => None,
+            #[cfg(windows)]
+            Painter::D3d11(_) => None,
         }
     }
 
     /// Hands `newest`, if there is a new frame, and the cursor where the
-    /// window draws it, to Metal's render thread.
-    #[cfg(target_os = "macos")]
-    fn show_with_metal(&mut self, newest: Option<(DecodedPicture, FrameId)>) {
+    /// window draws it, to the GPU's render thread.
+    #[cfg(any(target_os = "macos", windows))]
+    fn show_on_gpu(&mut self, newest: Option<(DecodedPicture, FrameId)>) {
         let follow = self.followed_cursor();
         let picture = self.placement().map(|(placement, _, _)| placement);
         let Some(display) = self.display.as_mut() else {
@@ -1087,13 +1113,13 @@ impl WindowApp {
             }
             return;
         }
-        let scale = display.window.scale_factor();
-        if let Painter::Metal(metal) = &mut display.painter {
-            metal.show(
-                newest,
-                metal_scene((size.width, size.height), picture, follow),
-                scale,
-            );
+        let scene = gpu_scene((size.width, size.height), picture, follow);
+        match &mut display.painter {
+            #[cfg(target_os = "macos")]
+            Painter::Metal(metal) => metal.show(newest, scene, display.window.scale_factor()),
+            #[cfg(windows)]
+            Painter::D3d11(video) => video.show(newest, scene),
+            Painter::Processor(_) => {}
         }
     }
 }
@@ -1135,10 +1161,10 @@ fn draw_on_processor(
     }
 }
 
-/// Returns what Metal draws in a drawable of `size` pixels: the picture at
-/// `picture`, and `follow`'s cursor at its position.
-#[cfg(target_os = "macos")]
-fn metal_scene(
+/// Returns what the GPU draws in a drawable of `size` pixels: the picture
+/// at `picture`, and `follow`'s cursor at its position.
+#[cfg(any(target_os = "macos", windows))]
+fn gpu_scene(
     size: (u32, u32),
     picture: Option<Placement>,
     follow: Option<((f64, f64), ScaledCursor)>,
@@ -1171,21 +1197,9 @@ fn attach_metal(window: &Window, slot: FrameSlot) -> Option<qdp_desktop::MetalVi
     let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
         return None;
     };
+    let report = Box::new(gpu_report(slot));
     // SAFETY: the view is the window's, which winit runs on the main thread,
     // and the painter is dropped before the window.
-    let mut stats = DrawStats::new(Instant::now());
-    let report = Box::new(move |fate: qdp_desktop::Fate<FrameId>| match fate {
-        qdp_desktop::Fate::Shown {
-            tag,
-            at,
-            drew_in,
-            waited,
-        } => {
-            slot.shown(tag, Some(at));
-            stats.drew(drew_in, waited, at);
-        }
-        qdp_desktop::Fate::Unshown(tag) => slot.shown(tag, None),
-    });
     #[allow(unsafe_code)]
     let attached =
         unsafe { qdp_desktop::MetalVideo::attach(handle.ns_view, window.scale_factor(), report) };
@@ -1196,6 +1210,54 @@ fn attach_metal(window: &Window, slot: FrameSlot) -> Option<qdp_desktop::MetalVi
         }
         Err(error) => {
             warn!(%error, "drawing the video on the processor instead of with Metal");
+            None
+        }
+    }
+}
+
+/// Returns the report a GPU presenter gives each picture's fate: when it
+/// reached the screen, for `slot`, and how long drawing it took, for the
+/// statistics.
+#[cfg(any(target_os = "macos", windows))]
+fn gpu_report(slot: FrameSlot) -> impl FnMut(qdp_desktop::Fate<FrameId>) + Send + 'static {
+    let mut stats = DrawStats::new(Instant::now());
+    move |fate: qdp_desktop::Fate<FrameId>| match fate {
+        qdp_desktop::Fate::Shown {
+            tag,
+            at,
+            drew_in,
+            waited,
+        } => {
+            slot.shown(tag, Some(at));
+            stats.drew(drew_in, waited, at);
+        }
+        qdp_desktop::Fate::Unshown(tag) => slot.shown(tag, None),
+    }
+}
+
+/// Draws the window's picture with Direct3D 11, telling `slot` when each
+/// frame reached the screen, or returns `None`, saying why, so that the
+/// processor draws it instead.
+#[cfg(windows)]
+fn attach_d3d11(window: &Window, slot: FrameSlot) -> Option<qdp_desktop::D3d11Video<FrameId>> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    // SAFETY: the window is winit's, and the painter is dropped before it.
+    #[allow(unsafe_code)]
+    let attached = unsafe {
+        qdp_desktop::D3d11Video::attach(
+            handle.hwnd.get(),
+            qdp_desktop::SyncMode::VSync,
+            gpu_report(slot),
+        )
+    };
+    match attached {
+        Ok(video) => Some(video),
+        Err(error) => {
+            warn!(%error, "drawing the video on the processor instead of with Direct3D");
             None
         }
     }
