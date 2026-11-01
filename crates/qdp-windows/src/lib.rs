@@ -18,6 +18,8 @@
 pub mod events;
 
 #[cfg(windows)]
+mod badge;
+#[cfg(windows)]
 mod ffi;
 #[cfg(windows)]
 mod stage;

@@ -81,6 +81,22 @@
                 </Grid>
             </Border>
 
+            <Border Style="{StaticResource CardStyle}">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Glyph="&#xE9D2;" />
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="Show statistics over the stream" />
+                        <TextBlock Text="Frame rate, latency and decoding time, in the stream's corner. Ctrl+Alt+Shift+S shows or hides them during a stream." Style="{StaticResource DescriptionStyle}" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="StatisticsSwitch" Grid.Column="2" OnContent="On" OffContent="Off" Toggled="OnToggled" AutomationProperties.Name="Show statistics over the stream" />
+                </Grid>
+            </Border>
+
             <TextBlock Text="Audio" Style="{StaticResource SectionHeaderStyle}" />
             <Border Style="{StaticResource CardStyle}">
                 <Grid ColumnSpacing="16">
@@ -147,6 +163,7 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <TextBlock Text="Ctrl+Alt+Shift+Z" Style="{StaticResource BodyStrongTextBlockStyle}" />
                     <TextBlock Grid.Column="1" Text="Release the mouse and the keys held" />
@@ -154,8 +171,10 @@
                     <TextBlock Grid.Row="1" Grid.Column="1" Text="Switch between full screen and a window" />
                     <TextBlock Grid.Row="2" Text="Ctrl+Alt+Shift+M" Style="{StaticResource BodyStrongTextBlockStyle}" />
                     <TextBlock Grid.Row="2" Grid.Column="1" Text="Turn the microphone on or off" />
-                    <TextBlock Grid.Row="3" Text="Ctrl+Alt+Shift+Q" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                    <TextBlock Grid.Row="3" Grid.Column="1" Text="Disconnect" />
+                    <TextBlock Grid.Row="3" Text="Ctrl+Alt+Shift+S" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <TextBlock Grid.Row="3" Grid.Column="1" Text="Show or hide the statistics" />
+                    <TextBlock Grid.Row="4" Text="Ctrl+Alt+Shift+Q" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <TextBlock Grid.Row="4" Grid.Column="1" Text="Disconnect" />
                 </Grid>
             </Border>
 

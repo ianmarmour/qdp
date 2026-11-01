@@ -29,7 +29,7 @@ use tracing::{info, warn};
 
 use crate::events::EventQueue;
 use crate::window::{
-    Command, Resolution, Screen, SessionMessage, Shortcuts, Start, WindowChoices, send,
+    Command, Resolution, Screen, SessionMessage, Shortcuts, Start, Statistics, WindowChoices, send,
 };
 
 /// The product name the app sends hosts in `CLIENT_HELLO`.
@@ -129,6 +129,9 @@ pub struct QdpConfig {
     /// Whether the clipboard is shared with the host, both ways: 1 if so, 0
     /// if not.
     clipboard: i32,
+    /// Whether the stream's statistics show as it starts: 1 if so, 0 if
+    /// not.
+    statistics: i32,
 }
 
 /// A session, which the app holds as `QdpSession *`.
@@ -378,6 +381,11 @@ unsafe fn start(config: *const QdpConfig) -> Result<QdpSession, String> {
             } else {
                 SyncMode::VSync
             },
+            statistics: if config.statistics != 0 {
+                Statistics::Shown
+            } else {
+                Statistics::Hidden
+            },
             shortcuts: match config.shortcuts {
                 SHORTCUTS_ALWAYS => Shortcuts::Always,
                 SHORTCUTS_NEVER => Shortcuts::Never,
@@ -509,6 +517,7 @@ mod tests {
         assert_eq!(offset_of!(QdpConfig, sync), 80);
         assert_eq!(offset_of!(QdpConfig, shortcuts), 84);
         assert_eq!(offset_of!(QdpConfig, clipboard), 88);
+        assert_eq!(offset_of!(QdpConfig, statistics), 92);
     }
 
     /// The version the app shows is the crate's, NUL-terminated.
@@ -540,6 +549,7 @@ mod tests {
             sync: 0,
             shortcuts: 0,
             clipboard: 0,
+            statistics: 0,
         };
         let mut error = ptr::null_mut();
         // SAFETY: the configuration's strings are static or null, and the

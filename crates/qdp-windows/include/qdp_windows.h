@@ -48,6 +48,7 @@
  *   Z  releases the pointer and the keys held.
  *   M  turns the microphone on or off.
  *   X  goes full screen, or back to a window.
+ *   S  shows or hides the stream's statistics.
  *   Q  ends the session.
  */
 
@@ -148,6 +149,9 @@ typedef struct QdpConfig {
     int32_t shortcuts;
     /* 1 if the clipboard is shared with the host, both ways; 0 if not. */
     int32_t clipboard;
+    /* 1 if the stream's statistics show over the picture as it starts; 0
+     * if not. */
+    int32_t statistics;
 } QdpConfig;
 
 /* A running session. */

@@ -40,6 +40,7 @@ internal static partial class Native
         public int Sync;
         public int Shortcuts;
         public int Clipboard;
+        public int Statistics;
     }
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]

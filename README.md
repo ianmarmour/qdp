@@ -364,7 +364,8 @@ paired one streams at once, full screen or in a window as its settings say.
 The stream sends the keyboard, mouse, touch, pen and gamepads, with rumble;
 in full screen the Windows key, Alt+Tab and Alt+F4 act on the host. Holding
 Ctrl, Alt and Shift, Z releases the mouse, X switches between full screen and
-a window, M turns the microphone on or off, and Q disconnects.
+a window, S shows or hides the stream's statistics, M turns the microphone on
+or off, and Q disconnects.
 
 ## Builds and releases
 

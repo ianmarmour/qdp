@@ -110,7 +110,7 @@
                     <StackPanel x:Name="ShortcutsPanel" Visibility="Collapsed" Spacing="4">
                         <TextBlock Text="In the stream, hold Ctrl+Alt+Shift and press" HorizontalAlignment="Center" Style="{StaticResource DescriptionStyle}" />
                         <TextBlock
-                            Text="Z to release the mouse · X for full screen · M for the microphone · Q to disconnect"
+                            Text="Z to release the mouse · X for full screen · S for statistics · M for the microphone · Q to disconnect"
                             HorizontalAlignment="Center"
                             TextAlignment="Center"
                             Style="{StaticResource DescriptionStyle}" />

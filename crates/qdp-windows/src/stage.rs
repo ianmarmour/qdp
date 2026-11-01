@@ -47,6 +47,8 @@ pub(crate) struct Stage {
     /// host's monitor in pixels: while the system's pointer cannot be where
     /// the host's is (Section 9.4).
     cursor: Option<((f64, f64), ScaledCursor)>,
+    /// What the window says over the picture, if anything.
+    badge: Option<Overlay>,
 }
 
 /// Locks a stage.
@@ -63,6 +65,7 @@ impl Stage {
             window,
             video: None,
             cursor: None,
+            badge: None,
         }
     }
 
@@ -98,8 +101,17 @@ impl Stage {
                 height: rect.height,
             }),
             overlay,
+            badge: self.badge.clone(),
         };
         self.submitter.submit(picture, scene);
+    }
+
+    /// Draws `badge` over the picture, or nothing with `None`.
+    pub(crate) fn set_badge(&mut self, badge: Option<Overlay>) {
+        if self.badge != badge {
+            self.badge = badge;
+            self.submit(None);
+        }
     }
 
     /// Draws `cursor`, the host's cursor at the size it is shown, at its

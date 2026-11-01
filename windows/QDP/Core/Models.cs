@@ -114,6 +114,9 @@ public sealed class AppSettings
     /// <summary>Whether the clipboard is shared with the computer streamed, both ways.</summary>
     public bool ShareClipboard { get; set; } = true;
 
+    /// <summary>Whether the stream's statistics show over it as it starts.</summary>
+    public bool ShowStatistics { get; set; }
+
     /// <summary>When Windows' shortcuts go to the computer streamed.</summary>
     public ShortcutsChoice Shortcuts { get; set; } = ShortcutsChoice.FullScreen;
 

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use qdp::message::{CursorImage, DesktopRect, PointerKind, PointerMode};
 use qdp_app::cursor::ScaledCursor;
-use qdp_app::events::{Ending, Event};
+use qdp_app::events::{Ending, Event, VideoStats};
 use qdp_app::placement::confined;
 use qdp_app::session::{Config, EventReader, Session};
 use qdp_app::window_input::{Scroller, button_input, display_size, key_input, touch_phase};
@@ -39,6 +39,7 @@ use winit::window::{
     CursorGrabMode, CustomCursor, Fullscreen, Icon, Theme, Window, WindowAttributes, WindowId,
 };
 
+use crate::badge;
 use crate::events::{EventQueue, WindowLine};
 use crate::stage::{FrameId, Presentations, SharedStage, Stage, WindowsPresenter, lock, reporter};
 
@@ -77,6 +78,8 @@ enum LocalAction {
     ToggleMicrophone,
     /// Goes full screen, or back to a window: X.
     ToggleFullScreen,
+    /// Shows or hides the stream's statistics: S.
+    ToggleStatistics,
     /// Ends the session: Q.
     Disconnect,
 }
@@ -89,6 +92,7 @@ impl LocalAction {
             KeyCode::KeyZ => Some(Self::Release),
             KeyCode::KeyM => Some(Self::ToggleMicrophone),
             KeyCode::KeyX => Some(Self::ToggleFullScreen),
+            KeyCode::KeyS => Some(Self::ToggleStatistics),
             KeyCode::KeyQ => Some(Self::Disconnect),
             _ => None,
         }
@@ -157,6 +161,25 @@ impl Shortcuts {
     }
 }
 
+/// Whether the stream's statistics show over the picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Statistics {
+    /// They show.
+    Shown,
+    /// They do not.
+    Hidden,
+}
+
+impl Statistics {
+    /// Returns the other choice.
+    fn toggled(self) -> Self {
+        match self {
+            Self::Shown => Self::Hidden,
+            Self::Hidden => Self::Shown,
+        }
+    }
+}
+
 /// How the stream window shows the video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Screen {
@@ -176,6 +199,8 @@ pub(crate) struct WindowChoices {
     pub(crate) screen: Screen,
     /// When Windows' shortcuts go to the host.
     pub(crate) shortcuts: Shortcuts,
+    /// Whether the stream's statistics show as it starts.
+    pub(crate) statistics: Statistics,
     /// How the video meets the display's refresh.
     pub(crate) sync: SyncMode,
     /// The video size to ask for: the picture is scaled to fit the window.
@@ -410,6 +435,12 @@ struct StreamWindow {
     link: Link,
     /// Whether the microphone is on.
     microphone: Microphone,
+    /// Whether the stream's statistics show.
+    statistics: Statistics,
+    /// The last second's video, once a second passed.
+    last_stats: Option<VideoStats>,
+    /// The video's size, in pixels, once it is known.
+    video: Option<(usize, usize)>,
     /// The host's cursor image, or `None` while the host hides it.
     cursor: Option<CursorImage>,
     /// The cursor at the size it is drawn, with the scale it was made for.
@@ -463,6 +494,7 @@ impl StreamWindow {
             queue,
         } = start;
         let microphone = config.microphone;
+        let statistics = choices.statistics;
         let monitor = monitor(event_loop, choices.owner);
         let window = event_loop
             .create_window(attributes(&choices, microphone, monitor.as_ref()))
@@ -516,6 +548,9 @@ impl StreamWindow {
             shown: false,
             link: Link::Up,
             microphone,
+            statistics,
+            last_stats: None,
+            video: None,
             cursor: None,
             scaled_cursor: None,
             cursor_stale: false,
@@ -584,7 +619,8 @@ impl StreamWindow {
     /// Handles one of the session's events that concerns the window.
     fn event(&mut self, event: Event) -> Continue {
         match event {
-            Event::Video { .. } => {
+            Event::Video { width, height } => {
+                self.video = Some((width, height));
                 self.cursor_stale = true;
                 if !self.shown {
                     self.shown = true;
@@ -604,6 +640,10 @@ impl StreamWindow {
                     gamepads.rumble(slot, low, high);
                 }
             }
+            Event::Stats(stats) => {
+                self.last_stats = Some(stats);
+                self.update_badge();
+            }
             Event::Connected => self.set_link(Link::Up),
             Event::Reconnecting { .. } => self.set_link(Link::Reconnecting),
             Event::Ended(_) => return Continue::Close,
@@ -612,13 +652,29 @@ impl StreamWindow {
         Continue::Open
     }
 
-    /// Notes whether the session is connected, which the title shows.
+    /// Notes whether the session is connected, which the title and the
+    /// badge show.
     fn set_link(&mut self, link: Link) {
         if self.link != link {
             self.link = link;
             self.window
                 .set_title(&title(&self.choices.title, self.microphone, link));
+            self.update_badge();
         }
+    }
+
+    /// Draws what the badge says now over the picture: that the session is
+    /// reconnecting, and the statistics while they show.
+    fn update_badge(&self) {
+        let mut lines = Vec::new();
+        if self.link == Link::Reconnecting {
+            lines.push("Reconnecting…".to_owned());
+        }
+        if let (Statistics::Shown, Some(stats)) = (self.statistics, self.last_stats) {
+            lines.extend(statistics_lines(&stats, self.video));
+        }
+        let badge = badge::render(&lines, self.window.scale_factor());
+        lock(&self.stage).set_badge(badge);
     }
 
     /// Captures the pointer for relative mode: hides it and confines it to
@@ -725,6 +781,10 @@ impl StreamWindow {
                 if let Some(keys) = &self.system_keys {
                     keys.set_active(self.choices.shortcuts.to_host(screen));
                 }
+            }
+            LocalAction::ToggleStatistics => {
+                self.statistics = self.statistics.toggled();
+                self.update_badge();
             }
             LocalAction::Disconnect => return Continue::Close,
         }
@@ -987,9 +1047,11 @@ impl StreamWindow {
                 lock(&self.stage).resize((size.width, size.height));
                 self.display_changed();
             }
-            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Moved(_) => {
+            WindowEvent::ScaleFactorChanged { .. } => {
                 self.display_changed();
+                self.update_badge();
             }
+            WindowEvent::Moved(_) => self.display_changed(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             // On gaining focus the window library makes up presses for the
             // keys already held, which the user did not press in the
@@ -1054,6 +1116,27 @@ impl StreamWindow {
             None => ControlFlow::Wait,
         }
     }
+}
+
+/// Returns the badge's lines for the last second's video, `video` pixels.
+fn statistics_lines(stats: &VideoStats, video: Option<(usize, usize)>) -> Vec<String> {
+    let milliseconds = |time: Duration| format!("{:.1} ms", time.as_secs_f64() * 1000.0);
+    let mut first = format!("{} fps", stats.frames);
+    if let Some((width, height)) = video {
+        first.push_str(&format!(" · {width} × {height}"));
+    }
+    let latency = stats.latency.map_or_else(|| "–".to_owned(), milliseconds);
+    let mut lines = vec![
+        first,
+        format!(
+            "Latency {latency} · decoding {}",
+            milliseconds(stats.decode)
+        ),
+    ];
+    if let Some(worst) = stats.worst {
+        lines.push(format!("Slowest frame {}", milliseconds(worst.latency)));
+    }
+    lines
 }
 
 /// Returns the window's title: the session's, saying whether the microphone
@@ -1185,6 +1268,7 @@ fn for_window(event: &Event) -> bool {
             | Event::Warp { .. }
             | Event::PointerMode(_)
             | Event::Rumble { .. }
+            | Event::Stats(_)
             | Event::Connected
             | Event::Reconnecting { .. }
             | Event::Ended(_)

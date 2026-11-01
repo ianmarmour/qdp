@@ -152,6 +152,7 @@ internal sealed class StreamSession
                 Sync = settings.AllowTearing ? 1 : 0,
                 Shortcuts = (int)settings.Shortcuts,
                 Clipboard = settings.ShareClipboard ? 1 : 0,
+                Statistics = settings.ShowStatistics ? 1 : 0,
             };
             var handle = Native.qdp_session_start(in config, out var error);
             if (handle == IntPtr.Zero)

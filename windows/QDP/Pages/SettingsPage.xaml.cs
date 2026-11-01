@@ -39,6 +39,7 @@ public sealed partial class SettingsPage : Page
         MicrophoneSwitch.IsOn = settings.Microphone;
         ShortcutsBox.SelectedIndex = (int)settings.Shortcuts;
         ClipboardSwitch.IsOn = settings.ShareClipboard;
+        StatisticsSwitch.IsOn = settings.ShowStatistics;
         loading = false;
         if (window.Problem is null)
         {
@@ -74,6 +75,7 @@ public sealed partial class SettingsPage : Page
         settings.Microphone = MicrophoneSwitch.IsOn;
         settings.Shortcuts = (ShortcutsChoice)Math.Max(ShortcutsBox.SelectedIndex, 0);
         settings.ShareClipboard = ClipboardSwitch.IsOn;
+        settings.ShowStatistics = StatisticsSwitch.IsOn;
         Storage.SaveSettings(settings);
     }
 
