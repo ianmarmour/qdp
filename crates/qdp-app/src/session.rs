@@ -16,11 +16,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use qdp::message::KeyboardInfo;
 use qdp_codec::CodecPreference;
 use qdp_quic::{ClientEndpoint, HostVerification, IdentityFiles, KeyPin, TlsIdentity};
 use qdp_runtime::{
     ClientAudio, ClientCredentials, ClientOptions, DisplaySize, InputHandle, InputQueue,
-    Microphone, PairingPrompt, ResumptionSlot, RuntimeError, UserInput, input_channel,
+    Microphone, PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard, UserInput,
+    input_channel,
 };
 use tokio::sync::{Notify, oneshot};
 use tracing::{info, warn};
@@ -114,6 +116,12 @@ pub struct Config {
     /// Opens the device's speakers and microphone, the microphone capturing
     /// only while the state given says it is on.
     pub client_audio: fn(Microphone) -> ClientAudio,
+    /// Opens the clipboard shared with the host for each connection, where
+    /// the app shares one (Section 10).
+    pub clipboard: Option<fn() -> Option<SharedClipboard>>,
+    /// Returns the keyboard layout the host is told of, where the app knows
+    /// it, so that the host types the same characters (Section 8.4.1).
+    pub keyboard_info: Option<fn() -> Option<KeyboardInfo>>,
 }
 
 /// A running session.
@@ -169,6 +177,13 @@ impl Session {
             code,
             thread: Some(thread),
         })
+    }
+
+    /// Returns a handle that sends the user's input to the session from any
+    /// thread, as [`Session::send`] does, for capture that runs on threads
+    /// of its own, such as gamepads'.
+    pub fn input(&self) -> InputHandle {
+        self.input.clone()
     }
 
     /// Answers the session's request for the pairing code with `code`, or
@@ -384,7 +399,9 @@ async fn receive<P: Presenter>(
                 decoder_threads: 0,
                 decoder: config.decoder,
                 decoder_process: None,
-                keyboard_info: None,
+                keyboard_info: config
+                    .keyboard_info
+                    .and_then(|keyboard_info| keyboard_info()),
                 resumption: resumption.clone(),
                 pairing_prompt: pairs.then(|| pairing.prompt(&code, events)),
             };
@@ -392,6 +409,7 @@ async fn receive<P: Presenter>(
                 address,
                 &verification,
                 (config.client_audio)(config.microphone),
+                config.clipboard.and_then(|open| open()),
                 &endpoint,
                 &options,
                 sink,
@@ -536,12 +554,14 @@ enum Failure {
 }
 
 /// Connects to the host once, verifying its key as `verification` says,
-/// and runs a session with `options` until it ends.
+/// and runs a session with `options`, sharing `clipboard` if there is one,
+/// until it ends.
 #[allow(clippy::too_many_arguments)]
 async fn connect_once<P: Presenter>(
     address: SocketAddr,
     verification: &HostVerification,
     audio: ClientAudio,
+    clipboard: Option<SharedClipboard>,
     endpoint: &ClientEndpoint,
     options: &ClientOptions,
     sink: &mut AppSink<P>,
@@ -555,7 +575,7 @@ async fn connect_once<P: Presenter>(
         .map_err(|error| Failure::Lost(format!("cannot connect to {address}: {error}")))?;
     info!(%address, "connected");
     let _ = events.send(Event::Connected);
-    let summary = qdp_runtime::run(connection, options, sink, Some(input), None, audio)
+    let summary = qdp_runtime::run(connection, options, sink, Some(input), clipboard, audio)
         .await
         .map_err(|error| {
             let message = format!("session failed: {error}");

@@ -349,6 +349,8 @@ unsafe fn start(
                 Microphone::Off
             },
             client_audio: qdp_desktop::client_audio,
+            clipboard: None,
+            keyboard_info: None,
         },
         {
             let stage = Arc::clone(&stage);

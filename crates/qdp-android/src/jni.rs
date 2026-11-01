@@ -267,6 +267,8 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
                         Microphone::Off
                     },
                     client_audio: qdp_desktop::client_audio,
+                    clipboard: None,
+                    keyboard_info: None,
                 })
             },
         );
