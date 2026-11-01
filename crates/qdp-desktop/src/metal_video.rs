@@ -60,7 +60,7 @@ use objc2_quartz_core::{CALayer, CAMetalDrawable, CAMetalLayer, CATransaction};
 use qdp_codec::{DecodedPicture, PixelBufferPicture, Yuv420Frame};
 use tracing::{debug, warn};
 
-use crate::video_scene::{Fate, Overlay, PixelRect, Scene};
+use crate::video_scene::{Fate, OVERLAY_LAYERS, Overlay, PixelRect, Scene};
 
 /// The render thread's name.
 const RENDER_THREAD: &str = "qdp-metal-render";
@@ -319,8 +319,8 @@ struct Renderer {
     /// Whether a pixel buffer could not be shown to Metal, which is said
     /// once.
     import_failed: bool,
-    /// The overlay's texture, once one was drawn.
-    overlay_texture: Option<OverlayTexture>,
+    /// The textures of the layers over the picture, once each was drawn.
+    overlay_textures: [Option<OverlayTexture>; OVERLAY_LAYERS],
 }
 
 // SAFETY: Metal's devices, queues, pipelines, samplers and textures, and
@@ -504,7 +504,7 @@ impl<T: Send + 'static> MetalVideo<T> {
             pixel_buffers: VecDeque::new(),
             shown: None,
             import_failed: false,
-            overlay_texture: None,
+            overlay_textures: [None, None],
         };
         let layer = Arc::new(DrawingLayer(layer));
         let shared = Arc::new(Shared {
@@ -752,8 +752,10 @@ impl Renderer {
         drawable: &ProtocolObject<dyn CAMetalDrawable>,
         scene: &Scene,
     ) -> Result<(), String> {
-        if let Some(overlay) = &scene.overlay {
-            self.take_overlay(overlay);
+        for (layer, overlay) in scene.layers().into_iter().enumerate() {
+            if let Some(overlay) = overlay {
+                self.take_overlay(layer, overlay);
+            }
         }
         let pass = MTLRenderPassDescriptor::renderPassDescriptor();
         // SAFETY: a render pass has a first colour attachment.
@@ -815,7 +817,11 @@ impl Renderer {
                 );
             }
         }
-        if let (Some(overlay), Some(texture)) = (&scene.overlay, &self.overlay_texture) {
+        let layers = scene.layers().into_iter().zip(&self.overlay_textures);
+        for (overlay, texture) in layers {
+            let (Some(overlay), Some(texture)) = (overlay, texture) else {
+                continue;
+            };
             encoder.setRenderPipelineState(&self.overlay);
             let rect = PixelRect {
                 left: overlay.left,
@@ -842,14 +848,14 @@ impl Renderer {
         Ok(())
     }
 
-    /// Uploads `overlay`'s image, if it is not the one uploaded already.
-    fn take_overlay(&mut self, overlay: &Overlay) {
+    /// Uploads `overlay`'s image as layer `layer`'s, if it is not the one
+    /// uploaded already.
+    fn take_overlay(&mut self, layer: usize, overlay: &Overlay) {
         let size = (overlay.width, overlay.height);
         if overlay.rgba.len() != overlay.width * overlay.height * RGBA_BYTES {
             return;
         }
-        if self
-            .overlay_texture
+        if self.overlay_textures[layer]
             .as_ref()
             .is_some_and(|texture| texture.texture.size == size && texture.rgba == overlay.rgba)
         {
@@ -859,7 +865,7 @@ impl Renderer {
             return;
         };
         fill(&texture, &overlay.rgba, RGBA_BYTES);
-        self.overlay_texture = Some(OverlayTexture {
+        self.overlay_textures[layer] = Some(OverlayTexture {
             texture,
             rgba: Arc::clone(&overlay.rgba),
         });

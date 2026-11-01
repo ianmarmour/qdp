@@ -40,8 +40,22 @@ pub struct Scene {
     pub size: (u32, u32),
     /// Where the picture goes, if one is shown.
     pub picture: Option<PixelRect>,
-    /// What is drawn over the picture, if anything.
+    /// What is drawn over the picture, if anything, such as the host's
+    /// cursor.
     pub overlay: Option<Overlay>,
+    /// What is drawn over that, if anything, such as the stream's
+    /// statistics.
+    pub badge: Option<Overlay>,
+}
+
+/// The layers drawn over the picture: the overlay, then the badge.
+pub(crate) const OVERLAY_LAYERS: usize = 2;
+
+impl Scene {
+    /// Returns what is drawn over the picture, bottom first.
+    pub(crate) fn layers(&self) -> [Option<&Overlay>; OVERLAY_LAYERS] {
+        [self.overlay.as_ref(), self.badge.as_ref()]
+    }
 }
 
 /// What became of a picture handed to the render thread, tagged as it was.
