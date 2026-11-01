@@ -9,7 +9,6 @@ mod args;
 #[cfg(feature = "window")]
 mod color;
 #[cfg(feature = "window")]
-mod cursor;
 mod identity;
 #[cfg(feature = "window")]
 mod keymap;

@@ -4,6 +4,7 @@ members = [
     "crates/qdp",
     "crates/qdp-android",
     "crates/qdp-app",
+    "crates/qdp-apple",
     "crates/qdp-cli",
     "crates/qdp-codec",
     "crates/qdp-desktop",

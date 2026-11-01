@@ -133,6 +133,14 @@ pub(super) fn virtual_key(usage: u8) -> Option<u16> {
         .map(|&(_, code)| code)
 }
 
+/// Returns the Keyboard/Keypad page usage of a virtual key code, if it is
+/// one of a key QDP sends.
+pub(crate) fn usage(virtual_key: u16) -> Option<u8> {
+    KEYS.iter()
+        .find(|(_, code)| *code == virtual_key)
+        .map(|&(usage, _)| usage)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +154,9 @@ mod tests {
         assert_eq!(virtual_key(0xe3), Some(0x37)); // kVK_Command
         assert_eq!(virtual_key(0xe7), Some(0x36)); // kVK_RightCommand
         assert_eq!(virtual_key(0x00), None);
+        assert_eq!(usage(0x24), Some(0x28));
+        assert_eq!(usage(0x36), Some(0xe7));
+        assert_eq!(usage(0xffff), None);
         let mut usages: Vec<u8> = KEYS.iter().map(|&(usage, _)| usage).collect();
         let count = usages.len();
         usages.dedup();

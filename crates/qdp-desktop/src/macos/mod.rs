@@ -12,13 +12,17 @@ mod capture;
 mod cursor;
 mod input;
 mod keycodes;
-mod metal_video;
 mod pen;
 
 #[cfg(feature = "audio")]
 pub use audio::MacDesktopAudio;
 pub use capture::MacScreenCapture;
-pub use metal_video::{Fate, MetalVideo, Overlay, PixelRect, Scene};
+
+/// Returns the USB HID Keyboard/Keypad page usage of a macOS virtual key
+/// code, as `NSEvent.keyCode` gives it, if it is one of a key QDP sends.
+pub fn mac_key_usage(virtual_key: u16) -> Option<u8> {
+    keycodes::usage(virtual_key)
+}
 
 /// Returns the desktop's sound, captured with ScreenCaptureKit.
 #[cfg(feature = "audio")]

@@ -1,11 +1,13 @@
-//! Showing a client's video in a window with Metal: the GPU converts each
+//! Showing a client's video with Metal, in a Mac window or in a layer an app
+//! gives on macOS and iOS: the GPU converts each
 //! picture's colours and scales it into the window in one pass, rather than
 //! the processor doing both. A picture VideoToolbox decoded is drawn from
 //! its own pixel buffer, whose planes Core Video shows Metal as textures,
 //! without a copy; a picture in memory has its planes uploaded as textures.
 //!
 //! A `CAMetalLayer` is added over the layer of the window's view, as
-//! softbuffer adds its own, and kept to the view's size. The black bars
+//! softbuffer adds its own, or over the layer an app gives, and kept to its
+//! size. The black bars
 //! around the picture are the layer's clear colour, and a cursor the client
 //! draws is a second, blended quad. A display link declares the frame rates the video
 //! wants, since a ProMotion display otherwise may not refresh faster than
@@ -13,10 +15,11 @@
 //!
 //! Pictures are drawn on a thread of their own. Drawing waits for one of the
 //! layer's drawables to be free, often for most of a refresh at 120 Hz, and
-//! the main thread, which also reads the user's input, must not: it hands
-//! over the newest picture and what to draw over it, and the render thread
-//! draws the newest it has once a drawable is free. The main thread keeps
-//! the layer to the view's size, and the display link.
+//! the main thread, which also reads the user's input, must not: it, or a
+//! session's thread through a [`Submitter`], hands over the newest picture
+//! and what to draw over it, and the render thread draws the newest it has
+//! once a drawable is free. The main thread keeps the layer to the view's
+//! size, and the display link.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -25,9 +28,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+use objc2::runtime::ProtocolObject;
+#[cfg(target_os = "macos")]
+use objc2::{MainThreadOnly, define_class, msg_send, sel};
+#[cfg(target_os = "macos")]
 use objc2_app_kit::NSView;
 use objc2_core_foundation::{CFRetained, CGSize};
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
@@ -35,7 +43,9 @@ use objc2_core_video::{
     CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
     CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidthOfPlane, kCVReturnSuccess,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSString};
+use objc2_foundation::NSString;
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
 use objc2_metal::{
     MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin,
@@ -44,9 +54,9 @@ use objc2_metal::{
     MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStoreAction,
     MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
-use objc2_quartz_core::{
-    CADisplayLink, CAFrameRateRange, CALayer, CAMetalDrawable, CAMetalLayer, CATransaction,
-};
+#[cfg(target_os = "macos")]
+use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
+use objc2_quartz_core::{CALayer, CAMetalDrawable, CAMetalLayer, CATransaction};
 use qdp_codec::{DecodedPicture, PixelBufferPicture, Yuv420Frame};
 use tracing::{debug, warn};
 
@@ -131,6 +141,7 @@ const DRAWABLE_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 const QUAD_VERTICES: usize = 4;
 
 /// The frame rates the video asks a ProMotion display for: up to 120 Hz.
+#[cfg(target_os = "macos")]
 const FRAME_RATES: CAFrameRateRange = CAFrameRateRange {
     minimum: 60.0,
     maximum: 120.0,
@@ -236,6 +247,7 @@ struct OverlayTexture {
     rgba: Arc<[u8]>,
 }
 
+#[cfg(target_os = "macos")]
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and the class has no
     // `Drop` implementation.
@@ -254,6 +266,7 @@ define_class!(
     }
 );
 
+#[cfg(target_os = "macos")]
 impl FrameRateDemand {
     /// Returns a target for a display link.
     fn new(main_thread: MainThreadMarker) -> Retained<Self> {
@@ -371,12 +384,14 @@ struct Renderer {
 // alone.
 unsafe impl Send for Renderer {}
 
-/// Draws a client's video into a window's view with Metal, on a thread of
-/// its own, reporting what became of each picture, tagged with a `T`.
+/// Draws a client's video into a window's view, or an app's layer, with
+/// Metal, on a thread of its own, reporting what became of each picture,
+/// tagged with a `T`.
 pub struct MetalVideo<T: Send + 'static> {
-    /// The view's own layer, which the drawing layer is kept to the size of.
+    /// The layer of the view, or the app's, which the drawing layer is kept
+    /// to the size of.
     root: Retained<CALayer>,
-    /// The layer drawn into, over the view's, shared with the render thread.
+    /// The layer drawn into, over the root, shared with the render thread.
     layer: Arc<DrawingLayer>,
     /// What the render thread is asked for.
     shared: Arc<Shared<T>>,
@@ -384,14 +399,55 @@ pub struct MetalVideo<T: Send + 'static> {
     thread: Option<JoinHandle<()>>,
     /// The display link that declares the frame rates wanted, where macOS
     /// has them (14 and later).
+    #[cfg(target_os = "macos")]
     frame_rate_link: Option<Retained<CADisplayLink>>,
     /// The link's target, kept while the link is.
+    #[cfg(target_os = "macos")]
     _frame_rate_target: Option<Retained<FrameRateDemand>>,
 }
 
 impl<T: Send + 'static> std::fmt::Debug for MetalVideo<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("MetalVideo").finish_non_exhaustive()
+    }
+}
+
+/// Hands pictures to a [`MetalVideo`]'s render thread from any thread, such
+/// as a session's, so that they need not pass through the main thread.
+pub struct Submitter<T> {
+    /// What the render thread is asked for.
+    shared: Arc<Shared<T>>,
+}
+
+impl<T> Clone for Submitter<T> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Submitter<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Submitter").finish_non_exhaustive()
+    }
+}
+
+impl<T> Submitter<T> {
+    /// Asks for `scene` to be drawn with `picture`, tagged, as the picture
+    /// from now on if there is one: the render thread draws the newest it
+    /// was given once a drawable is free, and this returns at once.
+    pub fn submit(&self, picture: Option<(DecodedPicture, T)>, scene: Scene) {
+        let mut request = self.shared.lock();
+        if let Some(picture) = picture {
+            if let Some((_, replaced)) = request.picture.replace(picture) {
+                request.replaced.push(replaced);
+            }
+        }
+        request.scene = Some(scene);
+        request.pending = true;
+        drop(request);
+        self.shared.changed.notify_one();
     }
 }
 
@@ -404,6 +460,7 @@ impl<T: Send + 'static> MetalVideo<T> {
     ///
     /// `ns_view` must point to a live `NSView`, and this must be called and
     /// the result used on the main thread, while the view lives.
+    #[cfg(target_os = "macos")]
     pub unsafe fn attach(
         ns_view: NonNull<c_void>,
         scale: f64,
@@ -414,8 +471,52 @@ impl<T: Send + 'static> MetalVideo<T> {
         // SAFETY: the caller promises a live NSView.
         let view = unsafe { Retained::retain(ns_view.as_ptr().cast::<NSView>()) }
             .ok_or_else(|| "the window has no view".to_owned())?;
+        // winit makes its views layer-backed.
+        let root = view
+            .layer()
+            .ok_or_else(|| "the window's view has no layer".to_owned())?;
+        let mut video = Self::attach_to(root, scale, report, main_thread)?;
+        match frame_rate_link(&view, main_thread) {
+            Some((link, target)) => {
+                video.frame_rate_link = Some(link);
+                video._frame_rate_target = Some(target);
+            }
+            None => debug!("this macOS cannot ask the display for frame rates"),
+        }
+        Ok(video)
+    }
+
+    /// Draws into a layer added over the `CALayer` `layer` points to, an
+    /// app's, whose pixels are `scale` times its points, telling `report`,
+    /// on the render thread, what became of each picture. The app asks the
+    /// display for the video's frame rate itself.
+    ///
+    /// # Safety
+    ///
+    /// `layer` must point to a live `CALayer`, and this must be called and
+    /// the result used on the main thread.
+    pub unsafe fn attach_to_layer(
+        layer: NonNull<c_void>,
+        scale: f64,
+        report: Box<dyn FnMut(Fate<T>) + Send>,
+    ) -> Result<Self, String> {
+        let main_thread = MainThreadMarker::new()
+            .ok_or_else(|| "Metal drawing needs the main thread".to_owned())?;
+        // SAFETY: the caller promises a live CALayer.
+        let root = unsafe { Retained::retain(layer.as_ptr().cast::<CALayer>()) }
+            .ok_or_else(|| "there is no layer to draw in".to_owned())?;
+        Self::attach_to(root, scale, report, main_thread)
+    }
+
+    /// Draws into a layer added over `root`.
+    fn attach_to(
+        root: Retained<CALayer>,
+        scale: f64,
+        report: Box<dyn FnMut(Fate<T>) + Send>,
+        _main_thread: MainThreadMarker,
+    ) -> Result<Self, String> {
         let device = MTLCreateSystemDefaultDevice()
-            .ok_or_else(|| "this Mac has no Metal device".to_owned())?;
+            .ok_or_else(|| "this device has no Metal device".to_owned())?;
         let queue = device
             .newCommandQueue()
             .ok_or_else(|| "cannot make a Metal command queue".to_owned())?;
@@ -428,10 +529,6 @@ impl<T: Send + 'static> MetalVideo<T> {
         let overlay = pipeline(&device, &library, "qdp_overlay", Blending::Alpha)?;
         let sampler = linear_sampler(&device)?;
 
-        // winit makes its views layer-backed.
-        let root = view
-            .layer()
-            .ok_or_else(|| "the window's view has no layer".to_owned())?;
         let layer = CAMetalLayer::new();
         layer.setDevice(Some(&device));
         layer.setPixelFormat(DRAWABLE_FORMAT);
@@ -443,17 +540,12 @@ impl<T: Send + 'static> MetalVideo<T> {
         layer.setColorspace(srgb.as_deref());
         // Frames are shown as soon as they are drawn, rather than held for
         // the next refresh, so that drawing never waits on the display.
+        // iOS always shows them at the next refresh.
+        #[cfg(target_os = "macos")]
         layer.setDisplaySyncEnabled(false);
         root.addSublayer(&layer);
         fit_layer(&root, &layer, scale);
 
-        let (frame_rate_link, frame_rate_target) = match frame_rate_link(&view, main_thread) {
-            Some((link, target)) => (Some(link), Some(target)),
-            None => {
-                debug!("this macOS cannot ask the display for frame rates");
-                (None, None)
-            }
-        };
         let renderer = Renderer {
             device,
             queue,
@@ -493,9 +585,25 @@ impl<T: Send + 'static> MetalVideo<T> {
             layer,
             shared,
             thread: Some(thread),
-            frame_rate_link,
-            _frame_rate_target: frame_rate_target,
+            #[cfg(target_os = "macos")]
+            frame_rate_link: None,
+            #[cfg(target_os = "macos")]
+            _frame_rate_target: None,
         })
+    }
+
+    /// Returns a submitter that hands this video's render thread pictures
+    /// from any thread.
+    pub fn submitter(&self) -> Submitter<T> {
+        Submitter {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// Keeps the drawing layer to its root's bounds at `scale` pixels to a
+    /// point, on the main thread.
+    pub fn fit(&self, scale: f64) {
+        fit_layer(&self.root, &self.layer.0, scale);
     }
 
     /// Asks for `scene` to be drawn in a layer of `scale` pixels to a point
@@ -503,22 +611,14 @@ impl<T: Send + 'static> MetalVideo<T> {
     /// there is one: the render thread draws the newest it was given once a
     /// drawable is free, and this returns at once.
     pub fn show(&mut self, picture: Option<(DecodedPicture, T)>, scene: Scene, scale: f64) {
-        fit_layer(&self.root, &self.layer.0, scale);
-        let mut request = self.shared.lock();
-        if let Some(picture) = picture {
-            if let Some((_, replaced)) = request.picture.replace(picture) {
-                request.replaced.push(replaced);
-            }
-        }
-        request.scene = Some(scene);
-        request.pending = true;
-        drop(request);
-        self.shared.changed.notify_one();
+        self.fit(scale);
+        self.submitter().submit(picture, scene);
     }
 }
 
 impl<T: Send + 'static> Drop for MetalVideo<T> {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
         if let Some(link) = &self.frame_rate_link {
             link.invalidate();
         }
@@ -527,6 +627,7 @@ impl<T: Send + 'static> Drop for MetalVideo<T> {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        self.layer.0.removeFromSuperlayer();
     }
 }
 
@@ -1041,6 +1142,7 @@ fn quad(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>, rect: PixelRect, 
 /// Returns a display link on `view` that asks its display for the video's
 /// frame rates, and its target, or `None` before macOS 14, which has no such
 /// links on views.
+#[cfg(target_os = "macos")]
 fn frame_rate_link(
     view: &NSView,
     main_thread: MainThreadMarker,

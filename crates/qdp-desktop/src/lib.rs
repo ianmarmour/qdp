@@ -22,11 +22,11 @@
 //! shows the host's user a notification.
 
 mod advertise;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod clipboard;
 #[cfg(all(
     feature = "audio",
-    any(target_os = "macos", windows, target_os = "android")
+    any(target_os = "macos", target_os = "ios", windows, target_os = "android")
 ))]
 mod cpal_audio;
 mod desktop_lock;
@@ -43,6 +43,9 @@ mod linux;
 mod lock_keys;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[allow(unsafe_code)]
+mod metal_video;
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
 mod monitor_modes;
 mod notification;
@@ -60,7 +63,7 @@ use qdp_runtime::{
 use tracing::warn;
 
 pub use advertise::{Advertisement, Advertising, advertise};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub use clipboard::SystemClipboard;
 #[cfg(target_os = "linux")]
 pub use clipboard::adopt_wayland_display;
@@ -78,7 +81,9 @@ pub use linux::ScreenCapture;
 #[cfg(target_os = "linux")]
 pub use linux::UinputInjector;
 #[cfg(target_os = "macos")]
-pub use macos::{Fate, MacScreenCapture, MetalVideo, Overlay, PixelRect, QuartzInjector, Scene};
+pub use macos::{MacScreenCapture, QuartzInjector, mac_key_usage};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub use metal_video::{Fate, MetalVideo, Overlay, PixelRect, Scene, Submitter};
 #[cfg(windows)]
 pub use win32::{DesktopDuplication, SendInputInjector, WindowPen};
 
@@ -266,7 +271,7 @@ pub fn client_audio(microphone: Microphone) -> ClientAudio {
 /// which captures only while `microphone` says the user turned it on.
 #[cfg(all(
     feature = "audio",
-    any(target_os = "macos", windows, target_os = "android")
+    any(target_os = "macos", target_os = "ios", windows, target_os = "android")
 ))]
 pub fn client_audio(microphone: Microphone) -> ClientAudio {
     ClientAudio {
@@ -282,6 +287,7 @@ pub fn client_audio(microphone: Microphone) -> ClientAudio {
     any(
         target_os = "linux",
         target_os = "macos",
+        target_os = "ios",
         windows,
         target_os = "android"
     )
@@ -306,7 +312,7 @@ pub fn display_timing() -> Option<DisplayTiming> {
 
 /// Opens the system clipboard for sharing, or returns `None`, with a warning,
 /// if it cannot be used.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
     match SystemClipboard::open() {
         Ok(clipboard) => {
@@ -320,9 +326,9 @@ pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
     }
 }
 
-/// Returns `None`: Android's clipboard is reached through the app, not
-/// here.
-#[cfg(target_os = "android")]
+/// Returns `None`: Android's and iOS's clipboards are reached through the
+/// app, not here.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn system_clipboard() -> Option<Box<dyn Clipboard>> {
     None
 }
