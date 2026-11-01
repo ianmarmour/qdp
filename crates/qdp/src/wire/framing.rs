@@ -93,8 +93,15 @@ impl ControlStreamDecoder {
     /// does for the client's direction of the control stream until authentication
     /// succeeds (Section 11.7).
     pub fn with_pre_authentication_budget() -> Self {
+        Self::with_budget(PRE_AUTHENTICATION_BUDGET)
+    }
+
+    /// Creates a decoder that accepts at most `budget` bytes of control messages
+    /// until [`ControlStreamDecoder::clear_budget`], as a gateway does before
+    /// authentication succeeds (Section 13.3).
+    pub fn with_budget(budget: u64) -> Self {
         Self {
-            budget: Some(PRE_AUTHENTICATION_BUDGET),
+            budget: Some(budget),
             ..Self::default()
         }
     }

@@ -275,12 +275,16 @@ greasing, as in HTTP/3.
 - **[RFC3190]** RTP Payload Format for 12-bit DAT Audio and 20- and 24-bit
   Linear Sampled Audio (L24).
 - **[RFC3551]** RTP Profile for Audio and Video Conferences (L16).
+- **[RFC4226]** HOTP: An HMAC-Based One-Time Password Algorithm.
+- **[RFC4511]** Lightweight Directory Access Protocol (LDAP): The Protocol.
+- **[RFC4648]** The Base16, Base32, and Base64 Data Encodings.
 - **[RFC5280]** Internet X.509 Public Key Infrastructure Certificate and
   Certificate Revocation List (CRL) Profile (`SubjectPublicKeyInfo`).
 - **[RFC5646]** Tags for Identifying Languages (BCP 47).
 - **[RFC5802]** Salted Challenge Response Authentication Mechanism (SCRAM).
 - **[RFC5869]** HMAC-based Extract-and-Expand Key Derivation Function (HKDF).
 - **[RFC5905]** Network Time Protocol Version 4.
+- **[RFC6238]** TOTP: Time-Based One-Time Password Algorithm.
 - **[RFC6716]** Definition of the Opus Audio Codec.
 - **[RFC6762]** Multicast DNS.
 - **[RFC6763]** DNS-Based Service Discovery.
@@ -290,6 +294,7 @@ greasing, as in HTTP/3.
 - **[RFC7677]** SCRAM-SHA-256 and SCRAM-SHA-256-PLUS.
 - **[RFC7845]** Ogg Encapsulation for the Opus Audio Codec (channel mappings
   and multistream packing).
+- **[RFC8032]** Edwards-Curve Digital Signature Algorithm (EdDSA) (Ed25519).
 - **[RFC8174]** Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words.
 - **[RFC8265]** Preparation, Enforcement, and Comparison of Internationalized
   Strings Representing Usernames and Passwords (PRECIS).
@@ -314,6 +319,7 @@ greasing, as in HTTP/3.
 
 - **[RFC6143]** The Remote Framebuffer Protocol (VNC).
 - **[RFC9114]** HTTP/3 (stream types, extensibility and greasing patterns).
+- **[RFC9298]** Proxying UDP in HTTP (the tunnelling that gateways resemble).
 - **[RFC9330]** Low Latency, Low Loss, and Scalable Throughput (L4S).
 - **[AV1-RTP]** Alliance for Open Media, *RTP Payload Format for AV1*.
 - **[BT1359]** ITU-R BT.1359, *Relative timing of sound and vision for

@@ -48,6 +48,9 @@ impl AuthMethod {
     /// `PAIRING`: a four-digit code the host shows, which the client's user
     /// types (Section 4.4.9).
     pub const PAIRING: Self = Self(VarInt::from_u32(0x06));
+    /// `TOTP`: a time-based one-time password from an authenticator app, as
+    /// a second factor (Section 4.4.10).
+    pub const TOTP: Self = Self(VarInt::from_u32(0x09));
 }
 
 /// The outcome of an authentication attempt (Section 4.4.1).
@@ -60,6 +63,9 @@ pub enum AuthStatus {
     FailedRetry = 0x01,
     /// The attempt failed; the host will close the connection.
     FailedFinal = 0x02,
+    /// The attempt succeeded, and the user must also authenticate with
+    /// another method (Section 4.4.1).
+    NextFactor = 0x03,
 }
 
 impl From<AuthStatus> for VarInt {
@@ -76,6 +82,7 @@ impl TryFrom<VarInt> for AuthStatus {
             0x00 => Ok(Self::Success),
             0x01 => Ok(Self::FailedRetry),
             0x02 => Ok(Self::FailedFinal),
+            0x03 => Ok(Self::NextFactor),
             _ => Err(WireError::InvalidValue { field: "Status" }),
         }
     }
@@ -457,6 +464,7 @@ mod tests {
             AuthStatus::Success,
             AuthStatus::FailedRetry,
             AuthStatus::FailedFinal,
+            AuthStatus::NextFactor,
         ] {
             let result = AuthResult {
                 status,
@@ -470,7 +478,7 @@ mod tests {
     /// An unknown authentication status is an error.
     #[test]
     fn unknown_auth_status() {
-        let mut reader = Reader::new(&[0x03, 0x00, 0x00]);
+        let mut reader = Reader::new(&[0x04, 0x00, 0x00]);
         assert_eq!(
             AuthResult::decode(&mut reader),
             Err(WireError::InvalidValue { field: "Status" })

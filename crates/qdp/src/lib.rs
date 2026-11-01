@@ -28,6 +28,7 @@
 
 pub mod auth;
 pub mod discovery;
+pub mod gateway;
 pub mod hid;
 pub mod input;
 pub mod message;

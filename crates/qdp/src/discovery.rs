@@ -30,7 +30,7 @@ const PAIR_OFFERED: &str = "1";
 const ALPN_SEPARATOR: char = ',';
 
 /// The length of a key pin, in bytes.
-const PIN_LENGTH: usize = 32;
+pub const PIN_LENGTH: usize = 32;
 
 /// Whether a host offers the `PAIRING` method (Section 4.4.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -134,6 +134,28 @@ every message. The host ends the attempt with `AUTH_RESULT`:
 | 0x00 | `SUCCESS` | The client is authenticated; both endpoints enter `CONFIGURING`. |
 | 0x01 | `FAILED_RETRY` | The attempt failed; the client may start another attempt. |
 | 0x02 | `FAILED_FINAL` | The attempt failed; the host will close the connection. |
+| 0x03 | `NEXT_FACTOR` | The attempt succeeded, and the user must also authenticate with another method. |
+
+A host MAY require more than one factor, for example a password or the client's
+key, then a one-time password ([Section 4.4.10](#4410-totp-0x09)). It then answers
+an attempt that succeeded, but is not the last factor, with `NEXT_FACTOR`, whose
+Auth Data lists the methods the next attempt may use:
+
+```
+NEXT_FACTOR Auth Data {
+  Method Count (i),
+  Auth Method (i) ...,
+  [Enrollment (String)],
+}
+```
+
+The client starts the next attempt with one of them, on the same connection, and
+the session state stays `AUTHENTICATING` until an attempt ends with `SUCCESS`.
+Enrollment is present only to enroll a one-time password secret
+([Section 4.4.10](#4410-totp-0x09)). A failed attempt at a later factor starts the
+user over at the first, and counts as one failed attempt toward the limits below.
+Pipelined configuration is discarded after `NEXT_FACTOR` as after a failure
+([Section 4.4.6](#446-pipelining)).
 
 `Reason` is a human-readable explanation of at most 255 bytes, and SHOULD be the
 same for every kind of failure, so that it does not reveal whether a user name
@@ -377,6 +399,45 @@ The client:
   and SHOULD authenticate later connections to the host with `CLIENT_CERTIFICATE`;
 - keeps its private key in the platform's protected storage where it can
   ([Section 11.2](11-security.md#112-client-authentication)).
+
+### 4.4.10 TOTP (0x09)
+
+A time-based one-time password [RFC6238] from an authenticator app on the user's
+phone, as a second factor after one that identifies the user, for example with
+`PASSWORD`, `CLIENT_CERTIFICATE` or a gateway's directory password
+([Section 13.4](13-gateway.md#134-authentication)). A host or gateway offers
+`TOTP` only in `NEXT_FACTOR`, never as the first factor. `AUTH_START` carries the
+code's ASCII digits as Auth Data, and the host answers with `AUTH_RESULT`
+directly.
+
+Inside a private network a second factor is optional: a host MAY require `TOTP`,
+as its administrator chooses. At the network's edge it is not: gateways always
+require it ([Section 13.4](13-gateway.md#134-authentication)), and a host that
+accepts connections from the internet, for example through a forwarded port,
+SHOULD require `TOTP` of clients connecting from outside its local networks,
+while it MAY let clients on them authenticate with one factor.
+
+Codes follow the parameters every common authenticator app supports: 6 digits,
+computed with HMAC-SHA-1 [RFC4226] over 30-second steps counted from the Unix
+epoch, from a secret of at least 20 random bytes. The verifier:
+
+- accepts the code of the current step and of the step before and after, to allow
+  for clock skew, and compares codes in constant time;
+- MUST NOT accept a code of a step at or before the last step it accepted for the
+  same user, so that a code someone else saw cannot be used again;
+- keeps the secrets where only it can read them, as they let anyone make the
+  user's codes, and lets administrators reset a user's secret.
+
+**Enrollment.** A verifier MAY let a user without a secret enroll one as they
+authenticate. Its `NEXT_FACTOR` result then names `TOTP` and carries Enrollment:
+a `otpauth://totp/` URI naming the issuer and the user, with the new secret in
+base32 [RFC4648] and the algorithm, digits and period above, which the client shows
+as a QR code and as text for the user's authenticator app. The next attempt's code
+proves that the app holds the secret; the verifier keeps the secret only once a
+code is accepted, and offers no enrollment to a user who has one. Because
+enrollment lets whoever passed the first factor choose the second, verifiers
+SHOULD offer it only where that is acceptable, for example while an organization
+rolls out second factors, or once after an administrator reset the user's secret.
 
 ## 4.5 Configuration
 
