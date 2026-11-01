@@ -652,12 +652,10 @@ fn play(
         drop(device);
         match signal {
             Some(PlayerSignal::DeviceStopped(error)) => {
-                // Usually the system's output changed, as when headphones
-                // connect: playback moves to the new one.
-                info!(
-                    reason = error,
+                warn!(
+                    error,
                     device = output.description(),
-                    "audio playback moves to the system's current output"
+                    "audio playback stopped; starting it again on the system's output"
                 );
                 // The device may be gone a moment, and report its end more
                 // than once.
