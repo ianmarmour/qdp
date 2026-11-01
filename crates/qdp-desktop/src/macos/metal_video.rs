@@ -1,6 +1,8 @@
-//! Showing a client's video in a window with Metal: each frame's planes are
-//! uploaded as textures, and the GPU converts their colours and scales them
-//! into the window in one pass, rather than the processor doing both.
+//! Showing a client's video in a window with Metal: the GPU converts each
+//! picture's colours and scales it into the window in one pass, rather than
+//! the processor doing both. A picture VideoToolbox decoded is drawn from
+//! its own pixel buffer, whose planes Core Video shows Metal as textures,
+//! without a copy; a picture in memory has its planes uploaded as textures.
 //!
 //! A `CAMetalLayer` is added over the layer of the window's view, as
 //! softbuffer adds its own, and kept to the view's size. The black bars
@@ -9,6 +11,7 @@
 //! wants, since a ProMotion display otherwise may not refresh faster than
 //! 60 Hz for it.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -16,8 +19,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::NSView;
-use objc2_core_foundation::CGSize;
+use objc2_core_foundation::{CFRetained, CGSize};
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
+use objc2_core_video::{
+    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
+    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidthOfPlane, kCVReturnSuccess,
+};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSString};
 use objc2_metal::{
     MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
@@ -30,12 +37,12 @@ use objc2_metal::{
 use objc2_quartz_core::{
     CADisplayLink, CAFrameRateRange, CALayer, CAMetalDrawable, CAMetalLayer, CATransaction,
 };
-use qdp_codec::Yuv420Frame;
-use tracing::debug;
+use qdp_codec::{DecodedPicture, PixelBufferPicture, Yuv420Frame};
+use tracing::{debug, warn};
 
 /// The shaders: a quad placed by a rectangle, the picture's colours from its
-/// three planes, and an overlay image. Their names start with `qdp_`, since
-/// Metal reserves some plain ones, such as `quad`.
+/// three planes or from NV12's two, and an overlay image. Their names start
+/// with `qdp_`, since Metal reserves some plain ones, such as `quad`.
 ///
 /// The picture is limited-range BT.709 YUV 4:2:0, the format QDP's standard
 /// dynamic range streams use; the coefficients are those of the processor's
@@ -58,6 +65,15 @@ vertex Corner qdp_quad(uint index [[vertex_id]], constant float4 &rect [[buffer(
     return corner;
 }
 
+// Limited-range BT.709 luma and chroma, as sampled, to RGB.
+static float4 qdp_bt709(float luma, float blue, float red) {
+    float y = (luma * 255.0 - 16.0) / 219.0;
+    float cb = (blue * 255.0 - 128.0) / 224.0;
+    float cr = (red * 255.0 - 128.0) / 224.0;
+    float3 rgb = float3(y + 1.5748 * cr, y - 0.1873 * cb - 0.4681 * cr, y + 1.8556 * cb);
+    return float4(saturate(rgb), 1.0);
+}
+
 fragment float4 qdp_picture(
     Corner corner [[stage_in]],
     texture2d<float> luma [[texture(0)]],
@@ -65,11 +81,25 @@ fragment float4 qdp_picture(
     texture2d<float> red [[texture(2)]],
     sampler bilinear [[sampler(0)]]
 ) {
-    float y = (luma.sample(bilinear, corner.coordinate).r * 255.0 - 16.0) / 219.0;
-    float cb = (blue.sample(bilinear, corner.coordinate).r * 255.0 - 128.0) / 224.0;
-    float cr = (red.sample(bilinear, corner.coordinate).r * 255.0 - 128.0) / 224.0;
-    float3 rgb = float3(y + 1.5748 * cr, y - 0.1873 * cb - 0.4681 * cr, y + 1.8556 * cb);
-    return float4(saturate(rgb), 1.0);
+    return qdp_bt709(
+        luma.sample(bilinear, corner.coordinate).r,
+        blue.sample(bilinear, corner.coordinate).r,
+        red.sample(bilinear, corner.coordinate).r
+    );
+}
+
+// The part of the textures shown, as fractions of their width and height,
+// leaves out a decoder's padding.
+fragment float4 qdp_nv12(
+    Corner corner [[stage_in]],
+    texture2d<float> luma [[texture(0)]],
+    texture2d<float> chroma [[texture(1)]],
+    sampler bilinear [[sampler(0)]],
+    constant float2 &extent [[buffer(0)]]
+) {
+    float2 at = corner.coordinate * extent;
+    float2 cbcr = chroma.sample(bilinear, at).rg;
+    return qdp_bt709(luma.sample(bilinear, at).r, cbcr.x, cbcr.y);
 }
 
 fragment float4 qdp_overlay(
@@ -100,6 +130,18 @@ const RGBA_BYTES: usize = 4;
 /// The sets of plane textures frames are uploaded into in turn, so that a
 /// frame is never written into textures the GPU may still be drawing from.
 const PLANE_SETS: usize = 3;
+
+/// The pictures in pixel buffers kept after they are shown, each with its
+/// textures, so that none is released, and its buffer decoded into again,
+/// while drawings of it may still be on the GPU: one more than the
+/// drawings a layer has in flight.
+const PIXEL_BUFFER_PICTURES: usize = PLANE_SETS + 1;
+
+/// The luma plane of an NV12 pixel buffer.
+const LUMA_PLANE: usize = 0;
+
+/// The interleaved chroma plane of an NV12 pixel buffer.
+const CHROMA_PLANE: usize = 1;
 
 /// A rectangle in the drawable's pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -147,6 +189,32 @@ struct Planes {
     red: SizedTexture,
 }
 
+/// A picture in a pixel buffer, with the textures that show Metal its
+/// planes.
+struct PixelBufferTextures {
+    /// The picture, kept so that its buffer is not decoded into again while
+    /// the textures show it.
+    _picture: PixelBufferPicture,
+    /// Core Video's textures, kept so that their Metal textures stay valid.
+    _planes: [CFRetained<CVMetalTexture>; 2],
+    /// The luma plane.
+    luma: Retained<ProtocolObject<dyn MTLTexture>>,
+    /// The interleaved chroma plane.
+    chroma: Retained<ProtocolObject<dyn MTLTexture>>,
+    /// The part of the textures shown, as fractions of their width and
+    /// height.
+    extent: [f32; 2],
+}
+
+/// Which picture is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    /// The one uploaded into the newest set of plane textures.
+    Uploaded,
+    /// The newest one in a pixel buffer.
+    PixelBuffer,
+}
+
 /// The overlay's texture and the pixels it holds.
 struct OverlayTexture {
     /// The texture.
@@ -192,8 +260,10 @@ pub struct MetalVideo {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// The queue the drawing goes through.
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    /// Draws the picture from its planes.
+    /// Draws the picture from its three planes.
     picture: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Draws the picture from NV12's two planes.
+    nv12: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Draws the overlay, blended.
     overlay: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Samples the textures bilinearly.
@@ -202,6 +272,15 @@ pub struct MetalVideo {
     plane_sets: Vec<Planes>,
     /// The set holding the newest frame, once one arrived.
     newest: Option<usize>,
+    /// Shows Metal the planes of pixel buffers, if Core Video can.
+    texture_cache: Option<CFRetained<CVMetalTextureCache>>,
+    /// The latest pictures in pixel buffers, the newest last.
+    pixel_buffers: VecDeque<PixelBufferTextures>,
+    /// Which picture is shown, once one arrived.
+    shown: Option<Shown>,
+    /// Whether a pixel buffer could not be shown to Metal, which is said
+    /// once.
+    import_failed: bool,
     /// The overlay's texture, once one was drawn.
     overlay_texture: Option<OverlayTexture>,
     /// The display link that declares the frame rates wanted, where macOS
@@ -240,6 +319,8 @@ impl MetalVideo {
             .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
             .map_err(|error| format!("cannot compile the video shaders: {error}"))?;
         let picture = pipeline(&device, &library, "qdp_picture", Blending::Opaque)?;
+        let nv12 = pipeline(&device, &library, "qdp_nv12", Blending::Opaque)?;
+        let texture_cache = texture_cache(&device);
         let overlay = pipeline(&device, &library, "qdp_overlay", Blending::Alpha)?;
         let sampler = linear_sampler(&device)?;
 
@@ -275,14 +356,69 @@ impl MetalVideo {
             device,
             queue,
             picture,
+            nv12,
             overlay,
             sampler,
             plane_sets: Vec::new(),
             newest: None,
+            texture_cache,
+            pixel_buffers: VecDeque::new(),
+            shown: None,
+            import_failed: false,
             overlay_texture: None,
             frame_rate_link,
             _frame_rate_target: frame_rate_target,
         })
+    }
+
+    /// Takes `picture` as the one drawn from now on: drawn from its pixel
+    /// buffer where it has one, and uploaded otherwise.
+    pub fn take(&mut self, picture: DecodedPicture) {
+        match picture {
+            DecodedPicture::Memory(frame) => self.upload(&frame),
+            DecodedPicture::PixelBuffer(picture) => {
+                let imported = self
+                    .texture_cache
+                    .as_deref()
+                    .ok_or_else(|| "Core Video cannot show Metal pixel buffers".to_owned())
+                    .and_then(|cache| plane_textures(cache, picture.pixel_buffer()));
+                match imported {
+                    Ok((planes, luma, chroma)) => {
+                        let (width, height) = picture.visible_size();
+                        let extent = [
+                            width as f32 / luma.width().max(1) as f32,
+                            height as f32 / luma.height().max(1) as f32,
+                        ];
+                        self.pixel_buffers.push_back(PixelBufferTextures {
+                            _picture: picture,
+                            _planes: planes,
+                            luma,
+                            chroma,
+                            extent,
+                        });
+                        while self.pixel_buffers.len() > PIXEL_BUFFER_PICTURES {
+                            self.pixel_buffers.pop_front();
+                        }
+                        if let Some(cache) = &self.texture_cache {
+                            // Releases the textures of pictures no longer
+                            // kept.
+                            cache.flush(0);
+                        }
+                        self.shown = Some(Shown::PixelBuffer);
+                    }
+                    Err(error) => {
+                        if !self.import_failed {
+                            self.import_failed = true;
+                            warn!(%error, "copying decoded pictures to draw them");
+                        }
+                        match picture.to_memory() {
+                            Ok(frame) => self.upload(&frame),
+                            Err(error) => warn!(%error, "cannot read the decoded picture"),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Takes `frame` as the picture drawn from now on.
@@ -317,6 +453,7 @@ impl MetalVideo {
         fill(&planes.blue, frame.u(), 1);
         fill(&planes.red, frame.v(), 1);
         self.newest = Some(next);
+        self.shown = Some(Shown::Uploaded);
     }
 
     /// Draws the picture at `picture` and `overlay` over it in a drawable of
@@ -361,7 +498,30 @@ impl MetalVideo {
             .renderCommandEncoderWithDescriptor(&pass)
             .ok_or_else(|| "cannot encode the drawing".to_owned())?;
         let planes = self.newest.and_then(|newest| self.plane_sets.get(newest));
-        if let (Some(rect), Some(planes)) = (picture, planes) {
+        let pixel_buffer = self.pixel_buffers.back();
+        if let (Some(rect), Some(Shown::PixelBuffer), Some(textures)) =
+            (picture, self.shown, pixel_buffer)
+        {
+            encoder.setRenderPipelineState(&self.nv12);
+            quad(&encoder, rect, size);
+            let extent = NonNull::from(&textures.extent).cast::<c_void>();
+            // SAFETY: the textures, sampler and extent are those the shader
+            // reads, at the indices it reads them from; the extent is the
+            // `float2` it reads, copied during the call.
+            unsafe {
+                encoder.setFragmentTexture_atIndex(Some(&textures.luma), 0);
+                encoder.setFragmentTexture_atIndex(Some(&textures.chroma), 1);
+                encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
+                encoder.setFragmentBytes_length_atIndex(extent, size_of_val(&textures.extent), 0);
+                encoder.drawPrimitives_vertexStart_vertexCount(
+                    MTLPrimitiveType::TriangleStrip,
+                    0,
+                    QUAD_VERTICES,
+                );
+            }
+        } else if let (Some(rect), Some(Shown::Uploaded), Some(planes)) =
+            (picture, self.shown, planes)
+        {
             encoder.setRenderPipelineState(&self.picture);
             quad(&encoder, rect, size);
             // SAFETY: the textures and sampler are those the shader reads,
@@ -506,6 +666,80 @@ fn linear_sampler(
     device
         .newSamplerStateWithDescriptor(&descriptor)
         .ok_or_else(|| "cannot make a Metal sampler".to_owned())
+}
+
+/// Returns a cache that shows `device` the planes of pixel buffers as
+/// textures, or `None` if Core Video cannot make one.
+fn texture_cache(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Option<CFRetained<CVMetalTextureCache>> {
+    let mut cache: *mut CVMetalTextureCache = std::ptr::null_mut();
+    // SAFETY: no attributes are given, and `cache` is valid for writing.
+    let status =
+        unsafe { CVMetalTextureCache::create(None, None, device, None, NonNull::from(&mut cache)) };
+    if status != kCVReturnSuccess {
+        debug!(status, "Core Video cannot make a Metal texture cache");
+        return None;
+    }
+    // SAFETY: the cache was created above with a +1 count.
+    NonNull::new(cache).map(|cache| unsafe { CFRetained::from_raw(cache) })
+}
+
+/// A Metal texture.
+type MetalTexture = Retained<ProtocolObject<dyn MTLTexture>>;
+
+/// The textures showing Metal an NV12 pixel buffer's planes: Core Video's,
+/// then Metal's of the luma and the chroma plane.
+type PlaneTextures = ([CFRetained<CVMetalTexture>; 2], MetalTexture, MetalTexture);
+
+/// Returns textures showing `buffer`'s two planes, without copying them.
+fn plane_textures(
+    cache: &CVMetalTextureCache,
+    buffer: &CVPixelBuffer,
+) -> Result<PlaneTextures, String> {
+    let (luma_core, luma) = plane_texture(cache, buffer, LUMA_PLANE, MTLPixelFormat::R8Unorm)?;
+    let (chroma_core, chroma) =
+        plane_texture(cache, buffer, CHROMA_PLANE, MTLPixelFormat::RG8Unorm)?;
+    Ok(([luma_core, chroma_core], luma, chroma))
+}
+
+/// Returns a texture of `format` showing plane `plane` of `buffer`.
+fn plane_texture(
+    cache: &CVMetalTextureCache,
+    buffer: &CVPixelBuffer,
+    plane: usize,
+    format: MTLPixelFormat,
+) -> Result<(CFRetained<CVMetalTexture>, MetalTexture), String> {
+    let width = CVPixelBufferGetWidthOfPlane(buffer, plane);
+    let height = CVPixelBufferGetHeightOfPlane(buffer, plane);
+    let mut texture: *mut CVMetalTexture = std::ptr::null_mut();
+    // SAFETY: the buffer is an NV12 pixel buffer, whose plane `plane` has
+    // the size and a layout `format` matches; `texture` is valid for
+    // writing.
+    let status = unsafe {
+        CVMetalTextureCache::create_texture_from_image(
+            None,
+            cache,
+            buffer,
+            None,
+            format,
+            width,
+            height,
+            plane,
+            NonNull::from(&mut texture),
+        )
+    };
+    if status != kCVReturnSuccess {
+        return Err(format!(
+            "CVMetalTextureCacheCreateTextureFromImage failed with {status}"
+        ));
+    }
+    let texture = NonNull::new(texture).ok_or("Core Video made no texture")?;
+    // SAFETY: the texture was created above with a +1 count.
+    let texture = unsafe { CFRetained::from_raw(texture) };
+    let metal =
+        CVMetalTextureGetTexture(&texture).ok_or("Core Video's texture has no Metal one")?;
+    Ok((texture, metal))
 }
 
 /// Returns a texture of `format` and `size` that shaders read and the

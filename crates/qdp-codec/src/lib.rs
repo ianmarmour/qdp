@@ -34,6 +34,7 @@ mod frame;
 mod headers;
 mod level;
 mod obu;
+mod picture;
 mod process_decoder;
 mod sequence;
 #[cfg(target_os = "linux")]
@@ -59,10 +60,13 @@ pub use encoder::{
 pub use frame::{Rgb32Order, Yuv420Frame};
 pub use level::{NO_LEVEL, TileCount, frame_rate_within, level_for};
 pub use obu::{Obu, ObuType, parse_obus, to_qdp_temporal_unit};
+pub use picture::DecodedPicture;
 pub use process_decoder::{DecoderCommand, ProcessDecoder, serve_decoder, serve_decoder_on_stdio};
 pub use sequence::{ColorDescription, SequenceHeader};
 #[cfg(target_os = "linux")]
 pub use vaapi::VaapiEncoder;
+#[cfg(target_os = "macos")]
+pub use videotoolbox::PixelBufferPicture;
 
 /// An error from encoding or decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

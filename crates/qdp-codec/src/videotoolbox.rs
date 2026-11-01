@@ -1,6 +1,11 @@
 //! Hardware AV1 decoding with VideoToolbox, on Macs whose GPU decodes AV1
 //! (Apple M3 and later).
 //!
+//! Pictures stay in the pixel buffers VideoToolbox decodes them into, which
+//! are IOSurface-backed and Metal-compatible, so that a window can draw them
+//! without a copy; they are copied into memory only for whoever needs them
+//! there.
+//!
 //! VideoToolbox is a C interface, so this module uses `unsafe`: each block
 //! states the contract it relies on, from Apple's documentation.
 
@@ -9,7 +14,9 @@
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFNumber, CFRetained, CFString};
+use objc2_core_foundation::{
+    CFBoolean, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionCreate,
     kCMBlockBufferAssureMemoryNowFlag,
@@ -19,17 +26,20 @@ use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane,
     CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane,
     CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey,
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVReturnSuccess,
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
     VTDecompressionSession, VTIsHardwareDecodeSupported,
-    VTRegisterSupplementalVideoDecoderIfAvailable,
+    VTRegisterSupplementalVideoDecoderIfAvailable, VTSessionSetProperty,
+    kVTDecompressionPropertyKey_RealTime,
     kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
 };
+use tracing::debug;
 
-use crate::{CodecError, SequenceHeader, VideoDecoder, Yuv420Frame};
+use crate::{CodecError, DecodedPicture, SequenceHeader, VideoDecoder, Yuv420Frame};
 
 /// How the decoder describes itself.
 const DESCRIPTION: &str = "VideoToolbox (hardware)";
@@ -94,8 +104,73 @@ impl VideoToolboxDecoder {
     }
 }
 
-impl VideoDecoder for VideoToolboxDecoder {
-    fn decode(&mut self, temporal_unit: &[u8]) -> Result<Yuv420Frame, CodecError> {
+/// A picture in a pixel buffer VideoToolbox decoded into: NV12, in
+/// IOSurface-backed memory the GPU reads directly.
+pub struct PixelBufferPicture {
+    /// The pixel buffer.
+    buffer: CFRetained<CVPixelBuffer>,
+    /// The width and height shown, which may be less than the buffer's.
+    visible: (usize, usize),
+}
+
+// SAFETY: Core Video pixel buffers are reference counted atomically and may
+// be used from any thread; the decoder no longer writes one it returned.
+unsafe impl Send for PixelBufferPicture {}
+
+impl std::fmt::Debug for PixelBufferPicture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PixelBufferPicture")
+            .field("visible", &self.visible)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PixelBufferPicture {
+    /// Takes a decoded NV12 pixel buffer, all of it shown.
+    fn new(buffer: CFRetained<CVPixelBuffer>) -> Result<Self, CodecError> {
+        if CVPixelBufferGetPixelFormatType(&buffer)
+            != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        {
+            return Err(CodecError::UnsupportedFormat);
+        }
+        let visible = (
+            CVPixelBufferGetWidthOfPlane(&buffer, LUMA_PLANE),
+            CVPixelBufferGetHeightOfPlane(&buffer, LUMA_PLANE),
+        );
+        Ok(Self { buffer, visible })
+    }
+
+    /// Returns the pixel buffer: a luma plane, then a plane of interleaved
+    /// Cb and Cr, in limited-range BT.709.
+    pub fn pixel_buffer(&self) -> &CVPixelBuffer {
+        &self.buffer
+    }
+
+    /// Returns the width and height shown, from the buffer's top-left
+    /// corner, which may be less than the buffer's own.
+    pub fn visible_size(&self) -> (usize, usize) {
+        self.visible
+    }
+
+    /// Returns the picture with at most `width × height` pixels shown.
+    pub fn cropped(self, width: usize, height: usize) -> Self {
+        let visible = (self.visible.0.min(width), self.visible.1.min(height));
+        Self { visible, ..self }
+    }
+
+    /// Copies the shown picture into memory.
+    pub fn to_memory(&self) -> Result<Yuv420Frame, CodecError> {
+        Ok(copy_pixel_buffer(&self.buffer)?.cropped(self.visible.0, self.visible.1))
+    }
+}
+
+impl VideoToolboxDecoder {
+    /// Decodes one temporal unit into a pixel buffer.
+    fn decode_buffer(
+        &mut self,
+        temporal_unit: &[u8],
+    ) -> Result<CFRetained<CVPixelBuffer>, CodecError> {
         if let Some(header) = SequenceHeader::find(temporal_unit)? {
             let current = self
                 .session
@@ -111,6 +186,20 @@ impl VideoDecoder for VideoToolboxDecoder {
             .as_ref()
             .ok_or(CodecError::MalformedBitstream("no sequence header yet"))?;
         session.decode(temporal_unit)
+    }
+}
+
+impl VideoDecoder for VideoToolboxDecoder {
+    fn decode(&mut self, temporal_unit: &[u8]) -> Result<Yuv420Frame, CodecError> {
+        let buffer = self.decode_buffer(temporal_unit)?;
+        copy_pixel_buffer(&buffer)
+    }
+
+    fn decode_picture(&mut self, temporal_unit: &[u8]) -> Result<DecodedPicture, CodecError> {
+        let buffer = self.decode_buffer(temporal_unit)?;
+        Ok(DecodedPicture::PixelBuffer(PixelBufferPicture::new(
+            buffer,
+        )?))
     }
 
     fn description(&self) -> &str {
@@ -176,9 +265,22 @@ impl Session {
         let specification = CFDictionary::from_slices(&[require_hardware], &[CFBoolean::new(true)]);
         let pixel_format =
             CFNumber::new_i32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange as i32);
-        // SAFETY: the attribute key is an immutable string constant.
-        let pixel_format_key = unsafe { kCVPixelBufferPixelFormatTypeKey };
-        let attributes = CFDictionary::from_slices(&[pixel_format_key], &[&*pixel_format]);
+        let no_properties = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
+        // SAFETY: the attribute keys are immutable string constants.
+        let keys = unsafe {
+            [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferMetalCompatibilityKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+            ]
+        };
+        // NV12 pixel buffers in IOSurfaces, which Metal draws from directly.
+        let values: [&CFType; 3] = [
+            (*pixel_format).as_ref(),
+            CFBoolean::new(true).as_ref(),
+            (*no_properties).as_ref(),
+        ];
+        let attributes = CFDictionary::from_slices(&keys, &values);
         let callback = VTDecompressionOutputCallbackRecord {
             decompressionOutputCallback: Some(output_callback),
             decompressionOutputRefCon: ptr::null_mut(),
@@ -202,16 +304,32 @@ impl Session {
         }
         let decompression = NonNull::new(decompression)
             .ok_or_else(|| unavailable("VTDecompressionSessionCreate", status))?;
+        // SAFETY: the session was created above with a +1 count.
+        let decompression = unsafe { CFRetained::from_raw(decompression) };
+        // Decoding in real time keeps the decoder from saving power at the
+        // cost of latency, as it otherwise does when frames come slowly.
+        // SAFETY: the session is a VideoToolbox session, the key one of its
+        // properties, and the value the boolean it takes.
+        let status = unsafe {
+            VTSessionSetProperty(
+                (*decompression).as_ref(),
+                kVTDecompressionPropertyKey_RealTime,
+                Some(CFBoolean::new(true).as_ref()),
+            )
+        };
+        if status != NO_ERROR {
+            debug!(status, "the decoder cannot be told to decode in real time");
+        }
         Ok(Self {
             sequence_header: header.obu().to_vec(),
             format,
-            // SAFETY: the session was created above with a +1 count.
-            decompression: unsafe { CFRetained::from_raw(decompression) },
+            decompression,
         })
     }
 
-    /// Decodes one temporal unit and returns its picture.
-    fn decode(&self, temporal_unit: &[u8]) -> Result<Yuv420Frame, CodecError> {
+    /// Decodes one temporal unit and returns the pixel buffer it decoded
+    /// into.
+    fn decode(&self, temporal_unit: &[u8]) -> Result<CFRetained<CVPixelBuffer>, CodecError> {
         let length = temporal_unit.len();
         let source = NonNull::new(temporal_unit.as_ptr().cast_mut())
             .filter(|_| length > 0)
@@ -290,8 +408,7 @@ impl Session {
         unsafe { self.decompression.wait_for_asynchronous_frames() };
         check(status, "VTDecompressionSessionDecodeFrame")?;
         check(decoded.status, "VTDecompressionOutputCallback")?;
-        let image = decoded.image.ok_or(CodecError::NoPicture)?;
-        copy_pixel_buffer(&image)
+        decoded.image.ok_or(CodecError::NoPicture)
     }
 }
 

@@ -269,8 +269,10 @@ impl Yuv420Frame {
     /// Copies an NV12 picture, a luma plane of `luma_stride` bytes per row
     /// and a plane of interleaved Cb and Cr of `chroma_stride` bytes per row,
     /// as hardware decoders produce it, into a frame. Returns `None` if the
-    /// planes are too short for `width × height` pixels. Large pictures are
-    /// copied in bands of rows on several threads.
+    /// planes are too short for `width × height` pixels. The copy runs on
+    /// the calling thread alone: pictures are copied only where something
+    /// needs them in memory, and the processor's other cores are better
+    /// left to the network and the window.
     pub fn from_nv12(
         width: usize,
         height: usize,
@@ -293,35 +295,21 @@ impl Yuv420Frame {
             u: vec![0; chroma_width * chroma_height],
             v: vec![0; chroma_width * chroma_height],
         };
-        let chroma_rows_per_band = chroma_height.div_ceil(workers(width * height));
-        std::thread::scope(|scope| {
-            let bands = frame
-                .y
-                .chunks_mut(2 * chroma_rows_per_band * width)
-                .zip(frame.u.chunks_mut(chroma_rows_per_band * chroma_width))
-                .zip(frame.v.chunks_mut(chroma_rows_per_band * chroma_width));
-            for (index, ((y, u), v)) in bands.enumerate() {
-                let first_chroma_row = index * chroma_rows_per_band;
-                let luma = &luma[2 * first_chroma_row * luma_stride..];
-                let chroma = &chroma[first_chroma_row * chroma_stride..];
-                scope.spawn(move || {
-                    for (target, source) in y.chunks_mut(width).zip(luma.chunks(luma_stride)) {
-                        target.copy_from_slice(&source[..width]);
-                    }
-                    let rows = u
-                        .chunks_mut(chroma_width)
-                        .zip(v.chunks_mut(chroma_width))
-                        .zip(chroma.chunks(chroma_stride));
-                    for ((u, v), source) in rows {
-                        let pairs = source[..2 * chroma_width].chunks_exact(2);
-                        for ((u, v), pair) in u.iter_mut().zip(v.iter_mut()).zip(pairs) {
-                            *u = pair[0];
-                            *v = pair[1];
-                        }
-                    }
-                });
+        for (target, source) in frame.y.chunks_mut(width).zip(luma.chunks(luma_stride)) {
+            target.copy_from_slice(&source[..width]);
+        }
+        let rows = frame
+            .u
+            .chunks_mut(chroma_width)
+            .zip(frame.v.chunks_mut(chroma_width))
+            .zip(chroma.chunks(chroma_stride));
+        for ((u, v), source) in rows {
+            let pairs = source[..2 * chroma_width].chunks_exact(2);
+            for ((u, v), pair) in u.iter_mut().zip(v.iter_mut()).zip(pairs) {
+                *u = pair[0];
+                *v = pair[1];
             }
-        });
+        }
         Some(frame)
     }
 
@@ -501,10 +489,9 @@ mod tests {
     use super::*;
 
     /// An NV12 picture is copied plane by plane, padding left out and
-    /// chroma split, for sizes large enough to copy in bands and odd enough
-    /// not to split evenly.
+    /// chroma split, for an odd size.
     #[test]
-    fn copies_nv12_in_bands() {
+    fn copies_nv12() {
         let (width, height) = (1283, 1081);
         let (chroma_width, chroma_height) = chroma_size(width, height);
         let (luma_stride, chroma_stride) = (1344, 1344);

@@ -5,7 +5,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use qdp_codec::Yuv420Frame;
+use qdp_codec::{DecodedPicture, Yuv420Frame};
 use qdp_runtime::{FrameInfo, FrameSink, SinkControl};
 use tracing::{info, warn};
 
@@ -122,7 +122,7 @@ impl CliSink {
     }
 
     /// Logs the statistics of the last interval if it has ended.
-    fn log_stats(&mut self, now: Instant, frame: &Yuv420Frame) {
+    fn log_stats(&mut self, now: Instant, (width, height): (usize, usize)) {
         let elapsed = now.saturating_duration_since(self.window.started);
         if elapsed < STATS_INTERVAL {
             return;
@@ -139,8 +139,8 @@ impl CliSink {
             fps = format!("{fps:.1}"),
             latency_ms = latency.map(|latency| format!("{:.1}", latency.as_secs_f64() * 1000.0)),
             decode_ms = format!("{:.1}", decode_time.as_secs_f64() * 1000.0),
-            width = frame.width(),
-            height = frame.height(),
+            width,
+            height,
             total = self.frames,
             "receiving"
         );
@@ -151,7 +151,7 @@ impl CliSink {
 impl CliSink {
     /// Counts and logs a decoded frame, writes it to the output if there is
     /// one, and says whether to keep streaming.
-    pub fn record(&mut self, frame: &Yuv420Frame, info: FrameInfo) -> SinkControl {
+    pub fn record(&mut self, frame: &DecodedPicture, info: FrameInfo) -> SinkControl {
         self.frames += 1;
         self.window.frames += 1;
         if let Some(latency) = info.latency {
@@ -160,12 +160,17 @@ impl CliSink {
         }
         self.window.decode_time_sum += info.decode_time;
         if let Some(writer) = &mut self.output {
-            if let Err(error) = writer.write(frame) {
+            // A picture the GPU holds is copied out to be written.
+            let written = frame
+                .with_memory(|frame| writer.write(frame))
+                .map_err(io::Error::other)
+                .and_then(|written| written);
+            if let Err(error) = written {
                 warn!(%error, "writing the video failed; no more frames are written");
                 self.output = None;
             }
         }
-        self.log_stats(info.decoded_at, frame);
+        self.log_stats(info.decoded_at, frame.size());
         match self.frame_limit {
             Some(limit) if self.frames >= limit => SinkControl::Stop,
             _ => SinkControl::Continue,
@@ -174,7 +179,7 @@ impl CliSink {
 }
 
 impl FrameSink for CliSink {
-    fn present(&mut self, frame: Yuv420Frame, info: FrameInfo) -> SinkControl {
+    fn present(&mut self, frame: DecodedPicture, info: FrameInfo) -> SinkControl {
         self.record(&frame, info)
     }
 }

@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use qdp::video::DecodableFrame;
-use qdp_codec::{CodecError, VideoDecoder, Yuv420Frame};
+use qdp_codec::{CodecError, DecodedPicture, VideoDecoder};
 use tokio::sync::Notify;
 
 use crate::RuntimeError;
@@ -21,8 +21,8 @@ const THREAD_NAME: &str = "qdp-decoder";
 pub(crate) struct Decoded {
     /// The frame passed to the decoder.
     pub(crate) frame: DecodableFrame,
-    /// The picture, or the decoder's error.
-    pub(crate) picture: Result<Yuv420Frame, CodecError>,
+    /// The picture, where the decoder left it, or the decoder's error.
+    pub(crate) picture: Result<DecodedPicture, CodecError>,
     /// When decoding finished.
     pub(crate) decoded_at: Instant,
     /// How long the decoder took.
@@ -54,7 +54,7 @@ impl DecodeThread {
             .spawn(move || {
                 while let Ok(frame) = frames.recv() {
                     let started_at = Instant::now();
-                    let picture = decoder.decode(frame.temporal_unit());
+                    let picture = decoder.decode_picture(frame.temporal_unit());
                     let decoded_at = Instant::now();
                     let decoded = Decoded {
                         frame,
@@ -116,7 +116,9 @@ mod tests {
     use qdp::time::SessionClock;
     use qdp::video::{FrameKind, VideoReceiver, VideoSender};
     use qdp::wire::{Reader, VarInt};
-    use qdp_codec::{Av1Decoder, Av1Encoder, EncoderSettings, FASTEST_SPEED, KeyFrameRequest};
+    use qdp_codec::{
+        Av1Decoder, Av1Encoder, EncoderSettings, FASTEST_SPEED, KeyFrameRequest, Yuv420Frame,
+    };
 
     /// The test frame's side, in pixels.
     const SIDE: usize = 64;
@@ -170,7 +172,7 @@ mod tests {
         tokio::time::timeout(WAIT, wake.notified()).await.unwrap();
         let decoded = thread.try_result().unwrap().unwrap();
         let picture = decoded.picture.unwrap();
-        assert_eq!((picture.width(), picture.height()), (SIDE, SIDE));
+        assert_eq!(picture.size(), (SIDE, SIDE));
         assert_eq!(decoded.frame.frame_number.0.into_inner(), 1);
     }
 }
