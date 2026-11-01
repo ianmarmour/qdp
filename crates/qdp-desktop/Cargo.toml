@@ -74,6 +74,12 @@ objc2-screen-capture-kit.workspace = true
 [target.'cfg(any(target_os = "macos", windows, target_os = "android"))'.dependencies]
 cpal = { workspace = true, optional = true }
 
+# On Android, cpal's real-time feature opens AAudio streams in their
+# low-latency mode, which takes a few milliseconds a callback rather than the
+# 20 to 40 ms of the normal path, each of which the jitter buffer holds.
+[target.'cfg(target_os = "android")'.dependencies]
+cpal = { workspace = true, optional = true, features = ["realtime"] }
+
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
