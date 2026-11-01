@@ -541,7 +541,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, VideoArea {
         val otherMode = if (touch.mode == TouchMode.TRACKPAD) TouchMode.DIRECT else TouchMode.TRACKPAD
         val items = arrayOf(
             "Keyboard",
-            "Touch as ${otherMode.label.lowercase()}",
+            "Touch as ${getString(otherMode.label).lowercase()}",
             if (statsShown) "Hide statistics" else "Show statistics",
             "Disconnect",
         )

@@ -93,9 +93,9 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(8) })
 
         form.addView(heading("Stream"))
-        resolution = form.choice("Resolution", Resolution.entries.map { it.label }, settings.resolution.ordinal)
-        decoder = form.choice("Decoder", Decoder.entries.map { it.label }, settings.decoder.ordinal)
-        touchMode = form.choice("Touch", TouchMode.entries.map { it.label }, settings.touchMode.ordinal)
+        resolution = form.choice("Resolution", Resolution.entries.map { getString(it.label) }, settings.resolution.ordinal)
+        decoder = form.choice("Decoder", Decoder.entries.map { getString(it.label) }, settings.decoder.ordinal)
+        touchMode = form.choice("Touch", TouchMode.entries.map { getString(it.label) }, settings.touchMode.ordinal)
         showStats = CheckBox(this).apply {
             text = "Show statistics"
             isChecked = settings.showStats

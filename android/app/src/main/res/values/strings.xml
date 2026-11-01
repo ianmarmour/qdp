@@ -4,6 +4,54 @@ The app's words: second person, present tense, sentence case; buttons are
 verbs; errors give one cause and one next step. The UI says "computer";
 "host", "pin" and "token" appear only in Advanced.
 -->
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">QDP</string>
+
+    <!-- Shared actions. -->
+    <string name="action_cancel">Cancel</string>
+    <string name="action_back">Back</string>
+    <string name="action_copy">Copy</string>
+
+    <!-- Hosts screen. -->
+    <string name="action_settings">Settings</string>
+
+    <!-- Settings. -->
+    <string name="settings_stream">Stream</string>
+    <string name="settings_resolution">Resolution</string>
+    <string name="settings_resolution_screen">Matches this screen (%1$d×%2$d)</string>
+    <string name="settings_resolution_scaled">Streams at %1$d×%2$d, the shape of this screen</string>
+    <string name="resolution_screen">Screen</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="settings_microphone">Microphone</string>
+    <string name="settings_microphone_supporting">Send your voice to the computer</string>
+    <string name="settings_microphone_denied">Allow microphone access for QDP in system settings to use this.</string>
+    <string name="settings_controls">Controls</string>
+    <string name="settings_touch">Touch</string>
+    <string name="touch_trackpad">Trackpad</string>
+    <string name="touch_trackpad_supporting">Drag to move the pointer</string>
+    <string name="touch_direct">Direct touch</string>
+    <string name="touch_direct_supporting">Tap where you want to click</string>
+    <string name="settings_stats">Performance overlay</string>
+    <string name="settings_stats_supporting">Show frame rate and latency while you stream</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_wallpaper_colors">Match wallpaper colors</string>
+    <string name="settings_wallpaper_colors_supporting">Use colors from your wallpaper instead of QDP\'s</string>
+    <string name="settings_advanced">Advanced</string>
+    <string name="settings_decoder">Decoder</string>
+    <string name="decoder_auto">Auto</string>
+    <string name="decoder_auto_supporting">Recommended. Uses this device\'s video hardware when it can.</string>
+    <string name="decoder_hardware">Hardware</string>
+    <string name="decoder_hardware_supporting">Always uses this device\'s video hardware.</string>
+    <string name="decoder_software">Software</string>
+    <string name="decoder_software_supporting">Decodes on the processor. Uses more battery.</string>
+    <string name="settings_about">About this device</string>
+    <string name="settings_device_name">Name</string>
+    <string name="settings_device_pin">Device pin</string>
+    <string name="settings_device_pin_supporting" tools:ignore="TypographyDashes">For qdp serve --client-key</string>
+    <string name="settings_device_pin_unavailable">Unavailable on this device</string>
+    <string name="settings_version">Version</string>
+    <string name="copied">Copied</string>
 </resources>
