@@ -22,6 +22,10 @@ Usage:
   qdp pin [--identity DIR]     Print this host's key pin for clients
   qdp pin --client [--identity DIR]
                                Print this client's key pin for hosts
+  qdp clients [--identity DIR] List the clients that paired with this host
+  qdp clients remove WHICH [--identity DIR]
+                               Forget a paired client, by its name or the
+                               start of its key pin
   qdp help                     Show this help
 
 Serve options:
@@ -31,6 +35,9 @@ Serve options:
   --client-key HEX     Accept clients presenting the key HEX, from their
                        `qdp pin --client` (repeatable)
   --user NAME          Accept NAME with the password in QDP_PASSWORD
+  --pairing on|off     Let new clients pair by typing a four-digit code that
+                       this host shows in its log; paired clients are kept
+                       in the identity directory (default on)
   --source KIND        auto, screen or test-pattern (default auto: the screen,
                        or the test pattern if it cannot be captured)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
@@ -67,11 +74,17 @@ Serve options:
                        drops (default on)
 
 Connect options:
-  --pin HEX            The host's key pin, from `qdp pin` (required)
+  --pin HEX            The host's key pin, from `qdp pin` (default: the one
+                       remembered from pairing with HOST)
+  --pair               Pair with the host: type the four-digit code it shows,
+                       after which the host and its key are remembered
+  --name NAME          This device's name, which a host shows when pairing
+                       (default: this machine's name)
   --token TOKEN        Authenticate with TOKEN
   --user NAME          Authenticate as NAME with the password in QDP_PASSWORD
   --identity DIR       Directory holding this client's key, with which it
-                       authenticates when given neither --token nor --user
+                       authenticates when given neither --token nor --user,
+                       and the hosts it paired with
                        (default ./qdp-client-identity)
   --server-name NAME   Name sent in the TLS handshake (default qdp-host)
   --frames N           Disconnect after N frames
@@ -154,8 +167,44 @@ pub enum Command {
         /// Whose identity it is.
         role: Role,
     },
+    /// List or forget the clients that paired with the host.
+    Clients {
+        /// The directory of the host's identity.
+        identity: PathBuf,
+        /// What to do.
+        action: ClientsAction,
+    },
     /// Show the usage text.
     Help,
+}
+
+/// What `qdp clients` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientsAction {
+    /// List the paired clients.
+    List,
+    /// Forget the clients named, or whose pin starts with, the text.
+    Remove(String),
+}
+
+/// Whether the host lets new clients pair (Section 4.4.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PairingMode {
+    /// Clients may pair with a code the host shows.
+    On,
+    /// Clients may not pair.
+    Off,
+}
+
+/// How a client trusts the host's key (Section 11.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostTrust {
+    /// The key pin given.
+    Pinned(KeyPin),
+    /// The key pin remembered from pairing with the host's address.
+    Remembered,
+    /// Pairing, which authenticates the key and then remembers it.
+    Pair,
 }
 
 /// What the host streams.
@@ -174,6 +223,8 @@ pub enum SourceKind {
 pub struct ServeArgs {
     /// The address to listen on.
     pub listen: SocketAddr,
+    /// Whether new clients may pair.
+    pub pairing: PairingMode,
     /// The directory of the host's identity.
     pub identity: PathBuf,
     /// The accepted tokens.
@@ -277,8 +328,10 @@ pub enum Presentation {
 pub struct ConnectArgs {
     /// The host's address.
     pub address: SocketAddr,
-    /// The host's key pin.
-    pub pin: KeyPin,
+    /// How the host's key is trusted.
+    pub trust: HostTrust,
+    /// The device's name a host shows when pairing, if not the machine's.
+    pub device_name: Option<String>,
     /// The token to authenticate with.
     pub token: Option<String>,
     /// The user to authenticate as, with the password in `QDP_PASSWORD`.
@@ -449,6 +502,23 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
                 role,
             })
         }
+        Some("clients") => {
+            let mut identity = PathBuf::from(DEFAULT_IDENTITY_DIR);
+            let mut action = ClientsAction::List;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--identity" => identity = value("--identity", &mut arguments)?.into(),
+                    "remove" => {
+                        let which = arguments.next().ok_or_else(|| {
+                            error("clients remove needs a client's name or the start of its pin")
+                        })?;
+                        action = ClientsAction::Remove(which);
+                    }
+                    other => return Err(error(format!("unknown option: {other}"))),
+                }
+            }
+            Ok(Command::Clients { identity, action })
+        }
         Some("help" | "--help" | "-h") | None => Ok(Command::Help),
         Some(other) => Err(error(format!("unknown command: {other}"))),
     }
@@ -458,6 +528,7 @@ pub fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command
 fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs, ArgsError> {
     let mut serve = ServeArgs {
         listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
+        pairing: PairingMode::On,
         identity: PathBuf::from(DEFAULT_IDENTITY_DIR),
         tokens: Vec::new(),
         client_keys: Vec::new(),
@@ -520,6 +591,15 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                 }
                 serve.resumption = (seconds > 0).then(|| Duration::from_secs(seconds));
             }
+            "--pairing" => {
+                serve.pairing = match value("--pairing", &mut arguments)?.as_str() {
+                    "on" => PairingMode::On,
+                    "off" => PairingMode::Off,
+                    other => {
+                        return Err(error(format!("--pairing must be on or off, not {other}")));
+                    }
+                }
+            }
             "--match-display" => {
                 serve.match_display = match value("--match-display", &mut arguments)?.as_str() {
                     "on" => DisplayMatching::On,
@@ -552,9 +632,12 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
-    if serve.tokens.is_empty() && serve.user.is_none() && serve.client_keys.is_empty() {
+    let credentials =
+        !serve.tokens.is_empty() || serve.user.is_some() || !serve.client_keys.is_empty();
+    if serve.pairing == PairingMode::Off && !credentials {
         return Err(error(
-            "serve needs --token, --user or --client-key, or no client can connect",
+            "serve with --pairing off needs --token, --user or --client-key, or no client \
+             can connect",
         ));
     }
     if serve.fps == 0 {
@@ -616,9 +699,11 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
         .ok_or_else(|| error("connect needs the host's address, such as 192.0.2.7"))?;
     let address = resolve_address(&address)?;
     let mut pin = None;
+    let mut pair = false;
     let mut connect = ConnectArgs {
         address,
-        pin: KeyPin([0; PIN_HEX_LENGTH / 2]),
+        trust: HostTrust::Remembered,
+        device_name: None,
         token: None,
         user: None,
         identity: PathBuf::from(DEFAULT_CLIENT_IDENTITY_DIR),
@@ -638,6 +723,8 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--pin" => pin = Some(parse_pin(&value("--pin", &mut arguments)?)?),
+            "--pair" => pair = true,
+            "--name" => connect.device_name = Some(value("--name", &mut arguments)?),
             "--token" => connect.token = Some(value("--token", &mut arguments)?),
             "--user" => connect.user = Some(value("--user", &mut arguments)?),
             "--identity" => connect.identity = value("--identity", &mut arguments)?.into(),
@@ -678,10 +765,21 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             other => return Err(error(format!("unknown option: {other}"))),
         }
     }
-    connect.pin = pin.ok_or_else(|| error("connect needs --pin with the host's key pin"))?;
     if connect.token.is_some() && connect.user.is_some() {
         return Err(error("connect takes --token or --user, not both"));
     }
+    let credential = connect.token.is_some() || connect.user.is_some();
+    connect.trust = match (pin, pair) {
+        (Some(_), true) => return Err(error("connect takes --pin or --pair, not both")),
+        (None, true) if credential => {
+            return Err(error(
+                "--pair authenticates by itself, without --token or --user",
+            ));
+        }
+        (None, true) => HostTrust::Pair,
+        (Some(pin), false) => HostTrust::Pinned(pin),
+        (None, false) => HostTrust::Remembered,
+    };
     Ok(connect)
 }
 
@@ -773,7 +871,7 @@ mod tests {
         };
         assert_eq!(serve.gpu_capture, GpuCapture::Off);
         assert!(parse_line("serve --token abc --gpu-capture maybe").is_err());
-        assert!(parse_line("serve").is_err());
+        assert!(parse_line("serve --pairing off").is_err());
         let pin = "ab".repeat(PIN_HEX_LENGTH / 2);
         let Command::Serve(serve) = parse_line(&format!("serve --client-key {pin}")).unwrap()
         else {
@@ -798,6 +896,54 @@ mod tests {
         assert!(parse_line("serve --token a --size 0x5").is_err());
     }
 
+    /// Without --pin, `connect` uses the pin remembered from pairing, and
+    /// with --pair it pairs, which takes no other credential.
+    #[test]
+    fn connect_trusts_hosts() {
+        let trust = |line: &str| match parse_line(line) {
+            Ok(Command::Connect(connect)) => Ok(connect.trust),
+            Ok(other) => panic!("expected connect, got {other:?}"),
+            Err(error) => Err(error),
+        };
+        assert_eq!(trust("connect 192.0.2.7"), Ok(HostTrust::Remembered));
+        assert_eq!(trust("connect 192.0.2.7 --pair"), Ok(HostTrust::Pair));
+        let pin = "ab".repeat(32);
+        assert!(trust(&format!("connect 192.0.2.7 --pair --pin {pin}")).is_err());
+        assert!(trust("connect 192.0.2.7 --pair --token t").is_err());
+        let Ok(Command::Connect(connect)) = parse_line("connect 192.0.2.7 --pair --name Thor")
+        else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.device_name.as_deref(), Some("Thor"));
+    }
+
+    /// `serve` pairs unless told not to; `clients` lists, or removes one.
+    #[test]
+    fn pairing_options() {
+        let pairing = |line: &str| match parse_line(line).unwrap() {
+            Command::Serve(serve) => serve.pairing,
+            other => panic!("expected serve, got {other:?}"),
+        };
+        assert_eq!(pairing("serve"), PairingMode::On);
+        assert_eq!(pairing("serve --pairing off --token t"), PairingMode::Off);
+        assert!(parse_line("serve --pairing maybe").is_err());
+        assert_eq!(
+            parse_line("clients").unwrap(),
+            Command::Clients {
+                identity: PathBuf::from(DEFAULT_IDENTITY_DIR),
+                action: ClientsAction::List,
+            }
+        );
+        assert_eq!(
+            parse_line("clients remove Thor --identity id").unwrap(),
+            Command::Clients {
+                identity: PathBuf::from("id"),
+                action: ClientsAction::Remove("Thor".to_owned()),
+            }
+        );
+        assert!(parse_line("clients remove").is_err());
+    }
+
     /// `connect` needs an address, a pin and one credential.
     #[test]
     fn connect() {
@@ -809,7 +955,7 @@ mod tests {
             panic!("expected connect");
         };
         assert_eq!(connect.address.port(), 4433);
-        assert_eq!(connect.pin, KeyPin([0xab; 32]));
+        assert_eq!(connect.trust, HostTrust::Pinned(KeyPin([0xab; 32])));
         assert_eq!(connect.frames, Some(10));
         assert_eq!(connect.presentation, Presentation::Window);
         let Command::Connect(connect) = parse_line(&format!(
@@ -895,7 +1041,12 @@ mod tests {
         assert_eq!((connect.token, connect.user), (None, None));
         assert_eq!(connect.identity, PathBuf::from("keys"));
         assert!(parse_line(&format!("connect 192.0.2.7 --pin {pin} --token t --user u")).is_err());
-        assert!(parse_line("connect 192.0.2.7:4433 --token t").is_err());
+        // Without --pin, the token goes to the host paired with before.
+        let Command::Connect(remembered) = parse_line("connect 192.0.2.7:4433 --token t").unwrap()
+        else {
+            panic!("expected connect");
+        };
+        assert_eq!(remembered.trust, HostTrust::Remembered);
         assert_eq!(connect.decoder_process, DecoderPlacement::InProcess);
         let Command::Connect(connect) = parse_line(&format!(
             "connect 192.0.2.7 --pin {pin} --token t --decoder-process on"

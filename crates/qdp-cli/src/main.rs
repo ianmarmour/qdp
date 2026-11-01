@@ -13,24 +13,27 @@ mod cursor;
 mod identity;
 #[cfg(feature = "window")]
 mod keymap;
+mod paired;
 mod sink;
 #[cfg(feature = "window")]
 mod window;
 
+use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use qdp_codec::{CodecPreference, DecoderCommand};
 use qdp_desktop::{DisplayMatching, FrameMemory, ScreenOptions};
-use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification};
+use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin};
 use qdp_runtime::{
-    Admission, ClientAudio, ClientCredentials, ClientOptions, ClientSummary, ClipboardDirections,
-    DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource, HostAudio, HostAuthenticator,
-    HostDesktop, HostOptions, InputQueue, OpenedDesktop, ResumptionSlot, RuntimeError,
-    SharedClipboard, TestPattern,
+    Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
+    ClipboardDirections, DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource,
+    HostAudio, HostAuthenticator, HostDesktop, HostOptions, InputQueue, OpenedDesktop, Pairing,
+    PairingEvent, PairingOutcome, PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard,
+    TestPattern,
 };
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
@@ -39,10 +42,12 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::args::{
-    Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, GpuCapture, LockPolicy,
-    Presentation, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
+    Audio, ClientsAction, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, GpuCapture,
+    HostTrust, LockPolicy, PairingMode, Presentation, ServeArgs, SourceKind, USAGE, format_pin,
+    parse_args,
 };
 use crate::identity::Role;
+use crate::paired::{Paired, PairedFile};
 use crate::sink::CliSink;
 
 /// The environment variable that holds the password for `--user`.
@@ -122,6 +127,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Pin { identity, role } => print_pin(&identity, role),
+        Command::Clients { identity, action } => clients(&identity, action),
         Command::Serve(args) => {
             adopt_session_display();
             run_async(serve(args))
@@ -241,6 +247,17 @@ async fn serve(args: ServeArgs) -> CliResult {
     }
     for &pin in &args.client_keys {
         authenticator.add_client_key(pin);
+    }
+    let paired = PairedFile::clients(&args.identity);
+    for client in paired
+        .load()
+        .map_err(|error| format!("cannot read the paired clients: {error}"))?
+    {
+        authenticator.add_client_key(client.pin);
+    }
+    if args.pairing == PairingMode::On {
+        authenticator.enable_pairing(Pairing::new(pin, pairing_listener(paired)));
+        info!("new clients may pair: the code to type on them appears here");
     }
     authenticator.set_resumption_lifetime(args.resumption);
     let options = Arc::new(HostOptions {
@@ -524,6 +541,86 @@ fn hostname() -> String {
         .unwrap_or_default()
 }
 
+/// Logs a host's pairing requests, with the code to type, and keeps the
+/// clients that pair in `paired`.
+fn pairing_listener(paired: PairedFile) -> impl Fn(PairingEvent) + Send + Sync + 'static {
+    move |event| match event {
+        PairingEvent::Requested {
+            device_name,
+            address,
+            code,
+        } => warn!(
+            device = device_name,
+            %address,
+            "to pair this device, type {code} on it; the code expires in {} seconds",
+            CODE_LIFETIME.as_secs()
+        ),
+        PairingEvent::Ended {
+            device_name,
+            outcome: PairingOutcome::Paired { client_key },
+        } => {
+            let client = Paired {
+                pin: client_key,
+                label: device_name.clone(),
+            };
+            match paired.add(&client) {
+                Ok(()) => info!(
+                    device = device_name,
+                    "paired; `qdp clients remove` forgets it"
+                ),
+                Err(error) => warn!(%error, "paired, but it cannot be kept for the next run"),
+            }
+        }
+        PairingEvent::Ended {
+            device_name,
+            outcome: PairingOutcome::Failed,
+        } => warn!(
+            device = device_name,
+            "pairing failed: another code was typed"
+        ),
+        PairingEvent::Ended {
+            device_name,
+            outcome: PairingOutcome::Abandoned,
+        } => info!(device = device_name, "pairing abandoned"),
+    }
+}
+
+/// Runs `qdp clients`: lists the clients that paired with the host, or
+/// forgets one. A running host forgets it when it restarts.
+fn clients(identity: &Path, action: ClientsAction) -> CliResult {
+    let paired = PairedFile::clients(identity);
+    match action {
+        ClientsAction::List => {
+            let clients = paired
+                .load()
+                .map_err(|error| format!("cannot read the paired clients: {error}"))?;
+            if clients.is_empty() {
+                println!("No client has paired with this host.");
+            }
+            for client in clients {
+                println!("{}  {}", format_pin(client.pin), client.label);
+            }
+        }
+        ClientsAction::Remove(which) => {
+            let removed = paired
+                .remove(&which)
+                .map_err(|error| format!("cannot change the paired clients: {error}"))?;
+            if removed.is_empty() {
+                return Err(format!(
+                    "no paired client is named {which} or has a pin starting with it"
+                ));
+            }
+            for client in removed {
+                println!(
+                    "Forgot {}; a running host forgets it once restarted.",
+                    client.label
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Runs `qdp connect`: shows the host's stream until the frame limit, an
 /// interrupt, the window closing, or the host closing.
 fn connect(args: ConnectArgs) -> CliResult {
@@ -661,14 +758,7 @@ async fn receive(
     stop: impl Future<Output = ()>,
     mut input: Option<InputQueue>,
 ) -> Result<Option<ClientSummary>, String> {
-    let credentials = match (&args.token, &args.user) {
-        (Some(token), _) => ClientCredentials::Token(token.as_bytes().to_vec()),
-        (None, Some(user)) => ClientCredentials::Password {
-            username: user.clone(),
-            password: password()?,
-        },
-        (None, None) => ClientCredentials::Certificate,
-    };
+    let pairs = args.trust == HostTrust::Pair;
     let local = if args.address.is_ipv4() {
         SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
@@ -677,17 +767,55 @@ async fn receive(
     let mut endpoint = ClientEndpoint::bind(local).map_err(|error| error.to_string())?;
     // The client presents its certificate only when it authenticates with
     // it, so that other hosts do not learn its key.
-    if credentials == ClientCredentials::Certificate {
+    let client_key = if pairs || (args.token.is_none() && args.user.is_none()) {
         let identity = identity::load_or_create(&args.identity, Role::Client)
             .map_err(|error| format!("cannot load the client identity: {error}"))?;
         let pin = identity.key_pin().map_err(|error| error.to_string())?;
-        info!(
-            pin = format_pin(pin),
-            "authenticating with this client's key; hosts accept it with --client-key {}",
-            format_pin(pin)
-        );
+        if !pairs {
+            info!(
+                pin = format_pin(pin),
+                "authenticating with this client's key; hosts accept it with --client-key {}",
+                format_pin(pin)
+            );
+        }
         endpoint.set_identity(identity);
-    }
+        Some(pin)
+    } else {
+        None
+    };
+    let hosts = PairedFile::hosts(&args.identity);
+    let host_label = args.address.to_string();
+    let mut verification = match args.trust {
+        HostTrust::Pinned(pin) => HostVerification::PinnedKeys(vec![pin]),
+        HostTrust::Pair => HostVerification::Pairing,
+        HostTrust::Remembered => {
+            let host = hosts
+                .find(&host_label)
+                .map_err(|error| format!("cannot read the paired hosts: {error}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "this client has not paired with {host_label}: pass --pair to pair \
+                         with it, or --pin with its key pin"
+                    )
+                })?;
+            HostVerification::PinnedKeys(vec![host.pin])
+        }
+    };
+    let credentials = match (&args.token, &args.user, client_key) {
+        (Some(token), _, _) => ClientCredentials::Token(token.as_bytes().to_vec()),
+        (None, Some(user), _) => ClientCredentials::Password {
+            username: user.clone(),
+            password: password()?,
+        },
+        (None, None, Some(client_key)) if pairs => ClientCredentials::Pairing {
+            device_name: args.device_name.clone().unwrap_or_else(hostname),
+            client_key,
+        },
+        (None, None, _) => ClientCredentials::Certificate,
+    };
+    // The host's key, once pairing succeeded; later connections pin it.
+    let paired_host = Arc::new(Mutex::new(None));
+    let pairing_prompt = pairs.then(|| prompt_for_code(hosts, host_label, &paired_host));
     let resumption = ResumptionSlot::default();
     let sessions = async {
         let mut credentials = credentials;
@@ -704,13 +832,31 @@ async fn receive(
                 decoder_process: decoder_process(args)?,
                 keyboard_info: qdp_desktop::keyboard_info(),
                 resumption: resumption.clone(),
-                pairing_prompt: None,
+                pairing_prompt: pairing_prompt.clone(),
             };
-            let error = match connect_once(args, &endpoint, &options, sink, input.as_mut()).await {
+            let attempt = connect_once(
+                args,
+                &endpoint,
+                &verification,
+                &options,
+                sink,
+                input.as_mut(),
+            );
+            let error = match attempt.await {
                 Ok(summary) => return Ok(summary),
                 Err(Failure::Fatal(error)) => return Err(error),
                 Err(Failure::Lost(error)) => error,
             };
+            // A client that paired authenticates again with its key, and
+            // pins the host's.
+            let host_key = paired_host
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(host_key) = host_key {
+                credentials = ClientCredentials::Certificate;
+                verification = HostVerification::PinnedKeys(vec![host_key]);
+            }
             // A session that became active left a fresh token to resume it
             // with; otherwise the token in hand is tried until it expires,
             // since a connection that was never made did not use it.
@@ -750,6 +896,47 @@ async fn receive(
     Ok(summary)
 }
 
+/// Returns the prompt with which a client pairs: it asks on the terminal for
+/// the code the host shows, and once the host proved it showed it, keeps the
+/// host's key in `hosts`, labelled `host_label`, and in `paired_host` for the
+/// connections that follow.
+fn prompt_for_code(
+    hosts: PairedFile,
+    host_label: String,
+    paired_host: &Arc<Mutex<Option<KeyPin>>>,
+) -> PairingPrompt {
+    let paired_host = Arc::clone(paired_host);
+    PairingPrompt::new(
+        || Box::pin(async { tokio::task::spawn_blocking(read_code).await.ok().flatten() }),
+        move |host_key| {
+            let host = Paired {
+                pin: host_key,
+                label: host_label.clone(),
+            };
+            match hosts.add(&host) {
+                Ok(()) => info!(
+                    host = host_label,
+                    "paired; later connections to the host need no --pin or credentials"
+                ),
+                Err(error) => warn!(%error, "paired, but the host cannot be kept for later"),
+            }
+            *paired_host.lock().unwrap_or_else(PoisonError::into_inner) = Some(host_key);
+        },
+    )
+}
+
+/// Asks on the terminal for the code the host shows, or returns `None` if
+/// the terminal closed.
+fn read_code() -> Option<String> {
+    eprint!("Type the four-digit code the host shows: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim().to_owned()),
+    }
+}
+
 /// Returns the command that starts a decoder process, if `args` asks for
 /// one: this program, run as `qdp decoder`.
 fn decoder_process(args: &ConnectArgs) -> Result<Option<DecoderCommand>, String> {
@@ -780,16 +967,13 @@ enum Failure {
 async fn connect_once(
     args: &ConnectArgs,
     endpoint: &ClientEndpoint,
+    verification: &HostVerification,
     options: &ClientOptions,
     sink: &mut dyn FrameSink,
     input: Option<&mut InputQueue>,
 ) -> Result<ClientSummary, Failure> {
     let connection = endpoint
-        .connect(
-            args.address,
-            &args.server_name,
-            HostVerification::PinnedKeys(vec![args.pin]),
-        )
+        .connect(args.address, &args.server_name, verification.clone())
         .await
         .map_err(|error| Failure::Lost(format!("cannot connect to {}: {error}", args.address)))?;
     info!(address = %args.address, "connected");
