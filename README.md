@@ -361,9 +361,11 @@ The app needs no installing: it runs from its folder, the release's
 .\windows\build.ps1
 ```
 
-The app lists the hosts on the local network and those it paired with;
-choosing a new host pairs with it by the code the host shows, and choosing a
-paired one streams at once, full screen or in a window as its settings say.
+The app lists the hosts on the local network and those it connected to
+before; choosing a new host pairs with it by the code the host shows, and
+choosing one paired with streams at once, full screen or in a window as its
+settings say. A host added by its key pin and a token is listed too once it
+streamed, its token kept in Windows' Credential Locker.
 The stream sends the keyboard, mouse, touch, pen and gamepads, with rumble;
 in full screen the Windows key, Alt+Tab and Alt+F4 act on the host. Holding
 Ctrl, Alt and Shift, Z releases the mouse, X switches between full screen and

@@ -15,10 +15,10 @@ internal sealed record DiscoveredHost(string Name, string? Address, string? Pin,
 /// <summary>How a host the list shows stands, and what choosing it does.</summary>
 public enum HostStatus
 {
-    /// <summary>Paired and on this network: choosing it streams.</summary>
+    /// <summary>Kept and on this network: choosing it streams.</summary>
     Ready,
 
-    /// <summary>Paired, but not seen on this network: choosing it tries anyway.</summary>
+    /// <summary>Kept, but not seen on this network: choosing it tries anyway.</summary>
     NotSeen,
 
     /// <summary>New and offering pairing: choosing it pairs.</summary>
@@ -28,7 +28,7 @@ public enum HostStatus
     PairingOff,
 
     /// <summary>
-    /// Found under a paired host's name with another key, which may pose as
+    /// Found under a kept host's name with another key, which may pose as
     /// it.
     /// </summary>
     DifferentKey,
@@ -52,8 +52,8 @@ public sealed class HostRow
     /// <summary>The stream choosing it starts, if it starts one.</summary>
     internal StreamTarget? Target { get; init; }
 
-    /// <summary>The paired host it is, if paired.</summary>
-    internal PairedHost? Paired { get; init; }
+    /// <summary>The kept host it is, if kept.</summary>
+    internal KeptHost? Kept { get; init; }
 
     /// <summary>The row itself, for a binding that carries it.</summary>
     public HostRow Self => this;
@@ -62,7 +62,7 @@ public sealed class HostRow
     public bool CanChoose => Target is not null;
 
     /// <summary>Whether it can be forgotten.</summary>
-    public bool CanForget => Paired is not null;
+    public bool CanForget => Kept is not null;
 
     /// <summary>The action choosing it takes, for its button.</summary>
     public string Action => Status switch
@@ -83,26 +83,32 @@ public sealed class HostRow
         HostStatus.PairingOff => "\uE72E",
         _ => "\uE895",
     };
+
+    /// <summary>
+    /// What screen readers say of the row, as the list's items are named by
+    /// their data: its name and how it stands.
+    /// </summary>
+    public override string ToString() => $"{Name}, {Detail}";
 }
 
 /// <summary>
-/// The list the app shows: hosts found on the network, recognized as paired
-/// by their pin, then paired hosts not found, by the same rules as the Mac
-/// and Android apps.
+/// The list the app shows: hosts found on the network, recognized as kept by
+/// their pin, then kept hosts not found, by the same rules as the Mac and
+/// Android apps.
 /// </summary>
 internal static class HostRows
 {
     /// <summary>
-    /// The rows to list: hosts found on the network, recognized as paired by
-    /// their pin, then paired hosts not found.
+    /// The rows to list: hosts found on the network, recognized as kept by
+    /// their pin, then kept hosts not found, most recently kept first.
     /// </summary>
-    internal static List<HostRow> Build(IEnumerable<DiscoveredHost> discovered, IReadOnlyList<PairedHost> paired)
+    internal static List<HostRow> Build(IEnumerable<DiscoveredHost> discovered, IReadOnlyList<KeptHost> kept)
     {
         var found = new HashSet<string>();
         var rows = new List<HostRow>();
         foreach (var host in discovered.OrderBy(host => host.Name, StringComparer.CurrentCultureIgnoreCase))
         {
-            var match = paired.FirstOrDefault(other => other.Pin == host.Pin);
+            var match = kept.FirstOrDefault(other => other.Pin == host.Pin);
             if (host.Address is null)
             {
                 rows.Add(new HostRow { Name = host.Name, Detail = "Finding its address…", Status = HostStatus.Resolving });
@@ -116,17 +122,18 @@ internal static class HostRows
                     Name = host.Name,
                     Detail = $"Ready · {host.Address}",
                     Status = HostStatus.Ready,
-                    Target = new StreamTarget(host.Name, host.Address, Authentication.Paired, match.Pin),
-                    Paired = match,
+                    Target = match.Target(host.Name, host.Address),
+                    Kept = match,
                 });
                 continue;
             }
-            if (paired.Any(other => other.Name == host.Name))
+            if (kept.FirstOrDefault(other => other.Name == host.Name) is { } namesake)
             {
+                var known = namesake.Access == HostAccess.Token ? "added" : "paired with";
                 rows.Add(new HostRow
                 {
                     Name = host.Name,
-                    Detail = $"This isn't the {host.Name} you paired with",
+                    Detail = $"This isn't the {host.Name} you {known}",
                     Status = HostStatus.DifferentKey,
                     Target = host.Pairing ? new StreamTarget(host.Name, host.Address, Authentication.Pair) : null,
                 });
@@ -147,13 +154,13 @@ internal static class HostRows
                     Status = HostStatus.PairingOff,
                 });
         }
-        rows.AddRange(paired.Where(host => !found.Contains(host.Pin)).Select(host => new HostRow
+        rows.AddRange(kept.Where(host => !found.Contains(host.Pin)).Select(host => new HostRow
         {
             Name = host.Name,
             Detail = $"Not on this network · {host.Address}",
             Status = HostStatus.NotSeen,
-            Target = new StreamTarget(host.Name, host.Address, Authentication.Paired, host.Pin),
-            Paired = host,
+            Target = host.Target(host.Name, host.Address),
+            Kept = host,
         }));
         return rows;
     }

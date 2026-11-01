@@ -3,7 +3,7 @@ using Xunit;
 
 namespace Qdp.Tests;
 
-/// <summary>Hosts found on the network and those paired with make the app's list.</summary>
+/// <summary>Hosts found on the network and those kept make the app's list.</summary>
 public class HostRowsTests
 {
     /// <summary>A key pin.</summary>
@@ -13,7 +13,16 @@ public class HostRowsTests
     private static readonly string PinB = new('b', 64);
 
     /// <summary>A host paired with as Desk, last reached at 10.0.0.2.</summary>
-    private static readonly PairedHost Desk = new() { Name = "Desk", Address = "10.0.0.2:4433", Pin = PinA };
+    private static readonly KeptHost Desk = new() { Name = "Desk", Address = "10.0.0.2:4433", Pin = PinA };
+
+    /// <summary>A host streamed with a token as Lab, last reached at 10.0.0.3.</summary>
+    private static readonly KeptHost Lab = new()
+    {
+        Name = "Lab",
+        Address = "10.0.0.3:4433",
+        Pin = PinB,
+        Access = HostAccess.Token,
+    };
 
     /// <summary>A paired host found again streams at the address it has now.</summary>
     [Fact]
@@ -62,6 +71,41 @@ public class HostRowsTests
         Assert.Equal(HostStatus.DifferentKey, rows[0].Status);
         Assert.Equal(Authentication.Pair, rows[0].Target!.Authentication);
         Assert.Equal(HostStatus.NotSeen, rows[1].Status);
+    }
+
+    /// <summary>
+    /// A host kept with a token streams with it, found or not; the token
+    /// itself is taken from the Credential Locker as the stream starts.
+    /// </summary>
+    [Fact]
+    public void StreamsTokenHostsWithTheirToken()
+    {
+        var found = Assert.Single(HostRows.Build([new DiscoveredHost("Lab PC", "10.0.0.4:4433", PinB, false)], [Lab]));
+        Assert.Equal(HostStatus.Ready, found.Status);
+        Assert.Equal(new StreamTarget("Lab PC", "10.0.0.4:4433", Authentication.Token, PinB), found.Target);
+        Assert.True(found.CanForget);
+
+        var unseen = Assert.Single(HostRows.Build([], [Lab]));
+        Assert.Equal(HostStatus.NotSeen, unseen.Status);
+        Assert.Equal(new StreamTarget("Lab", "10.0.0.3:4433", Authentication.Token, PinB), unseen.Target);
+    }
+
+    /// <summary>Another key under a token host's name is told apart as under a paired one's.</summary>
+    [Fact]
+    public void WarnsOfAnotherKeyUnderATokenHostsName()
+    {
+        var rows = HostRows.Build([new DiscoveredHost("Lab", "10.0.0.6:4433", PinA, true)], [Lab]);
+        Assert.Equal(HostStatus.DifferentKey, rows[0].Status);
+        Assert.Equal("This isn't the Lab you added", rows[0].Detail);
+        Assert.Equal(HostStatus.NotSeen, rows[1].Status);
+    }
+
+    /// <summary>Screen readers say a row's name and how it stands.</summary>
+    [Fact]
+    public void ReadsAsNameAndDetail()
+    {
+        var row = Assert.Single(HostRows.Build([], [Desk]));
+        Assert.Equal("Desk, Not on this network · 10.0.0.2:4433", row.ToString());
     }
 
     /// <summary>A host whose address is not known yet cannot be chosen.</summary>

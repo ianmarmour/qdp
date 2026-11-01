@@ -7,8 +7,8 @@ namespace Qdp.Pages;
 
 /// <summary>
 /// The computers to stream: those QDP's host advertises on the network and
-/// those paired with, found or not; choosing one streams it, or pairs with
-/// it first.
+/// those kept, found or not; choosing one streams it, or pairs with it
+/// first.
 /// </summary>
 public sealed partial class HostsPage : Page
 {
@@ -76,14 +76,14 @@ public sealed partial class HostsPage : Page
         }
     }
 
-    /// <summary>Forgets a paired host.</summary>
+    /// <summary>Forgets a kept host.</summary>
     private void OnForgetClicked(object sender, RoutedEventArgs args)
     {
         // A flyout's items do not inherit their host's data context, so the
         // row rides in the item's tag.
-        if ((sender as FrameworkElement)?.Tag is HostRow { Paired: { } paired })
+        if ((sender as FrameworkElement)?.Tag is HostRow { Kept: { } kept })
         {
-            window?.Hosts.Forget(paired.Pin);
+            window?.Hosts.Forget(kept.Pin);
         }
     }
 
