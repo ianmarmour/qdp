@@ -108,16 +108,28 @@ pub fn open_screen(_state_directory: &Path) -> Result<Box<dyn FrameSource>, Stri
     Ok(Box::new(DesktopDuplication::open()?))
 }
 
+/// What becomes of the host's real monitors while a virtual monitor is
+/// streamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RealMonitors {
+    /// Turned off for the session, so that the desktop, its windows and
+    /// panels, is the virtual monitor alone; turned on again after it.
+    Off,
+    /// Left on beside the virtual monitor.
+    On,
+}
+
 /// Adds a virtual monitor to the desktop, made at the client's display once
-/// the client tells it, and streams it: on KDE Plasma, through KWin.
+/// the client tells it, and streams it: on KDE Plasma, through KWin. The
+/// real monitors are kept or turned off as `real_monitors` asks.
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
-pub fn open_virtual_monitor() -> Result<Box<dyn FrameSource>, String> {
-    Ok(Box::new(VirtualMonitor::open()?))
+pub fn open_virtual_monitor(real_monitors: RealMonitors) -> Result<Box<dyn FrameSource>, String> {
+    Ok(Box::new(VirtualMonitor::open(real_monitors)?))
 }
 
 /// Adds a virtual monitor to the desktop; this platform cannot yet.
 #[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
-pub fn open_virtual_monitor() -> Result<Box<dyn FrameSource>, String> {
+pub fn open_virtual_monitor(_real_monitors: RealMonitors) -> Result<Box<dyn FrameSource>, String> {
     Err("virtual monitors are not supported on this platform yet".to_owned())
 }
 

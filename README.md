@@ -207,8 +207,12 @@ On KDE Plasma, `qdp serve --source virtual` streams a virtual monitor instead
 of a real one: KWin adds a monitor of exactly the client's display, its size
 and interface scale (with `qdp connect --resolution`, the chosen size), so the
 host streams it without scaling, and makes a new one when the client's
-display changes. The monitor joins the desktop beside the real ones while the
-session lasts. On Linux the host finds where the streamed monitor, real or
+display changes. While the session lasts, the host turns the real monitors
+off with KDE's `kscreen-doctor`, so that the desktop, its windows and panels,
+moves to the virtual monitor, and turns them on again before it closes; KWin
+also brings back the real monitors' own layout when the virtual monitor goes,
+should the host stop without doing so. `--real-monitors on` keeps them on
+beside it. On Linux the host finds where the streamed monitor, real or
 virtual, sits among the desktop's monitors through xdg-output, and places the
 client's pointer on it, since the virtual pointer covers them all. Run `qdp help` for every option, and set `QDP_LOG=debug`
 for more detail. `QDP_LOG` also takes levels for single parts after the
