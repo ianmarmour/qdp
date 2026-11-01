@@ -1,19 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-The launcher icon's mark, inside the adaptive icon's 66dp safe zone: a
-screen whose play triangle is cut out, so the background shows through, and
-its stand. Being one color, it also serves as the monochrome layer.
+The launcher icon's mark, the Orbit Q of branding/qdp-orbit-q.svg, inside
+the adaptive icon's 66dp safe zone. Being one color, it also serves as the
+monochrome layer of themed icons. Written by branding/generate-icons.py.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:fillType="evenOdd"
-        android:pathData="M35,35h38a5,5 0,0 1,5 5v22a5,5 0,0 1,-5 5h-38a5,5 0,0 1,-5 -5v-22a5,5 0,0 1,5 -5zM50,44v14l11,-7z" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M46,71h16a2,2 0,0 1,0 4h-16a2,2 0,0 1,0 -4z" />
+    android:viewportWidth="1784.4"
+    android:viewportHeight="1784.4">
+    <group
+        android:translateX="265.2"
+        android:translateY="265.2">
+        <path
+            android:fillColor="#FFFCF5E3"
+            android:fillType="evenOdd"
+            android:pathData="M627 246 C832 246 996 410 996 613 C996 692 970 764 925 824 L1031 952 C1038 960 1041 971 1038 980 C1034 995 1023 1005 1008 1005 H900 C889 1005 880 1001 873 992 L806 917 C751 954 684 975 614 975 C415 975 255 813 255 611 C255 410 422 246 627 246 Z M627 383 C756 383 861 486 861 614 C861 741 755 845 626 845 C497 845 393 741 393 614 C393 486 498 383 627 383 Z" />
+    </group>
 </vector>

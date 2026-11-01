@@ -1,3 +1,5 @@
+<img src="branding/qdp-orbit-q.svg" width="96" height="96" alt="The QDP logo: an ivory Q on deep teal">
+
 # qdp
 Quick Desktop Protocol (QDP): a fast and modern alternative to RDP and VNC
 

@@ -2,7 +2,6 @@
 <resources>
     <!-- Ember's light surface, matching EmberColors.kt. -->
     <color name="window_background">#FFFFF8F6</color>
-    <!-- The launcher icon's background, light to deep Ember. -->
-    <color name="launcher_top">#FFFF7A4F</color>
-    <color name="launcher_bottom">#FFE5501F</color>
+    <!-- The launcher icon's background: the deep teal of branding/qdp-orbit-q.svg. -->
+    <color name="launcher_background">#FF025559</color>
 </resources>
