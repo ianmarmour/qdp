@@ -155,7 +155,9 @@ pub struct EventReader {
 
 impl EventReader {
     /// Returns the next event, waiting up to `timeout` for one, or `None` if
-    /// none came or the session has ended and its events were all read.
+    /// none came. Once the session has ended and its events were all read,
+    /// it waits out `timeout` too, so that a caller polling in a loop does
+    /// not spin.
     pub fn next(&self, timeout: Duration) -> Option<Event> {
         let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
         let deadline = Instant::now() + timeout;
@@ -171,7 +173,11 @@ impl EventReader {
             match events.recv_timeout(left.min(FEEDBACK_POLL)) {
                 Ok(event) => return Some(event),
                 Err(RecvTimeoutError::Timeout) if left > FEEDBACK_POLL => {}
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(left);
+                    return None;
+                }
             }
         }
     }

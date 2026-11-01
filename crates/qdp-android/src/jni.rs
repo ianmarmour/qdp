@@ -231,7 +231,9 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_disconnect(
 }
 
 /// Returns the session's next event, as `events` describes, waiting up to
-/// `timeout_millis` for one, or `null` if none came or no session runs.
+/// `timeout_millis` for one, or `null` if none came or no session runs; with
+/// no session it waits out the timeout, so that the app's loop does not
+/// spin.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_nextEvent(
     env: *mut JNIEnv,
@@ -245,7 +247,11 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_nextEvent(
             .as_ref()
             .map(Session::events);
         let timeout = Duration::from_millis(count(timeout_millis).into());
-        match events.and_then(|events| events.next(timeout)) {
+        let Some(events) = events else {
+            std::thread::sleep(timeout);
+            return ptr::null_mut();
+        };
+        match events.next(timeout) {
             // SAFETY: the VM calls this with its environment.
             Some(event) => unsafe { new_string(env, &event.to_string()) },
             None => ptr::null_mut(),

@@ -254,6 +254,35 @@ default one: `QDP_LOG=info,qdp::window=debug` on the client and
 host trace each pointer button, every move while a button is held, positions
 the host ignores and the host's warps of the client's pointer.
 
+## Android client
+
+The Android app in [`android`](android) streams from a host to phones,
+tablets and gaming handhelds running Android 10 or later on 64-bit ARM. It
+decodes AV1 with the device's hardware decoder, straight into the screen, and
+in software on devices without one. Building it needs the Android SDK and NDK,
+JDK 17 or later, and Rust's Android target:
+
+```bash
+rustup target add aarch64-linux-android
+```
+
+Build the app, which builds its Rust core first, and install it on a device
+connected with USB debugging:
+
+```bash
+cd android && ANDROID_HOME=~/Android/Sdk ./gradlew installRelease
+```
+
+The app asks for the host's address, its pin and the token, and streams full
+screen. A handheld's built-in controls and connected controllers are sent as
+gamepads, with rumble. Touching the screen works as a trackpad by default: one
+finger moves the pointer, a tap clicks, two fingers right-click or scroll, and
+a press held still drags; the menu switches to sending touches as the host's
+own. A mouse and keyboard work as on a computer. Back, or Select, Start and
+both bumpers together, opens the menu, which also shows the on-screen keyboard
+and statistics and disconnects. Leaving the app ends the session, and
+returning connects again.
+
 ## Crates
 
 | Crate | Contents |
@@ -264,3 +293,4 @@ the host ignores and the host's warps of the client's pointer.
 | `qdp-runtime` | Host and client media pipelines |
 | `qdp-desktop` | Screen capture and input injection for Linux, macOS and Windows hosts |
 | `qdp-cli` | The `qdp` command |
+| `qdp-android` | The Android app's Rust core, which its Kotlin code calls through JNI |
