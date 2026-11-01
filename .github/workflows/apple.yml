@@ -1,5 +1,5 @@
 # Builds the Apple apps: the Rust core as an XCFramework, then the Mac app
-# and the iPhone and iPad app with Xcode. CI calls it for every change
+# with Xcode. CI calls it for every change
 # merged into main; it can also be started by hand on any branch, which is
 # how changes to the apps are checked before they merge.
 name: Apple
@@ -41,3 +41,25 @@ jobs:
 
       - name: Build the core
         run: ./apple/build-core.sh
+
+      - name: Generate the Xcode project
+        working-directory: apple
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build the Mac app
+        working-directory: apple
+        # Signed ad hoc until a Developer ID is set up; testers allow it in
+        # Privacy & Security settings the first time.
+        run: |
+          xcodebuild -project QDP.xcodeproj -scheme QDP-macOS -configuration Release \
+            -destination 'generic/platform=macOS' -derivedDataPath build \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+          ditto -c -k --keepParent build/Build/Products/Release/QDP.app ../qdp-macos-app.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qdp-apple
+          path: qdp-macos-app.zip
+          if-no-files-found: error
