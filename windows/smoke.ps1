@@ -100,7 +100,7 @@ public static class QdpCore {
         public IntPtr OwnerWindow;
         public int Authentication;
         public uint Width, Height;
-        public int Decoder, Microphone, Screen, Sync, Shortcuts, Clipboard;
+        public int Decoder, Microphone, Screen, Sync, Shortcuts, Clipboard, Statistics;
     }
 
     [DllImport("qdp_windows", CallingConvention = CallingConvention.Cdecl)]
@@ -154,6 +154,7 @@ $config.DeviceName = [QdpCore]::Utf8('smoke test')
 $config.Title = [QdpCore]::Utf8('QDP smoke test')
 $config.IconPath = [QdpCore]::Utf8((Join-Path $publish 'Assets\qdp.ico'))
 $config.Authentication = 0
+$config.Statistics = 1
 $errorText = [IntPtr]::Zero
 $session = [QdpCore]::qdp_session_start([ref] $config, [ref] $errorText)
 if ($session -eq [IntPtr]::Zero) { throw "the session cannot start: $([QdpCore]::Take($errorText))" }
