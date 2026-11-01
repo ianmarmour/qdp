@@ -24,6 +24,21 @@ public sealed partial class MainWindow : Window
     /// <summary>The display scale of 100 %, in dots per inch.</summary>
     private const double DefaultDpi = 96.0;
 
+    /// <summary>
+    /// How long a running stream may be reconnecting before the window comes
+    /// back to say so: shorter losses pass unnoticed.
+    /// </summary>
+    private static readonly TimeSpan ReconnectingNotice = TimeSpan.FromSeconds(2);
+
+    /// <summary>Brings the window back while a running stream reconnects.</summary>
+    private readonly DispatcherTimer reconnectingTimer = new() { Interval = ReconnectingNotice };
+
+    /// <summary>Whether the stream window shows the video.</summary>
+    private bool streaming;
+
+    /// <summary>Whether the window came back because the stream is reconnecting.</summary>
+    private bool cameBackToReconnect;
+
     /// <summary>The stream, while one starts or runs.</summary>
     private StreamSession? session;
 
@@ -54,6 +69,15 @@ public sealed partial class MainWindow : Window
         Settings = Storage.LoadSettings();
         Hosts = new HostStore(DispatcherQueue);
         Navigation.SelectedItem = HostsItem;
+        reconnectingTimer.Tick += (_, _) =>
+        {
+            reconnectingTimer.Stop();
+            if (session is not null && streaming)
+            {
+                cameBackToReconnect = true;
+                ComeBack();
+            }
+        };
         Closed += (_, _) => session?.Stop();
     }
 
@@ -148,12 +172,23 @@ public sealed partial class MainWindow : Window
                 StreamStatus.Text = "Connecting…";
                 break;
             case SessionEvent.Connected:
-                StreamStatus.Text = "Starting the stream…";
+                StreamStatus.Text = streaming ? "" : "Starting the stream…";
+                reconnectingTimer.Stop();
+                if (cameBackToReconnect)
+                {
+                    cameBackToReconnect = false;
+                    StepBack();
+                }
                 break;
             case SessionEvent.Reconnecting:
                 StreamStatus.Text = "The connection was lost. Reconnecting…";
+                if (streaming)
+                {
+                    reconnectingTimer.Start();
+                }
                 break;
             case SessionEvent.WindowShown:
+                streaming = true;
                 ShowStreaming(name);
                 StepBack();
                 break;
@@ -207,6 +242,9 @@ public sealed partial class MainWindow : Window
     private void Ended(string name, string? failure)
     {
         session = null;
+        streaming = false;
+        cameBackToReconnect = false;
+        reconnectingTimer.Stop();
         pairingDialog?.Hide();
         StreamOverlay.Visibility = Visibility.Collapsed;
         Hosts.SetStreaming(false);
