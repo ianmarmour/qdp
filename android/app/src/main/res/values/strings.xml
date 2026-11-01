@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+The app's words: second person, present tense, sentence case; buttons are
+verbs; errors give one cause and one next step. The UI says "computer";
+"host", "pin" and "token" appear only in Advanced.
+-->
 <resources>
     <string name="app_name">QDP</string>
 </resources>
