@@ -26,7 +26,7 @@ use objc2_screen_capture_kit::{
     SCStreamOutput, SCStreamOutputType,
 };
 use qdp_codec::{Rgb32Order, Yuv420Frame};
-use qdp_runtime::{CursorState, FrameSource, RuntimeError};
+use qdp_runtime::{CursorState, FrameArrivals, FrameSource, RuntimeError};
 use tracing::{debug, info};
 
 use super::cursor::SystemCursor;
@@ -282,6 +282,12 @@ impl FrameSource for MacScreenCapture {
 
     fn cursor(&mut self) -> Option<CursorState> {
         Some(self.cursor.state())
+    }
+
+    /// ScreenCaptureKit delivers a frame each time the display changes, so
+    /// each is told as it arrives.
+    fn watch_frames(&mut self, arrivals: Arc<FrameArrivals>) -> bool {
+        self.latest.watch(arrivals)
     }
 }
 

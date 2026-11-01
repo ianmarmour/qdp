@@ -218,8 +218,12 @@ allow Screen Recording for the terminal or app running `qdp`, and performing
 the client's input needs Accessibility to be allowed for it as well, both under
 System Settings, Privacy & Security. On Windows 10 and later the host captures
 the primary monitor with DXGI Desktop Duplication, and holds the last image
-while the sign-in screen or an elevation prompt is shown. If the screen cannot
-be captured the host
+while the sign-in screen or an elevation prompt is shown. On Linux and macOS
+the host encodes each frame as the compositor delivers it, rather than at fixed
+frame times, so that frames do not wait for the next one; it still sends no
+more than `--fps` a second, and repeats the last frame when nothing changes.
+Its statistics give `new_fps`, how many of the frames sent showed a new
+screen. If the screen cannot be captured the host
 streams a test pattern instead, and `--source screen` or `--source
 test-pattern` forces one. On Linux the host finds where the streamed monitor
 sits among the desktop's monitors through xdg-output, and places the client's

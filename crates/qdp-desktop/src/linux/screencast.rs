@@ -29,8 +29,8 @@ use pw::spa;
 use pw::spa::buffer::meta::MetaCursor;
 use qdp_codec::{Rgb32Order, Yuv420Frame};
 use qdp_runtime::{
-    CursorShape, CursorState, DesktopScale, FrameSource, LayoutRect, MonitorPlacement,
-    PointerPosition, RuntimeError, WantedDisplay,
+    CursorShape, CursorState, DesktopScale, FrameArrivals, FrameSource, LayoutRect,
+    MonitorPlacement, PointerPosition, RuntimeError, WantedDisplay,
 };
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
@@ -351,6 +351,12 @@ impl FrameSource for ScreenCapture {
 
     fn monitor_placement(&self) -> Option<MonitorPlacement> {
         self.placement
+    }
+
+    /// PipeWire delivers a frame each time the compositor draws the
+    /// monitor, so each is told as it arrives.
+    fn watch_frames(&mut self, arrivals: Arc<FrameArrivals>) -> bool {
+        self.shared.watch(arrivals)
     }
 
     /// Changes the monitor's mode and interface scale to come as close to
