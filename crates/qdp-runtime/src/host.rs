@@ -1129,11 +1129,7 @@ impl ActiveHost {
         smoothed_rtt: Duration,
         now: Instant,
     ) -> bool {
-        let window = decode_window(
-            frame_interval,
-            smoothed_rtt,
-            self.decoder_lag.is_behind(now),
-        );
+        let window = decode_window(frame_interval, smoothed_rtt, self.decoder_lag.state(now));
         let waited_long = self
             .frame_sent_at
             .is_none_or(|sent_at| now.saturating_duration_since(sent_at) >= DECODED_WAIT_LIMIT);
