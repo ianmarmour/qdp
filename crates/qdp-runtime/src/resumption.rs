@@ -35,6 +35,8 @@ pub(crate) enum ClientIdentity {
     User(String),
     /// A client presenting a certificate with one of the host's client keys.
     Certificate(KeyPin),
+    /// A user a trusted gateway vouched for, by name (Section 13.7).
+    Gateway(String),
 }
 
 /// A token the host issued.

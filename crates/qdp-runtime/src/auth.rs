@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qdp::auth::pairing::{ClientPairing, HostPairing, PairingCode, PairingKeys, PairingStart};
 
@@ -10,6 +10,7 @@ use qdp::auth::precis::prepare_username;
 use qdp::auth::scram::{
     ChannelBinding, ClientFirst, ScramClient, ScramClientFinal, ScramCredentials, ScramServer,
 };
+use qdp::gateway::assertion::IdentityAssertion;
 use qdp::message::{AuthMethod, AuthResult, AuthStatus, PasswordAuthData, ResumptionToken};
 use qdp::session::AuthResponse;
 use qdp_quic::KeyPin;
@@ -18,6 +19,7 @@ use tracing::{debug, info};
 
 use crate::RuntimeError;
 use crate::admission::AdmissionTicket;
+use crate::gateway_trust::GatewayTrust;
 use crate::pairing::{CODE_LIFETIME, Pairing, PairingOutcome, PairingSlot};
 use crate::resumption::{
     ClientIdentity, DEFAULT_RESUMPTION_LIFETIME, IssuedToken, ResumptionTokens,
@@ -80,6 +82,9 @@ pub struct HostAuthenticator {
     /// How long resumption tokens remain valid after their connection ends,
     /// or `None` if the host issues none.
     resumption_lifetime: Option<Duration>,
+    /// The gateways whose identity assertions admit their users, if any
+    /// (Section 13.7).
+    gateways: Option<GatewayTrust>,
 }
 
 impl HostAuthenticator {
@@ -95,7 +100,14 @@ impl HostAuthenticator {
             secret: random_bytes()?,
             resumption: ResumptionTokens::default(),
             resumption_lifetime: Some(DEFAULT_RESUMPTION_LIFETIME),
+            gateways: None,
         })
+    }
+
+    /// Admits the users the gateways `trust` names vouch for, with their
+    /// identity assertions as `TOKEN`s (Section 13.7).
+    pub fn trust_gateways(&mut self, trust: GatewayTrust) {
+        self.gateways = (!trust.is_empty()).then_some(trust);
     }
 
     /// Sets how long the resumption tokens given to clients remain valid
@@ -167,6 +179,7 @@ impl HostAuthenticator {
             || !self.users.is_empty()
             || !self.client_keys().is_empty()
             || self.pairing.is_some()
+            || self.gateways.is_some()
     }
 
     /// Returns the methods to offer, in order of preference, on a connection
@@ -180,7 +193,9 @@ impl HostAuthenticator {
         if presented && (!self.client_keys().is_empty() || self.pairing.is_some()) {
             methods.push(AuthMethod::CLIENT_CERTIFICATE);
         }
-        if !self.tokens.is_empty() || (self.accepts_anyone() && self.resumption_lifetime.is_some())
+        if !self.tokens.is_empty()
+            || self.gateways.is_some()
+            || (self.accepts_anyone() && self.resumption_lifetime.is_some())
         {
             methods.push(AuthMethod::TOKEN);
         }
@@ -205,10 +220,22 @@ impl HostAuthenticator {
             .transpose()
     }
 
-    /// Returns who presents `token` with the `TOKEN` method: the holder of
-    /// one of the host's tokens, or the identity a valid resumption token
-    /// resumes, which it redeems.
-    fn token_identity(&self, token: &[u8]) -> Option<ClientIdentity> {
+    /// Returns who presents `token` with the `TOKEN` method on a connection
+    /// whose client presented a certificate with `client_key`: the holder of
+    /// one of the host's tokens, a user a trusted gateway's assertion vouches
+    /// for, or the identity a valid resumption token resumes, which it
+    /// redeems.
+    fn token_identity(&self, token: &[u8], client_key: Option<KeyPin>) -> Option<ClientIdentity> {
+        if let Some(gateways) = &self.gateways
+            && IdentityAssertion::is_assertion(token)
+        {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            return gateways
+                .admit(token, client_key, now)
+                .map(|user| ClientIdentity::Gateway(user.name));
+        }
         if let Some(position) = self
             .tokens
             .iter()
@@ -223,6 +250,7 @@ impl HostAuthenticator {
             ClientIdentity::Token(position) => *position < self.tokens.len(),
             ClientIdentity::User(user) => self.users.contains_key(user),
             ClientIdentity::Certificate(pin) => self.accepts_client_key(pin),
+            ClientIdentity::Gateway(_) => self.gateways.is_some(),
         };
         info!(accepted, "resumption token redeemed");
         accepted.then_some(identity)
@@ -307,7 +335,9 @@ impl<'a> HostAuthExchange<'a> {
         self.pairing = None;
         match method {
             AuthMethod::TOKEN => {
-                let identity = self.authenticator.token_identity(auth_data);
+                let identity = self
+                    .authenticator
+                    .token_identity(auth_data, self.client_key);
                 info!(accepted = identity.is_some(), "token authentication");
                 match identity {
                     Some(identity) => {
@@ -762,6 +792,61 @@ mod tests {
             AuthResponse::Reject
         );
         assert_eq!(exchange.user(), None);
+    }
+
+    /// A trusted gateway's identity assertion admits its user as a `TOKEN`,
+    /// once, and only from the client whose key it names (Section 13.7).
+    #[test]
+    fn gateway_assertions() {
+        use qdp::gateway::assertion::{IdentityAssertion, NONCE_LENGTH};
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let gateway = Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap();
+        let host = KeyPin([0xaa; 32]);
+        let client = KeyPin([0xcc; 32]);
+        let mut trust = GatewayTrust::new(host);
+        trust.add_key(gateway.public_key().as_ref().try_into().unwrap());
+        let mut authenticator = HostAuthenticator::new().unwrap();
+        authenticator.trust_gateways(trust);
+        assert!(authenticator.accepts_anyone());
+        assert_eq!(authenticator.methods(Some(client)), [AuthMethod::TOKEN]);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = IdentityAssertion {
+            host_pin: host.0,
+            client_pin: client.0,
+            issued_at: now,
+            expires_at: now + 120,
+            nonce: [1; NONCE_LENGTH],
+            user_name: "alice".to_owned(),
+            display_name: String::new(),
+            groups: Vec::new(),
+        }
+        .sign(&gateway);
+        let admission = Admission::default();
+        let ticket = ticket(&admission);
+        let mut stranger =
+            HostAuthExchange::new(&authenticator, binding(), Some(KeyPin([0xdd; 32])));
+        assert_eq!(
+            stranger.start(AuthMethod::TOKEN, &token, &ticket),
+            AuthResponse::Reject
+        );
+        let mut exchange = HostAuthExchange::new(&authenticator, binding(), Some(client));
+        assert_eq!(
+            exchange.start(AuthMethod::TOKEN, &token, &ticket),
+            AuthResponse::Accept(Vec::new())
+        );
+        assert_eq!(
+            exchange.identity(),
+            Some(&ClientIdentity::Gateway("alice".to_owned()))
+        );
+        assert_eq!(
+            exchange.start(AuthMethod::TOKEN, &token, &ticket),
+            AuthResponse::Reject
+        );
     }
 
     /// A resumption token works once, and only for an identity the host
