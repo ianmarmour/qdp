@@ -12,11 +12,13 @@ mod capture;
 mod cursor;
 mod input;
 mod keycodes;
+mod metal_video;
 mod pen;
 
 #[cfg(feature = "audio")]
 pub use audio::MacDesktopAudio;
 pub use capture::MacScreenCapture;
+pub use metal_video::{MetalVideo, Overlay, PixelRect};
 
 /// Returns the desktop's sound, captured with ScreenCaptureKit.
 #[cfg(feature = "audio")]
