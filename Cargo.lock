@@ -2410,6 +2410,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys",
  "qdp",
+ "qdp-app",
  "qdp-codec",
  "qdp-desktop",
  "qdp-quic",
@@ -2417,6 +2418,18 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "qdp-app"
+version = "0.1.0"
+dependencies = [
+ "qdp",
+ "qdp-codec",
+ "qdp-quic",
+ "qdp-runtime",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

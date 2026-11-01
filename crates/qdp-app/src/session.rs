@@ -31,7 +31,6 @@ use crate::events::{CodeRequest, Ending, Event};
 use crate::settings::{SERVER_NAME, resolve_address};
 use crate::sink::{AppSink, Presenter, SharedCursor};
 
-
 /// The wait before reconnecting the first time after a connection is lost.
 const FIRST_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
@@ -550,24 +549,17 @@ async fn connect_once<P: Presenter>(
         .map_err(|error| Failure::Lost(format!("cannot connect to {address}: {error}")))?;
     info!(%address, "connected");
     let _ = events.send(Event::Connected);
-    let summary = qdp_runtime::run(
-        connection,
-        options,
-        sink,
-        Some(input),
-        None,
-        audio,
-    )
-    .await
-    .map_err(|error| {
-        let message = format!("session failed: {error}");
-        match error {
-            RuntimeError::PairingCancelled => Failure::Cancelled,
-            RuntimeError::AuthenticationFailed(_) => Failure::Rejected(message),
-            error if error.is_connection_lost() => Failure::Lost(message),
-            _ => Failure::Fatal(message),
-        }
-    })?;
+    let summary = qdp_runtime::run(connection, options, sink, Some(input), None, audio)
+        .await
+        .map_err(|error| {
+            let message = format!("session failed: {error}");
+            match error {
+                RuntimeError::PairingCancelled => Failure::Cancelled,
+                RuntimeError::AuthenticationFailed(_) => Failure::Rejected(message),
+                error if error.is_connection_lost() => Failure::Lost(message),
+                _ => Failure::Fatal(message),
+            }
+        })?;
     info!(
         frames = summary.frames_presented,
         decode_failures = summary.decode_failures,
