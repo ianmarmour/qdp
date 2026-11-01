@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use ndk::native_window::NativeWindow;
 use ndk_sys as ffi;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::backend::VideoDecoder;
 use crate::{CodecError, DecodedPicture, SequenceHeader, Yuv420Frame};
@@ -48,51 +48,6 @@ const KEY_PRIORITY: &CStr = c"priority";
 
 /// The real-time priority.
 const REAL_TIME_PRIORITY: i32 = 0;
-
-/// The format's key for the frames a second the decoder should be able to
-/// decode, from which it sets its clocks.
-const KEY_OPERATING_RATE: &CStr = c"operating-rate";
-
-/// An operating rate far beyond any stream's, which has a decoder run at its
-/// highest clocks, so that each frame decodes as fast as it can.
-const MAX_OPERATING_RATE: i32 = i16::MAX as i32;
-
-/// Qualcomm's key asking its decoders to hand out each frame as soon as it
-/// is decoded.
-const KEY_QUALCOMM_LOW_LATENCY: &CStr = c"vendor.qti-ext-dec-low-latency.enable";
-
-/// Qualcomm's key asking its decoders to hand out frames in decode order,
-/// without waiting to reorder them.
-const KEY_QUALCOMM_DECODE_ORDER: &CStr = c"vendor.qti-ext-dec-picture-order.enable";
-
-/// The name prefixes of Qualcomm's decoders.
-const QUALCOMM_DECODERS: [&str; 2] = ["c2.qti.", "OMX.qcom."];
-
-/// How a decoder is asked to keep its latency low.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tuning {
-    /// Android's low-latency mode and real-time priority, which every
-    /// decoder takes.
-    Standard,
-    /// Qualcomm's own low-latency modes and its highest clocks, through the
-    /// operating rate. The operating rate replaces the real-time priority,
-    /// which some Qualcomm decoders fail on when they cannot meet the rate.
-    Qualcomm,
-}
-
-impl Tuning {
-    /// Returns the tuning for the decoder named `name`.
-    fn for_decoder(name: &str) -> Self {
-        if QUALCOMM_DECODERS
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-        {
-            Self::Qualcomm
-        } else {
-            Self::Standard
-        }
-    }
-}
 
 /// How long to wait for the decoder to take a temporal unit.
 const INPUT_TIMEOUT: Duration = Duration::from_millis(50);
@@ -295,35 +250,44 @@ impl MediaCodecDecoder {
         let surface = video_surface().ok_or_else(|| {
             CodecError::HardwareUnavailable("the app shows no surface to decode into".to_owned())
         })?;
+        // SAFETY: the MIME type is a valid C string.
+        let raw = NonNull::new(unsafe { ffi::AMediaCodec_createDecoderByType(AV1_MIME.as_ptr()) })
+            .ok_or_else(|| {
+                CodecError::HardwareUnavailable("this device has no AV1 decoder".to_owned())
+            })?;
+        let codec = Codec { raw };
+        let format = Format::new()?;
         let width = i32::try_from(header.max_width).map_err(|_| CodecError::FrameSize)?;
         let height = i32::try_from(header.max_height).map_err(|_| CodecError::FrameSize)?;
-        let mut codec = create_decoder()?;
-        let name = codec_name(&codec);
-        let mut tuning = Tuning::for_decoder(&name);
-        if let Err(error) = configure(&codec, header, (width, height), &surface, tuning) {
-            if tuning == Tuning::Standard {
-                return Err(error);
-            }
-            // A decoder that refuses Qualcomm's settings gets Android's, on a
-            // codec of its own, as a failed configuration may leave the first
-            // unusable.
-            warn!(%error, decoder = name, "the decoder refused its low-latency settings");
-            tuning = Tuning::Standard;
-            codec = create_decoder()?;
-            configure(&codec, header, (width, height), &surface, tuning)?;
-        }
+        format.set_string(KEY_MIME, AV1_MIME);
+        format.set_i32(KEY_WIDTH, width);
+        format.set_i32(KEY_HEIGHT, height);
+        format.set_i32(KEY_LOW_LATENCY, 1);
+        format.set_i32(KEY_PRIORITY, REAL_TIME_PRIORITY);
+        format.set_buffer(
+            KEY_CODEC_SPECIFIC_DATA,
+            &header.codec_configuration_record(),
+        );
+        // SAFETY: the codec, format and surface are live; there is no crypto.
+        let status = unsafe {
+            ffi::AMediaCodec_configure(
+                codec.raw.as_ptr(),
+                format.raw.as_ptr(),
+                surface.ptr().as_ptr(),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        check(status, "configuring the AV1 decoder")?;
         // SAFETY: the codec is configured.
         check(
             unsafe { ffi::AMediaCodec_start(codec.raw.as_ptr()) },
             "starting the AV1 decoder",
         )?;
-        self.description = format!("MediaCodec {name}");
+        self.description = format!("MediaCodec {}", codec_name(&codec));
         info!(
             decoder = self.description,
-            width,
-            height,
-            ?tuning,
-            "decoding AV1 with MediaCodec"
+            width, height, "decoding AV1 with MediaCodec"
         );
         self.visible = (header.max_width as usize, header.max_height as usize);
         self.sequence_header = header.obu().to_vec();
@@ -523,53 +487,6 @@ fn output_size(codec: &Codec) -> Option<(usize, usize)> {
         return None;
     }
     Some((usize::try_from(width).ok()?, usize::try_from(height).ok()?))
-}
-
-/// Creates the device's AV1 decoder, or says it has none.
-fn create_decoder() -> Result<Codec, CodecError> {
-    // SAFETY: the MIME type is a valid C string.
-    NonNull::new(unsafe { ffi::AMediaCodec_createDecoderByType(AV1_MIME.as_ptr()) })
-        .map(|raw| Codec { raw })
-        .ok_or_else(|| CodecError::HardwareUnavailable("this device has no AV1 decoder".to_owned()))
-}
-
-/// Configures `codec` to decode the stream `header` begins, of `size`
-/// pixels at most, into `surface`, kept to low latency as `tuning` says.
-fn configure(
-    codec: &Codec,
-    header: &SequenceHeader,
-    (width, height): (i32, i32),
-    surface: &NativeWindow,
-    tuning: Tuning,
-) -> Result<(), CodecError> {
-    let format = Format::new()?;
-    format.set_string(KEY_MIME, AV1_MIME);
-    format.set_i32(KEY_WIDTH, width);
-    format.set_i32(KEY_HEIGHT, height);
-    format.set_i32(KEY_LOW_LATENCY, 1);
-    match tuning {
-        Tuning::Standard => format.set_i32(KEY_PRIORITY, REAL_TIME_PRIORITY),
-        Tuning::Qualcomm => {
-            format.set_i32(KEY_QUALCOMM_LOW_LATENCY, 1);
-            format.set_i32(KEY_QUALCOMM_DECODE_ORDER, 1);
-            format.set_i32(KEY_OPERATING_RATE, MAX_OPERATING_RATE);
-        }
-    }
-    format.set_buffer(
-        KEY_CODEC_SPECIFIC_DATA,
-        &header.codec_configuration_record(),
-    );
-    // SAFETY: the codec, format and surface are live; there is no crypto.
-    let status = unsafe {
-        ffi::AMediaCodec_configure(
-            codec.raw.as_ptr(),
-            format.raw.as_ptr(),
-            surface.ptr().as_ptr(),
-            ptr::null_mut(),
-            0,
-        )
-    };
-    check(status, "configuring the AV1 decoder")
 }
 
 /// Returns the device's name for `codec`, such as `c2.qti.av1.decoder`.
