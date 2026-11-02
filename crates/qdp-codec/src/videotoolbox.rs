@@ -37,7 +37,7 @@ use objc2_video_toolbox::{
     kVTDecompressionPropertyKey_RealTime,
     kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{CodecError, DecodedPicture, SequenceHeader, VideoDecoder, Yuv420Frame};
 
@@ -46,6 +46,13 @@ const DESCRIPTION: &str = "VideoToolbox (hardware)";
 
 /// The sample description extension that carries the AV1 configuration record.
 const AV1C_ATOM: &str = "av1C";
+
+/// `kVTInvalidSessionErr`: the session no longer works, as iOS leaves the
+/// sessions of an app that went to the background.
+const INVALID_SESSION: i32 = -12903;
+
+/// `kVTVideoDecoderMalfunctionErr`: the decoder behind the session broke.
+const DECODER_MALFUNCTION: i32 = -12911;
 
 /// The status of a call that succeeded.
 const NO_ERROR: i32 = 0;
@@ -68,7 +75,8 @@ fn check(status: i32, what: &'static str) -> Result<(), CodecError> {
 /// A hardware AV1 decoder using VideoToolbox.
 ///
 /// The decompression session is created from the first sequence header and
-/// recreated whenever the sequence header changes.
+/// recreated whenever the sequence header changes, or once it stops working,
+/// from the next key frame's.
 pub struct VideoToolboxDecoder {
     /// The session for the current sequence header, once one has arrived.
     session: Option<Session>,
@@ -185,7 +193,16 @@ impl VideoToolboxDecoder {
             .session
             .as_ref()
             .ok_or(CodecError::MalformedBitstream("no sequence header yet"))?;
-        session.decode(temporal_unit)
+        let decoded = session.decode(temporal_unit);
+        if let Err(error) = &decoded {
+            if is_broken_session(error) {
+                // Kept, it would fail every frame: the key frame the client
+                // asks for next makes a new one.
+                warn!(%error, "the decoder's session stopped working; starting a new one");
+                self.session = None;
+            }
+        }
+        decoded
     }
 }
 
@@ -205,6 +222,15 @@ impl VideoDecoder for VideoToolboxDecoder {
     fn description(&self) -> &str {
         DESCRIPTION
     }
+}
+
+/// Returns whether `error` says the session no longer decodes anything, as
+/// after iOS took it from an app in the background.
+fn is_broken_session(error: &CodecError) -> bool {
+    matches!(
+        error,
+        CodecError::Decoder { code, .. } if *code == INVALID_SESSION || *code == DECODER_MALFUNCTION
+    )
 }
 
 /// A decompression session for one sequence header.
