@@ -693,9 +693,11 @@ mod tests {
     fn reads_a_configuration_with_defaults() {
         let config = parse(EXAMPLE).unwrap();
         assert_eq!(config.listen, "0.0.0.0:443".parse().unwrap());
+        // The system's own: /var/lib/qdp-gateway on Linux, and under
+        // ProgramData on Windows.
         assert_eq!(
             config.state_directory,
-            PathBuf::from("/var/lib/qdp-gateway")
+            crate::locations::default_state_directory()
         );
         assert_eq!(
             config.directory.user_filter,
