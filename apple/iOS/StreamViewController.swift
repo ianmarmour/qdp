@@ -27,8 +27,14 @@ final class StreamViewController: UIViewController {
     private var gamepads: Gamepads?
     private var displayLink: CADisplayLink?
     private let keyboard = KeyboardField()
+    /// The view the session draws the video into, under the others, which
+    /// moves the picture clear of the on-screen keyboard.
+    private let videoView = UIView()
     private lazy var controllerView = OnScreenControllerView(model: model)
     private var keyboardRequest = 0
+    /// How much of the view's bottom the on-screen keyboard covers, in
+    /// points.
+    private var keyboardCover: CGFloat = 0
     private var observers: [NSObjectProtocol] = []
 
     /// The pointer, in video pixels, which trackpad touches move.
@@ -75,13 +81,14 @@ final class StreamViewController: UIViewController {
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         self.view = view
+        // Touches go to the view itself, which maps them through the
+        // video's place.
+        videoView.isUserInteractionEnabled = false
+        view.addSubview(videoView)
         keyboard.controller = self
         view.addSubview(keyboard)
         controllerView.frame = view.bounds
         controllerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        // The session adds the video's Metal layer to this view's layer as
-        // the stream starts, after this view, which it would cover.
-        controllerView.layer.zPosition = 1
         view.addSubview(controllerView)
         installGestures()
         view.addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered)))
@@ -99,7 +106,7 @@ final class StreamViewController: UIViewController {
         becomeFirstResponder()
         guard model.session == nil else { return }
         let started = model.start(
-            layer: view.layer,
+            layer: videoView.layer,
             pixels: pixelSize,
             scale: scale,
             refreshMillihertz: refreshMillihertz
@@ -126,10 +133,24 @@ final class StreamViewController: UIViewController {
         observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.focusChanged(true) }
         })
+        observers.append(center.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak self] note in
+            let info = note.userInfo
+            let frame = (info?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
+            let duration = (info?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0
+            let curve = (info?[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber)?.uintValue ?? 0
+            MainActor.assumeIsolated {
+                self?.keyboardMoved(to: frame, duration: duration, curve: curve)
+            }
+        })
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        // Its bounds and centre rather than its frame, which its transform
+        // leaves undefined.
+        videoView.bounds = view.bounds
+        videoView.center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        videoView.transform = pictureTransform()
         model.resize(pixels: pixelSize, scale: scale)
         model.displayChanged(pixels: pixelSize, scale: scale, refreshMillihertz: refreshMillihertz)
     }
@@ -146,7 +167,58 @@ final class StreamViewController: UIViewController {
         model.stop()
     }
 
-    @objc private func step(_ link: CADisplayLink) {}
+    /// Keeps the picture clear of the keyboard as the video changes size.
+    @objc private func step(_ link: CADisplayLink) {
+        guard keyboardCover > 0 else { return }
+        let transform = pictureTransform()
+        if videoView.transform != transform {
+            videoView.transform = transform
+        }
+    }
+
+    /// Follows the on-screen keyboard to `frame`, in the screen's
+    /// coordinates, moving the picture with it.
+    private func keyboardMoved(to frame: CGRect?, duration: TimeInterval, curve: UInt) {
+        let bounds = view.bounds
+        var cover: CGFloat = 0
+        if let frame, let screen = view.window?.windowScene?.screen {
+            let keyboard = view.convert(frame, from: screen.coordinateSpace)
+            // A keyboard floating on an iPad leaves the bottom free.
+            if keyboard.maxY >= bounds.maxY - 1 {
+                cover = max(0, bounds.maxY - keyboard.minY)
+            }
+        }
+        guard cover != keyboardCover else { return }
+        keyboardCover = cover
+        let options = UIView.AnimationOptions(rawValue: curve << 16)
+        UIView.animate(withDuration: duration, delay: 0, options: options) {
+            self.videoView.transform = self.pictureTransform()
+        }
+    }
+
+    /// The move, and shrinking if it must, that puts the picture in the
+    /// part of the view the keyboard leaves, centred there, as it is in the
+    /// whole view otherwise. The stream keeps its size: the host is not
+    /// told.
+    private func pictureTransform() -> CGAffineTransform {
+        let bounds = view.bounds
+        let free = CGSize(width: bounds.width, height: bounds.height - keyboardCover)
+        guard keyboardCover > 0, let video = model.videoSize,
+              let shown = Placement.fit(video: video, in: bounds.size),
+              let fitted = Placement.fit(video: video, in: free) else {
+            return .identity
+        }
+        let scale = min(fitted.width / shown.width, 1)
+        // A view's transform works about its centre.
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let left = (free.width - shown.width * scale) / 2
+        let top = (free.height - shown.height * scale) / 2
+        return CGAffineTransform(
+            a: scale, b: 0, c: 0, d: scale,
+            tx: left - center.x - scale * (shown.left - center.x),
+            ty: top - center.y - scale * (shown.top - center.y)
+        )
+    }
 
     private var scale: CGFloat {
         view.window?.windowScene?.screen.scale ?? traitCollection.displayScale
@@ -247,9 +319,11 @@ final class StreamViewController: UIViewController {
         return (placement, video)
     }
 
-    /// Returns a point of the view in the video's pixels.
+    /// Returns a point of the view in the video's pixels, through the
+    /// picture's move clear of the keyboard.
     private func videoPoint(_ point: CGPoint) -> CGPoint? {
         guard let (placement, video) = picture else { return nil }
+        let point = videoView.convert(point, from: view)
         return placement.videoPoint(CGPoint(x: point.x * scale, y: point.y * scale), video: video)
     }
 
@@ -534,10 +608,14 @@ extension StreamViewController: UIGestureRecognizerDelegate {
 final class KeyboardField: UIView, UIKeyInput {
     weak var controller: StreamViewController?
 
-    /// The usages of the extra keys: Escape, Tab and the arrows.
-    private static let extraKeys: [(String, UInt16)] = [
-        ("esc", 0x29), ("tab", 0x2B), ("←", 0x50), ("↑", 0x52), ("↓", 0x51), ("→", 0x4F),
-    ]
+    /// The row of keys over the keyboard, made once.
+    private lazy var extraKeys = ExtraKeysBar(
+        tap: { [weak self] usage in self?.controller?.tap(usage) },
+        hide: { [weak self] in
+            self?.resignFirstResponder()
+            self?.controller?.becomeFirstResponder()
+        }
+    )
 
     override var canBecomeFirstResponder: Bool { true }
     var hasText: Bool { true }
@@ -556,17 +634,7 @@ final class KeyboardField: UIView, UIKeyInput {
     }
 
     override var inputAccessoryView: UIView? {
-        let bar = UIToolbar(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
-        var items = Self.extraKeys.map { key in
-            UIBarButtonItem(title: key.0, primaryAction: UIAction { [weak self] _ in self?.controller?.tap(key.1) })
-        }
-        items.append(.flexibleSpace())
-        items.append(UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
-            self?.resignFirstResponder()
-            self?.controller?.becomeFirstResponder()
-        }))
-        bar.items = items
-        return bar
+        extraKeys
     }
 
     // Hardware keys go to the stream as keys, not as text.
@@ -576,5 +644,91 @@ final class KeyboardField: UIView, UIKeyInput {
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if controller?.handle(presses, pressed: false) != true { super.pressesEnded(presses, with: event) }
+    }
+}
+
+/// The keys the on-screen keyboard lacks, in one row over it as wide as the
+/// screen allows: Escape, Tab, the arrows, and a key that hides the
+/// keyboard. Each key has the same width, so that all of them fit.
+final class ExtraKeysBar: UIInputView {
+    /// What a key shows.
+    private enum Label {
+        /// Text.
+        case text(String)
+        /// An SF Symbol, by name.
+        case symbol(String)
+    }
+
+    /// A key: what it shows, what it is called to VoiceOver, and its
+    /// keyboard page usage.
+    private struct Key {
+        let label: Label
+        let name: String
+        let usage: UInt16
+    }
+
+    /// The keys that are sent to the stream.
+    private static let keys = [
+        Key(label: .text("esc"), name: "Escape", usage: 0x29),
+        Key(label: .text("tab"), name: "Tab", usage: 0x2B),
+        Key(label: .symbol("arrow.left"), name: "Left arrow", usage: 0x50),
+        Key(label: .symbol("arrow.up"), name: "Up arrow", usage: 0x52),
+        Key(label: .symbol("arrow.down"), name: "Down arrow", usage: 0x51),
+        Key(label: .symbol("arrow.right"), name: "Right arrow", usage: 0x4F),
+    ]
+
+    /// The row's height, in points.
+    private static let height: CGFloat = 52
+    /// The space around and between the keys, in points.
+    private static let gap: CGFloat = 6
+    /// The widest the row gets, in points, so that keys on an iPad stay
+    /// key-sized.
+    private static let widest: CGFloat = 640
+
+    /// Makes the row, which calls `tap` with a key's usage when it is
+    /// tapped, and `hide` when the key that hides the keyboard is.
+    init(tap: @escaping (UInt16) -> Void, hide: @escaping () -> Void) {
+        super.init(frame: CGRect(x: 0, y: 0, width: 320, height: Self.height), inputViewStyle: .keyboard)
+        autoresizingMask = .flexibleWidth
+        var buttons = Self.keys.map { key in
+            Self.button(key.label, name: key.name) { tap(key.usage) }
+        }
+        buttons.append(Self.button(.symbol("keyboard.chevron.compact.down"), name: "Hide keyboard", action: hide))
+        let row = UIStackView(arrangedSubviews: buttons)
+        row.axis = .horizontal
+        row.distribution = .fillEqually
+        row.spacing = Self.gap
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        let fullWidth = row.widthAnchor.constraint(equalTo: safeAreaLayoutGuide.widthAnchor, constant: -2 * Self.gap)
+        fullWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: topAnchor, constant: Self.gap),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.gap),
+            row.centerXAnchor.constraint(equalTo: safeAreaLayoutGuide.centerXAnchor),
+            row.widthAnchor.constraint(lessThanOrEqualToConstant: Self.widest),
+            fullWidth,
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("not used")
+    }
+
+    /// Returns a key showing `label`, called `name`, that does `action`.
+    private static func button(_ label: Label, name: String, action: @escaping () -> Void) -> UIButton {
+        var configuration = UIButton.Configuration.gray()
+        configuration.cornerStyle = .medium
+        configuration.baseForegroundColor = .label
+        switch label {
+        case let .text(text):
+            configuration.title = text
+        case let .symbol(symbol):
+            configuration.image = UIImage(systemName: symbol)
+        }
+        let button = UIButton(configuration: configuration, primaryAction: UIAction { _ in action() })
+        button.accessibilityLabel = name
+        return button
     }
 }
