@@ -72,7 +72,22 @@ object HostList {
         val found = mutableSetOf<String>()
         val discoveredCards = discovered.map { host ->
             val match = paired.firstOrNull { it.pin == host.pin }
+            // A paired computer's name with another key, listed in that
+            // computer's place: its key changed, or another poses as it.
+            val namesake = if (match == null) paired.firstOrNull { it.name == host.name } else null
             when {
+                namesake != null -> {
+                    found += namesake.pin
+                    HostCard(
+                        key = PAIRED_KEY + namesake.pin,
+                        name = host.name,
+                        address = host.address,
+                        status = HostStatus.KEY_MISMATCH,
+                        target = if (host.pairing) StreamTarget(host.name, host.address, Native.AUTH_PAIR) else null,
+                        paired = namesake,
+                        advertisedPin = host.pin,
+                    )
+                }
                 match != null -> {
                     found += match.pin
                     HostCard(
@@ -89,11 +104,7 @@ object HostList {
                     key = FOUND_KEY + host.name,
                     name = host.name,
                     address = host.address,
-                    status = when {
-                        paired.any { it.name == host.name } -> HostStatus.KEY_MISMATCH
-                        host.pairing -> HostStatus.NEW
-                        else -> HostStatus.PAIRING_OFF
-                    },
+                    status = if (host.pairing) HostStatus.NEW else HostStatus.PAIRING_OFF,
                     target = if (host.pairing) StreamTarget(host.name, host.address, Native.AUTH_PAIR) else null,
                     paired = null,
                     advertisedPin = host.pin,
