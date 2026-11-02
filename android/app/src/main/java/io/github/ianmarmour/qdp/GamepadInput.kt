@@ -19,7 +19,11 @@ import kotlin.math.max
  * and any connected controller, each in a slot of its own, with its whole
  * state on each change, and plays the host's rumble on them.
  */
-class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : InputManager.InputDeviceListener {
+class GamepadInput(
+    context: Context,
+    private val onMenuCombo: () -> Unit,
+    private val onConnectedChanged: (Boolean) -> Unit,
+) : InputManager.InputDeviceListener {
     private val inputManager = context.getSystemService(InputManager::class.java)
     private val systemVibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         context.getSystemService(VibratorManager::class.java)?.defaultVibrator
@@ -72,15 +76,19 @@ class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : Inpu
         }
     }
 
-    /** Connects the gamepads there are, and follows those that come and go. */
+    /**
+     * Connects the gamepads there are, and follows those that come and go,
+     * telling whether any is connected now and each time that changes.
+     */
     fun start() {
         inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
         for (id in InputDevice.getDeviceIds()) {
             onInputDeviceAdded(id)
         }
+        onConnectedChanged(pads.isNotEmpty())
     }
 
-    /** Disconnects every gamepad and stops their rumble. */
+    /** Disconnects every gamepad and stops their rumble; [start] tells what is connected again. */
     fun stop() {
         inputManager.unregisterInputDeviceListener(this)
         for (pad in pads.values) {
@@ -126,12 +134,18 @@ class GamepadInput(context: Context, private val onMenuCombo: () -> Unit) : Inpu
         val pad = Pad(nextSlot++, device, vibrator)
         pads[deviceId] = pad
         Native.gamepadConnected(pad.slot, device.name, vibrator != null)
+        if (pads.size == 1) {
+            onConnectedChanged(true)
+        }
     }
 
     override fun onInputDeviceRemoved(deviceId: Int) {
         val pad = pads.remove(deviceId) ?: return
         pad.vibrator?.cancel()
         Native.gamepadDisconnected(pad.slot)
+        if (pads.isEmpty()) {
+            onConnectedChanged(false)
+        }
     }
 
     override fun onInputDeviceChanged(deviceId: Int) {}

@@ -142,7 +142,9 @@ private fun MenuPanel(ui: StreamUiState, actions: StreamActions, side: Boolean, 
     } else {
         WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
     }
-    val tiles = listOf(
+    // A connected gamepad takes the on-screen gamepad's place, so the menu
+    // leaves its tile out.
+    val tiles = listOfNotNull(
         Tile(R.drawable.ic_play_arrow_fill1, stringResource(R.string.menu_resume), null, actions.resume),
         Tile(R.drawable.ic_keyboard, stringResource(R.string.menu_keyboard), null, actions.showKeyboard),
         Tile(
@@ -152,7 +154,7 @@ private fun MenuPanel(ui: StreamUiState, actions: StreamActions, side: Boolean, 
                 if (ui.controller == Visibility.SHOWN) R.string.controller_shown else R.string.controller_hidden,
             ),
             onClick = actions.toggleController,
-        ),
+        ).takeIf { !ui.gamepadConnected },
         Tile(
             icon = if (ui.touchMode == TouchMode.TRACKPAD) R.drawable.ic_mouse else R.drawable.ic_touch_app,
             label = stringResource(R.string.menu_touch),

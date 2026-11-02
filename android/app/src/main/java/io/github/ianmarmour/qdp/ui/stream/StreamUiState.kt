@@ -122,10 +122,21 @@ class StreamUiState(val hostName: String, val deviceName: String, touchMode: Tou
     var touchMode by mutableStateOf(touchMode)
 
     /**
-     * Whether the on-screen gamepad shows, taking the screen's touches,
-     * which the menu turns on and off: off as each stream starts.
+     * Whether the menu turned the on-screen gamepad on: off as each stream
+     * starts. It shows only while no gamepad is connected, as
+     * [controllerActive] says.
      */
     var controller by mutableStateOf(Visibility.HIDDEN)
+
+    /** Whether a gamepad is connected, which the on-screen gamepad steps aside for. */
+    var gamepadConnected by mutableStateOf(false)
+
+    /**
+     * Whether the on-screen gamepad shows, taking the screen's touches: when
+     * the menu turned it on and no gamepad is connected.
+     */
+    val controllerActive: Boolean
+        get() = controller == Visibility.SHOWN && !gamepadConnected
 
     /** The on-screen gamepad's controls, as it is drawn. */
     var controllerControls by mutableStateOf<List<VirtualControl>>(emptyList())

@@ -72,6 +72,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
     private lateinit var typing: TypingView
     private lateinit var gamepads: GamepadInput
     private lateinit var controller: VirtualGamepadInput
+
+    /** Whether the on-screen gamepad is connected to the host. */
+    private var controllerConnected = false
     private lateinit var touch: TouchInput
     private var wifiLock: WifiManager.WifiLock? = null
     private var events: Thread? = null
@@ -194,7 +197,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
             pointerIcon = hiddenPointer()
             addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                 layoutVideo()
-                if (ui.controller == Visibility.SHOWN) {
+                if (ui.controllerActive) {
                     controller.layout()
                 }
             }
@@ -203,7 +206,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         setContentView(root)
         onBackPressedDispatcher.addCallback(this, back)
 
-        gamepads = GamepadInput(this) { openMenu() }
+        gamepads = GamepadInput(this, onMenuCombo = { openMenu() }, onConnectedChanged = ::gamepadsChanged)
         touch = TouchInput(this, ViewConfiguration.get(this)) { x, y -> cursorView.moveTo(x, y) }.apply {
             mode = settings.touchMode
         }
@@ -283,9 +286,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         listening = true
         events = thread(name = "qdp-events", isDaemon = true) { listen() }
         gamepads.start()
-        if (ui.controller == Visibility.SHOWN) {
-            controller.connect(true)
-        }
+        syncController()
         Native.focus(hasWindowFocus())
     }
 
@@ -302,9 +303,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         events = null
         touch.cancel()
         gamepads.stop()
-        if (ui.controller == Visibility.SHOWN) {
-            controller.connect(false)
-        }
+        syncController()
         if (relative) {
             surfaceView.releasePointerCapture()
         }
@@ -411,7 +410,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
     private fun setPhase(phase: StreamPhase) {
         // Touches go to the overlay until the video is live again, so the
         // on-screen gamepad lets go of what they held.
-        if (phase != StreamPhase.LIVE && ui.controller == Visibility.SHOWN) {
+        if (phase != StreamPhase.LIVE && ui.controllerActive) {
             controller.release()
         }
         ui.phase = phase
@@ -505,7 +504,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         ui.coachmark = Visibility.HIDDEN
         touch.cancel()
         gamepads.reset()
-        if (ui.controller == Visibility.SHOWN) {
+        if (ui.controllerActive) {
             controller.release()
         }
         Native.releaseAll()
@@ -537,16 +536,43 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
      * while it shows, and closes the menu.
      */
     private fun toggleController() {
-        val shown = ui.controller == Visibility.HIDDEN
-        ui.controller = if (shown) Visibility.SHOWN else Visibility.HIDDEN
-        if (shown) {
+        ui.controller = if (ui.controller == Visibility.HIDDEN) Visibility.SHOWN else Visibility.HIDDEN
+        controllerChanged()
+        closeMenu()
+    }
+
+    /**
+     * Takes whether any gamepad is connected: the on-screen gamepad steps
+     * aside while one is, and comes back once none is, if the menu turned
+     * it on.
+     */
+    private fun gamepadsChanged(connected: Boolean) {
+        if (ui.gamepadConnected == connected) {
+            return
+        }
+        ui.gamepadConnected = connected
+        controllerChanged()
+    }
+
+    /** Lays the on-screen gamepad out as it appears, taking the touches, and connects it or not. */
+    private fun controllerChanged() {
+        if (ui.controllerActive) {
             touch.cancel()
             controller.layout()
         }
-        if (streaming) {
-            controller.connect(shown)
+        syncController()
+    }
+
+    /**
+     * Connects the on-screen gamepad to the host while it shows during a
+     * stream, and disconnects it otherwise, once each.
+     */
+    private fun syncController() {
+        val connect = streaming && ui.controllerActive
+        if (connect != controllerConnected) {
+            controllerConnected = connect
+            controller.connect(connect)
         }
-        closeMenu()
     }
 
     /** Switches between trackpad and direct touch, keeping the choice. */
@@ -649,7 +675,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             return mouse(event)
         }
-        if (ui.controller == Visibility.SHOWN) {
+        if (ui.controllerActive) {
             controller.onTouch(event)
             return true
         }
