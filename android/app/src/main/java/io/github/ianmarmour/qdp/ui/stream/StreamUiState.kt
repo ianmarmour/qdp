@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import io.github.ianmarmour.qdp.SessionEvent
 import io.github.ianmarmour.qdp.StreamError
 import io.github.ianmarmour.qdp.TouchMode
+import io.github.ianmarmour.qdp.VirtualControl
 
 /** Where the stream is. */
 enum class StreamPhase {
@@ -119,6 +120,15 @@ class StreamUiState(val hostName: String, val deviceName: String, touchMode: Tou
 
     /** What touching the screen does. */
     var touchMode by mutableStateOf(touchMode)
+
+    /**
+     * Whether the on-screen gamepad shows, taking the screen's touches,
+     * which the menu turns on and off: off as each stream starts.
+     */
+    var controller by mutableStateOf(Visibility.HIDDEN)
+
+    /** The on-screen gamepad's controls, as it is drawn. */
+    var controllerControls by mutableStateOf<List<VirtualControl>>(emptyList())
 
     /** The pairing dialog, while pairing. */
     var pairing by mutableStateOf<PairingUi?>(null)

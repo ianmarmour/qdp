@@ -11,12 +11,12 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::{Mutex, Once, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, Once, OnceLock, PoisonError};
 use std::time::Duration;
 
 use jni_sys::{
-    JNI_FALSE, JNI_OK, JNI_TRUE, JNIEnv, JavaVM, jboolean, jclass, jfloat, jint, jintArray,
-    jobject, jsize, jstring,
+    JNI_FALSE, JNI_OK, JNI_TRUE, JNIEnv, JavaVM, jboolean, jclass, jfloat, jfloatArray, jint,
+    jintArray, jobject, jsize, jstring,
 };
 use ndk::native_window::NativeWindow;
 use qdp::message::DeviceFeatures;
@@ -29,6 +29,7 @@ use qdp_app::gamepad::GamepadState;
 use qdp_app::qr::QrModules;
 use qdp_app::session::{Authentication, Config, GatewayConfig, Session};
 use qdp_app::settings::{display_size, format_pin, parse_pin};
+use qdp_app::virtual_gamepad::{self, Insets, Point, Screen, VirtualGamepad};
 use qdp_runtime::{Credentials, SignInAnswer};
 
 use crate::cursor::CursorBitmap;
@@ -64,6 +65,9 @@ const AUTH_GATEWAY: jint = 3;
 
 /// The session, while one runs.
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+/// The on-screen gamepad, which the stream's menu shows and hides.
+static VIRTUAL_GAMEPAD: Mutex<VirtualGamepad> = Mutex::new(VirtualGamepad::new());
 
 /// The app's private files directory, where the device's key is kept.
 static FILES_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
@@ -152,6 +156,34 @@ unsafe fn new_string(env: *mut JNIEnv, text: &str) -> jstring {
 /// Returns a Java integer as a count, or 0 if it is negative.
 fn count(value: jint) -> u32 {
     u32::try_from(value).unwrap_or(0)
+}
+
+/// Returns the touch phase the app numbers `phase`: touching (0), moving
+/// (1), lifting (2) or cancelled (3).
+fn touch_phase(phase: jint) -> Option<TouchPhase> {
+    match phase {
+        0 => Some(TouchPhase::Down),
+        1 => Some(TouchPhase::Move),
+        2 => Some(TouchPhase::Up),
+        3 => Some(TouchPhase::Cancel),
+        _ => None,
+    }
+}
+
+/// Returns the on-screen gamepad, which outlives sessions as the app's
+/// stream screen does.
+fn virtual_gamepad() -> MutexGuard<'static, VirtualGamepad> {
+    VIRTUAL_GAMEPAD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Sends the on-screen gamepad's state to the session.
+fn send_virtual_gamepad(gamepad: &VirtualGamepad) {
+    send(UserInput::Gamepad {
+        slot: virtual_gamepad::SLOT,
+        report: gamepad.state().report(),
+    });
 }
 
 /// Sets up logging, gives the audio library the app's context, and keeps
@@ -510,12 +542,8 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_touch(
     pressure: jfloat,
 ) {
     guarded((), || {
-        let phase = match phase {
-            0 => TouchPhase::Down,
-            1 => TouchPhase::Move,
-            2 => TouchPhase::Up,
-            3 => TouchPhase::Cancel,
-            _ => return,
+        let Some(phase) = touch_phase(phase) else {
+            return;
         };
         send(UserInput::Touch {
             finger: count(finger).into(),
@@ -595,6 +623,159 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_gamepad(
             report: state.report(),
         });
     });
+}
+
+/// The numbers [`Java_io_github_ianmarmour_qdp_Native_virtualGamepadControls`]
+/// gives each control.
+const VIRTUAL_CONTROL_FLOATS: usize = 9;
+
+/// Connects the on-screen gamepad to the session, as its own gamepad, or
+/// disconnects it with every control released.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_virtualGamepadConnected(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    connected: jboolean,
+) {
+    guarded((), || {
+        if flag(connected) {
+            send(UserInput::GamepadConnected {
+                slot: virtual_gamepad::SLOT,
+                features: DeviceFeatures::default(),
+                name: virtual_gamepad::NAME.to_owned(),
+            });
+        } else {
+            virtual_gamepad().release_all();
+            send(UserInput::GamepadDisconnected {
+                slot: virtual_gamepad::SLOT,
+            });
+        }
+    });
+}
+
+/// Lays the on-screen gamepad out on a screen `width × height` pixels,
+/// `density` pixels a dp, inside the safe area the insets leave, releasing
+/// every control held.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_virtualGamepadLayout(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    width: jint,
+    height: jint,
+    density: jfloat,
+    left: jint,
+    top: jint,
+    right: jint,
+    bottom: jint,
+) {
+    guarded((), || {
+        // Screen sizes and insets are far below f32's exact integers.
+        #[allow(clippy::cast_precision_loss)]
+        let screen = Screen {
+            width: width as f32,
+            height: height as f32,
+            density,
+            insets: Insets {
+                left: left as f32,
+                top: top as f32,
+                right: right as f32,
+                bottom: bottom as f32,
+            },
+        };
+        let mut gamepad = virtual_gamepad();
+        if gamepad.lay_out(&screen) {
+            send_virtual_gamepad(&gamepad);
+        }
+    });
+}
+
+/// Takes touch `finger`'s `phase`, numbered as [`touch_phase`], at `x, y`
+/// on the screen, in pixels, on the on-screen gamepad, sending its state if
+/// that changed it. Returns what changed, as [`virtual_gamepad::REDRAW`] and
+/// [`virtual_gamepad::PRESSED`] bits.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_virtualGamepadTouch(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    finger: jint,
+    phase: jint,
+    x: jfloat,
+    y: jfloat,
+) -> jint {
+    guarded(0, || {
+        let Some(phase) = touch_phase(phase) else {
+            return 0;
+        };
+        let mut gamepad = virtual_gamepad();
+        let outcome = gamepad.touch(count(finger), phase, Point { x, y });
+        if outcome.state_changed {
+            send_virtual_gamepad(&gamepad);
+        }
+        jint::try_from(outcome.flags()).unwrap_or(0)
+    })
+}
+
+/// Releases every control of the on-screen gamepad held, as when the
+/// stream's menu opens.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_virtualGamepadRelease(
+    _env: *mut JNIEnv,
+    _class: jclass,
+) {
+    guarded((), || {
+        let mut gamepad = virtual_gamepad();
+        if gamepad.release_all() {
+            send_virtual_gamepad(&gamepad);
+        }
+    });
+}
+
+/// Returns the on-screen gamepad's controls as the app draws them,
+/// [`VIRTUAL_CONTROL_FLOATS`] numbers each: its code, its frame's left,
+/// top, width and height in pixels, 1 if held and 0 if not, a stick's tilt
+/// across and down, and the directional pad's directions held.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_virtualGamepadControls(
+    env: *mut JNIEnv,
+    _class: jclass,
+) -> jfloatArray {
+    guarded(ptr::null_mut(), || {
+        // Codes and directions are below 32, which f32 holds exactly.
+        #[allow(clippy::cast_precision_loss)]
+        let floats: Vec<jfloat> = virtual_gamepad()
+            .controls()
+            .iter()
+            .flat_map(|view| {
+                let frame = view.frame;
+                let held = if view.held { 1.0 } else { 0.0 };
+                [
+                    view.control.code() as f32,
+                    frame.x,
+                    frame.y,
+                    frame.width,
+                    frame.height,
+                    held,
+                    view.tilt.0,
+                    view.tilt.1,
+                    view.directions as f32,
+                ]
+            })
+            .collect();
+        debug_assert_eq!(floats.len() % VIRTUAL_CONTROL_FLOATS, 0);
+        let Ok(length) = jsize::try_from(floats.len()) else {
+            return ptr::null_mut();
+        };
+        // SAFETY: the VM calls this with its environment; the array holds
+        // `length` floats.
+        unsafe {
+            let array = jni!(env, NewFloatArray, length);
+            if !array.is_null() {
+                jni!(env, SetFloatArrayRegion, array, 0, length, floats.as_ptr());
+            }
+            array
+        }
+    })
 }
 
 /// Tells the host the display changed to `width × height` pixels refreshing

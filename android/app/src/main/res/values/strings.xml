@@ -156,6 +156,10 @@ verbs; errors give one cause and one next step. The UI says "computer";
     <string name="menu_keyboard">Keyboard</string>
     <string name="menu_touch">Touch</string>
     <string name="menu_stats">Stats</string>
+    <string name="menu_controller">Controller</string>
+    <string name="controller_shown">On</string>
+    <string name="controller_hidden">Off</string>
+    <string name="controller_description">On-screen controller</string>
     <string name="stats_hidden">Off</string>
     <string name="stats_summary_level">Simple</string>
     <string name="stats_detailed_level">Detailed</string>

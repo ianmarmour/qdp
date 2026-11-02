@@ -89,8 +89,8 @@ private class Tile(@param:DrawableRes val icon: Int, val label: String, val valu
  * The stream's menu, over a dark scrim that closes it when tapped: a panel
  * from the right in landscape and from the bottom in portrait, headed by
  * the host's name and live statistics, with Resume (focused first),
- * Keyboard, Touch and Stats, and Disconnect set apart at the bottom in the
- * error color. B, Back, Escape and Start close it; focus stays inside.
+ * Keyboard, Controller, Touch and Stats, and Disconnect set apart at the
+ * bottom in the error color. B, Back, Escape and Start close it; focus stays inside.
  */
 @Composable
 fun StreamMenu(ui: StreamUiState, actions: StreamActions) {
@@ -145,6 +145,14 @@ private fun MenuPanel(ui: StreamUiState, actions: StreamActions, side: Boolean, 
     val tiles = listOf(
         Tile(R.drawable.ic_play_arrow_fill1, stringResource(R.string.menu_resume), null, actions.resume),
         Tile(R.drawable.ic_keyboard, stringResource(R.string.menu_keyboard), null, actions.showKeyboard),
+        Tile(
+            icon = R.drawable.ic_sports_esports,
+            label = stringResource(R.string.menu_controller),
+            value = stringResource(
+                if (ui.controller == Visibility.SHOWN) R.string.controller_shown else R.string.controller_hidden,
+            ),
+            onClick = actions.toggleController,
+        ),
         Tile(
             icon = if (ui.touchMode == TouchMode.TRACKPAD) R.drawable.ic_mouse else R.drawable.ic_touch_app,
             label = stringResource(R.string.menu_touch),

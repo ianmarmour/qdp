@@ -67,6 +67,15 @@ object Native {
     /** The forward pointer button. */
     const val BUTTON_FORWARD = 4
 
+    /** [virtualGamepadTouch]'s bit saying the on-screen gamepad looks different. */
+    const val VIRTUAL_REDRAW = 1
+
+    /** [virtualGamepadTouch]'s bit saying a button or direction was pressed. */
+    const val VIRTUAL_PRESSED = 2
+
+    /** The numbers [virtualGamepadControls] gives each control. */
+    const val VIRTUAL_CONTROL_FLOATS = 9
+
     /** Sets up logging, and gives the core the app's context and its files directory for the device's key. */
     fun init(context: Context) {
         init(context, context.filesDir.absolutePath)
@@ -163,6 +172,41 @@ object Native {
         leftTrigger: Float,
         rightTrigger: Float,
     )
+
+    /** Connects the on-screen gamepad as a gamepad of its own, or disconnects it with every control released. */
+    @JvmStatic external fun virtualGamepadConnected(connected: Boolean)
+
+    /**
+     * Lays the on-screen gamepad out on a screen [width] × [height] pixels,
+     * [density] pixels a dp, inside the safe area the insets leave.
+     */
+    @JvmStatic external fun virtualGamepadLayout(
+        width: Int,
+        height: Int,
+        density: Float,
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+    )
+
+    /**
+     * Takes a finger's touch on the on-screen gamepad, in one of the
+     * `TOUCH_` phases at [x], [y] on the screen, sending the gamepad's state
+     * if it changed; returns [VIRTUAL_REDRAW] and [VIRTUAL_PRESSED] bits.
+     */
+    @JvmStatic external fun virtualGamepadTouch(finger: Int, phase: Int, x: Float, y: Float): Int
+
+    /** Releases every control of the on-screen gamepad held. */
+    @JvmStatic external fun virtualGamepadRelease()
+
+    /**
+     * Returns the on-screen gamepad's controls, [VIRTUAL_CONTROL_FLOATS]
+     * numbers each: its code, its frame's left, top, width and height in
+     * pixels, 1 if held, a stick's tilt across and down, and the
+     * directional pad's directions held.
+     */
+    @JvmStatic external fun virtualGamepadControls(): FloatArray?
 
     /** Tells the host the display changed. */
     @JvmStatic external fun display(width: Int, height: Int, refreshMillihertz: Int)
