@@ -27,6 +27,12 @@ pub const SLOT: u32 = 1000;
 /// The gamepad's name, as the host is told it.
 pub const NAME: &str = "QDP on-screen controller";
 
+/// [`TouchOutcome::flags`]' bit saying the controls look different.
+pub const REDRAW: u32 = 1 << 0;
+
+/// [`TouchOutcome::flags`]' bit saying a button or direction was pressed.
+pub const PRESSED: u32 = 1 << 1;
+
 /// [`ControlView::directions`]'s bit for up.
 pub const UP: u32 = 1 << 0;
 
@@ -103,8 +109,8 @@ const MIDDLE_GAP: f32 = 16.0;
 
 /// The width the layout is designed for, in dp: narrower safe areas scale
 /// it down.
-const DESIGN_WIDTH: f32 =
-    2.0 * (INNER_COLUMN + DPAD_SIZE / 2.0 + CLEARANCE + 2.0 * SMALL_BUTTON_RADIUS + MIDDLE_GAP / 2.0);
+const DESIGN_WIDTH: f32 = 2.0
+    * (INNER_COLUMN + DPAD_SIZE / 2.0 + CLEARANCE + 2.0 * SMALL_BUTTON_RADIUS + MIDDLE_GAP / 2.0);
 
 /// The height the layout is designed for, in dp: shorter safe areas scale
 /// it down.
@@ -294,6 +300,15 @@ pub struct TouchOutcome {
     pub pressed: bool,
 }
 
+impl TouchOutcome {
+    /// Returns the outcome as the apps' bindings return it: [`REDRAW`] and
+    /// [`PRESSED`] bits.
+    pub fn flags(self) -> u32 {
+        let bit = |set: bool, bit: u32| if set { bit } else { 0 };
+        bit(self.redraw, REDRAW) | bit(self.pressed, PRESSED)
+    }
+}
+
 /// A control placed on the screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Placed {
@@ -330,8 +345,12 @@ pub struct VirtualGamepad {
 
 impl VirtualGamepad {
     /// Returns a gamepad not laid out yet, with no controls.
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            controls: Vec::new(),
+            fingers: Vec::new(),
+            unit: 0.0,
+        }
     }
 
     /// Lays the controls out on `screen`, releasing every control held, as
@@ -380,7 +399,11 @@ impl VirtualGamepad {
         let spread = FACE_SPREAD * unit;
         self.controls = vec![
             shoulder(Control::LeftTrigger, from_left(MARGIN), from_top(MARGIN)),
-            shoulder(Control::LeftShoulder, from_left(MARGIN), from_top(lower_shoulder)),
+            shoulder(
+                Control::LeftShoulder,
+                from_left(MARGIN),
+                from_top(lower_shoulder),
+            ),
             shoulder(
                 Control::RightTrigger,
                 from_right(MARGIN + SHOULDER_WIDTH),
@@ -391,7 +414,12 @@ impl VirtualGamepad {
                 from_right(MARGIN + SHOULDER_WIDTH),
                 from_top(lower_shoulder),
             ),
-            circle(Control::LeftStick, from_left(OUTER_COLUMN), upper, STICK_RADIUS),
+            circle(
+                Control::LeftStick,
+                from_left(OUTER_COLUMN),
+                upper,
+                STICK_RADIUS,
+            ),
             circle(
                 Control::DPad,
                 from_left(INNER_COLUMN),
@@ -445,7 +473,8 @@ impl VirtualGamepad {
                 self.fingers.retain(|finger| finger.id != id);
                 // A stick follows one touch at a time.
                 if let Some(control) = self.control_at(at).filter(|control| {
-                    !control.is_stick() || !self.fingers.iter().any(|finger| finger.control == *control)
+                    !control.is_stick()
+                        || !self.fingers.iter().any(|finger| finger.control == *control)
                 }) {
                     self.fingers.push(Finger {
                         id,
@@ -749,7 +778,8 @@ mod tests {
                     if round(a) && round(b) && distance(a.frame.center(), b.frame.center()) > 0.0 {
                         let apart = distance(a.frame.center(), b.frame.center());
                         assert!(
-                            apart >= (a.frame.width + b.frame.width) / 2.0 || !a.frame.overlaps(&b.frame),
+                            apart >= (a.frame.width + b.frame.width) / 2.0
+                                || !a.frame.overlaps(&b.frame),
                             "{screen:?}: {a:?} and {b:?}"
                         );
                     }
@@ -890,6 +920,20 @@ mod tests {
         gamepad.touch(1, TouchPhase::Down, center(&gamepad, Control::Y));
         assert!(gamepad.lay_out(&SCREENS[1]));
         assert_eq!(gamepad.state().buttons, 0);
+    }
+
+    /// The bindings' flags say what the app redraws and when it taps the
+    /// haptics.
+    #[test]
+    fn reports_outcomes_as_flags() {
+        let outcome = |redraw, pressed| TouchOutcome {
+            state_changed: true,
+            redraw,
+            pressed,
+        };
+        assert_eq!(outcome(false, false).flags(), 0);
+        assert_eq!(outcome(true, false).flags(), REDRAW);
+        assert_eq!(outcome(true, true).flags(), REDRAW | PRESSED);
     }
 
     /// Each control is known by its Standard Gamepad index, the sticks by
