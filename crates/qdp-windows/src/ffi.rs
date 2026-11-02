@@ -610,7 +610,7 @@ mod tests {
     /// a C compiler lays that out for 64-bit Windows.
     #[test]
     fn config_matches_the_header() {
-        assert_eq!(size_of::<QdpConfig>(), 96);
+        assert_eq!(size_of::<QdpConfig>(), 120);
         assert_eq!(offset_of!(QdpConfig, owner_window), 48);
         assert_eq!(offset_of!(QdpConfig, authentication), 56);
         assert_eq!(offset_of!(QdpConfig, width), 60);
@@ -618,6 +618,9 @@ mod tests {
         assert_eq!(offset_of!(QdpConfig, shortcuts), 84);
         assert_eq!(offset_of!(QdpConfig, clipboard), 88);
         assert_eq!(offset_of!(QdpConfig, statistics), 92);
+        assert_eq!(offset_of!(QdpConfig, gateway_address), 96);
+        assert_eq!(offset_of!(QdpConfig, gateway_pin), 104);
+        assert_eq!(offset_of!(QdpConfig, gateway_token), 112);
     }
 
     /// The version the app shows is the crate's, NUL-terminated.
