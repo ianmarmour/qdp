@@ -33,7 +33,6 @@ struct HostListView: View {
                             ForEach(yours) { row in rowButton(row) }
                             ForEach(throughGateway) { host in gatewayButton(host) }
                         }
-                        .brandRows()
                     }
                     // The network is searched while the list shows.
                     if store.networkAllowed {
@@ -47,10 +46,8 @@ struct HostListView: View {
                                     .accessibilityLabel("Searching")
                             }
                         }
-                        .brandRows()
                     }
                 }
-                .brandBackground()
             }
         }
         .confirmationDialog(
@@ -112,7 +109,6 @@ struct HostListView: View {
                 }
                 .buttonStyle(.borderedProminent)
             }
-            .brandBackground()
         } else {
             ContentUnavailableView {
                 Label("Local Network Access Is Off", systemImage: "wifi.exclamationmark")
@@ -121,7 +117,6 @@ struct HostListView: View {
             } actions: {
                 Button("Add by Address", action: addByAddress)
             }
-            .brandBackground()
         }
     }
 

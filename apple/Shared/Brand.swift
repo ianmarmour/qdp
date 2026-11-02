@@ -1,24 +1,14 @@
 import SwiftUI
 
-/// Quick Desktop's colours, from its icon, teal and cream, and the
-/// surfaces the iPhone and iPad app makes of them: cream in light mode, the
-/// icon's teal in dark mode. The accent colour, teal in light mode and cream
-/// in dark, is the iPhone and iPad app's `AccentColor`.
+/// Quick Desktop's colours, from its icon, teal and cream, which the
+/// iPhone and iPad app accents the system's own surfaces with. The accent
+/// colour, teal in light mode and cream in dark, as the icon is on black, is
+/// the iPhone and iPad app's `AccentColor`.
 enum Brand {
     /// The icon's teal.
     static let teal = Color(hex: 0x025559)
     /// The icon's cream.
     static let cream = Color(hex: 0xFCF5E3)
-
-    /// The screen behind lists and forms.
-    static func background(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(hex: 0x06292B) : Color(hex: 0xF6F0E3)
-    }
-
-    /// The rows of a list or form, on the background.
-    static func card(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(hex: 0x0D393C) : Color(hex: 0xFFFDF8)
-    }
 
     /// Text on the accent colour: cream on teal, teal on cream.
     static func onAccent(_ scheme: ColorScheme) -> Color {
@@ -136,49 +126,10 @@ struct HostIcon: View {
 }
 
 extension View {
-    /// Puts a list or form on Quick Desktop's background on iPhone and
-    /// iPad; the Mac keeps its own.
-    func brandBackground() -> some View {
-        modifier(BrandBackground())
-    }
-
-    /// Puts a section's rows on Quick Desktop's cards on iPhone and iPad.
-    func brandRows() -> some View {
-        modifier(BrandRows())
-    }
-
     /// Colours a form's switches, on iPhone and iPad, so that they show in
     /// dark mode too.
     func brandSwitches() -> some View {
         modifier(BrandSwitches())
-    }
-}
-
-/// [`View.brandBackground`].
-private struct BrandBackground: ViewModifier {
-    @Environment(\.colorScheme) private var scheme
-
-    func body(content: Content) -> some View {
-        #if os(iOS)
-        content
-            .scrollContentBackground(.hidden)
-            .background { Brand.background(scheme).ignoresSafeArea() }
-        #else
-        content
-        #endif
-    }
-}
-
-/// [`View.brandRows`].
-private struct BrandRows: ViewModifier {
-    @Environment(\.colorScheme) private var scheme
-
-    func body(content: Content) -> some View {
-        #if os(iOS)
-        content.listRowBackground(Brand.card(scheme))
-        #else
-        content
-        #endif
     }
 }
 
