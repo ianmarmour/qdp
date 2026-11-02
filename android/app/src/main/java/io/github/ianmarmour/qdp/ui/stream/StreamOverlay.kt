@@ -37,8 +37,8 @@ private const val COACHMARK_MILLIS = 8_000L
 /**
  * Everything drawn over the stream's video, always in dark theme: the
  * connecting screen, the reconnecting banner, the statistics pill inside
- * the display cutout, the first stream's menu tip, the menu, messages, and
- * the pairing, gateway sign-in and error dialogs.
+ * the display cutout, the first stream's menu tip, the on-screen gamepad,
+ * the menu, messages, and the pairing, gateway sign-in and error dialogs.
  */
 @Composable
 fun StreamOverlay(ui: StreamUiState, actions: StreamActions, gatewayUser: String = "") {
@@ -90,6 +90,9 @@ fun StreamOverlay(ui: StreamUiState, actions: StreamActions, gatewayUser: String
             exit = fadeOut(),
         ) {
             MenuCoachmark(gamepad)
+        }
+        if (ui.controller == Visibility.SHOWN && ui.phase != StreamPhase.CONNECTING) {
+            OnScreenController(ui.controllerControls)
         }
         AnimatedVisibility(visible = ui.phase == StreamPhase.CONNECTING, enter = fadeIn(), exit = fadeOut()) {
             ConnectingScreen(ui.hostName, ui.connectingStep, actions.disconnect)
