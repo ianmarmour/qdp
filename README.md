@@ -40,8 +40,17 @@ Build the `qdp` command, which is both the host and the client:
 cargo build --release
 ```
 
-This builds every crate but the Linux app, which needs GTK's development files
-besides (see [Linux app](#linux-app)).
+This builds every crate but the Linux app, which needs GTK 4's and
+libadwaita's development files and pkg-config besides, and builds with
+`cargo build --release -p qdp-gtk` (see [Linux app](#linux-app)):
+
+```bash
+sudo dnf install gtk4-devel libadwaita-devel
+```
+
+On Debian and Ubuntu that is
+`sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config`, and on Arch
+`sudo pacman -S gtk4 libadwaita`.
 
 On the host, serve. The host creates its key in `./qdp-identity` the first
 time, listens on UDP port 4433 unless given `--listen`, and advertises itself
@@ -496,16 +505,24 @@ follows. A host set up with a key pin and a token is added by its address,
 pin and token instead, the token kept in a file only the user may read and
 passed to `qdp connect` in `QDP_TOKEN`, out of the command line. Its
 preferences (Ctrl+,) choose the video's resolution and decoding, sound, the
-microphone, the clipboard and touchpad gestures for every stream. It keeps the
-client's key and the hosts it paired with in `~/.local/share/qdp`, its
-settings in `~/.config/qdp`, and runs the `qdp` installed beside it, or else
+microphone, the clipboard and touchpad gestures for every stream, and the
+organization's [gateway](#gateway): its address, the user's name and, if its
+administrator gives one, its key pin. With a gateway set, a computer added by
+its ID on the gateway or its name inside the network is reached through it,
+and listed under it; the app asks for the user's password and a code from
+their authenticator app, showing the QR code that adds the gateway to the app
+the first time, and later connections sign in with the session `qdp` keeps,
+asking nothing until it expires. It keeps the client's key, the hosts it
+paired with and its gateway sign-ins in `~/.local/share/qdp`, its settings
+and gateway in `~/.config/qdp`, and runs the `qdp` installed beside it, or else
 the one on the `PATH`. The release's `qdp-gtk-linux-x86_64.rpm`, with `qdp`'s RPM,
 installs it with its desktop entry, icons and AppStream metadata, so that it
 shows in the desktop's menus and software center; its
 `qdp-gtk-linux-x86_64.tar.gz`, extracted into `~/.local`, installs it for one
 user. Building it needs GTK's and libadwaita's development files, as
-`libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu, or `gtk4-devel`
-and `libadwaita-devel` on Fedora:
+`libgtk-4-dev`, `libadwaita-1-dev` and `pkg-config` on Debian and Ubuntu,
+`gtk4-devel` and `libadwaita-devel` on Fedora, or `gtk4` and `libadwaita` on
+Arch:
 
 ```bash
 cargo build --release -p qdp-cli -p qdp-gtk && ./target/release/qdp-gtk

@@ -89,12 +89,21 @@ pub fn read_lines(
 
 /// Writes `text` and a line break to `process`'s standard input.
 pub fn write_line(process: &gio::Subprocess, text: &str) {
+    write_lines(process, &[text]);
+}
+
+/// Writes `lines`, each with a line break, to `process`'s standard input,
+/// in one write: a stream refuses a write while another is under way.
+pub fn write_lines(process: &gio::Subprocess, lines: &[&str]) {
     let Some(input) = process.stdin_pipe() else {
         return;
     };
-    let line = format!("{text}\n").into_bytes();
+    let bytes: Vec<u8> = lines
+        .iter()
+        .flat_map(|line| line.bytes().chain(std::iter::once(b'\n')))
+        .collect();
     glib::spawn_future_local(async move {
         // A process that stopped reading has ended, which it reports.
-        let _ = input.write_all_future(line, glib::Priority::DEFAULT).await;
+        let _ = input.write_all_future(bytes, glib::Priority::DEFAULT).await;
     });
 }

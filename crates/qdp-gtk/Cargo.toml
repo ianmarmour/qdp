@@ -17,6 +17,7 @@ publish = false
 [target.'cfg(target_os = "linux")'.dependencies]
 adw.workspace = true
 gtk.workspace = true
+qrcode.workspace = true
 
 [lints]
 workspace = true

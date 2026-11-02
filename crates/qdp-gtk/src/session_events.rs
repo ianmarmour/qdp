@@ -5,13 +5,25 @@
 
 use crate::key_pin::KeyPin;
 
-/// Why a code is asked for.
+/// Whether something is asked for the first time, or again after an answer
+/// that did not work: a pairing code, or a gateway's credentials or code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodeRequest {
-    /// The host shows a code for the first time.
+    /// The first time: for a pairing code, the host shows one.
     First,
-    /// The last code did not work, and the host shows a new one.
+    /// Again: for a pairing code, the host shows a new one.
     Retry,
+}
+
+impl CodeRequest {
+    /// Reads a line's `first` or `retry`.
+    fn parse(word: &str) -> Option<Self> {
+        match word {
+            "first" => Some(Self::First),
+            "retry" => Some(Self::Retry),
+            _ => None,
+        }
+    }
 }
 
 /// Something a session reports.
@@ -30,6 +42,25 @@ pub enum SessionEvent {
     PairingCode(CodeRequest),
     /// Pairing succeeded with the host whose key this is; `qdp` keeps it.
     Paired(KeyPin),
+    /// A gateway needs the user's name and password, which the app writes
+    /// back.
+    GatewaySignIn {
+        /// Whether an earlier attempt failed.
+        request: CodeRequest,
+        /// The gateway's name for users.
+        gateway: String,
+    },
+    /// A gateway needs a code from the user's authenticator app, which the
+    /// app writes back.
+    GatewayCode {
+        /// Whether an earlier code did not work.
+        request: CodeRequest,
+        /// The `otpauth://` URI to show as a QR code first, for an app that
+        /// does not have the gateway's secret yet.
+        enrollment: Option<String>,
+        /// The gateway's name for users.
+        gateway: String,
+    },
     /// The session ended normally.
     Ended,
     /// The session failed.
@@ -50,11 +81,27 @@ impl SessionEvent {
                     error: error.to_owned(),
                 })
             }
-            "pair" => match rest {
-                "first" => Some(Self::PairingCode(CodeRequest::First)),
-                "retry" => Some(Self::PairingCode(CodeRequest::Retry)),
-                _ => None,
-            },
+            "pair" => CodeRequest::parse(rest).map(Self::PairingCode),
+            "signin" => {
+                let (request, gateway) = rest.split_once(' ')?;
+                Some(Self::GatewaySignIn {
+                    request: CodeRequest::parse(request)?,
+                    gateway: gateway.to_owned(),
+                })
+            }
+            "totp" => {
+                let mut fields = rest.splitn(3, ' ');
+                let request = CodeRequest::parse(fields.next()?)?;
+                let enrollment = match fields.next()? {
+                    "-" => None,
+                    uri => Some(uri.to_owned()),
+                };
+                Some(Self::GatewayCode {
+                    request,
+                    enrollment,
+                    gateway: fields.next()?.to_owned(),
+                })
+            }
             "paired" => KeyPin::parse(rest).map(Self::Paired),
             "ended" => Some(Self::Ended),
             "failed" => Some(Self::Failed(rest.to_owned())),
@@ -85,6 +132,29 @@ mod tests {
                 &format!("paired {pin}"),
                 SessionEvent::Paired(KeyPin::parse(&pin).unwrap()),
             ),
+            (
+                "signin retry Example Corp",
+                SessionEvent::GatewaySignIn {
+                    request: CodeRequest::Retry,
+                    gateway: "Example Corp".to_owned(),
+                },
+            ),
+            (
+                "totp first otpauth://totp/Example%20Corp:alice?secret=AB Example Corp",
+                SessionEvent::GatewayCode {
+                    request: CodeRequest::First,
+                    enrollment: Some("otpauth://totp/Example%20Corp:alice?secret=AB".to_owned()),
+                    gateway: "Example Corp".to_owned(),
+                },
+            ),
+            (
+                "totp retry - Example Corp",
+                SessionEvent::GatewayCode {
+                    request: CodeRequest::Retry,
+                    enrollment: None,
+                    gateway: "Example Corp".to_owned(),
+                },
+            ),
             ("ended", SessionEvent::Ended),
             (
                 "failed closed by peer",
@@ -104,6 +174,8 @@ mod tests {
             "cursor",
             "pair maybe",
             "paired 12",
+            "signin later Example Corp",
+            "totp first",
         ] {
             assert_eq!(SessionEvent::parse(line), None, "{line}");
         }

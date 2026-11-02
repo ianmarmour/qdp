@@ -56,6 +56,9 @@ impl Session {
                 environment.push((TOKEN_VARIABLE, token.as_str()));
             }
             Authentication::Pair => arguments.push(OsStr::new("--pair")),
+            // The gateway vouches for the user, and knows the host's key;
+            // its options are among `options`.
+            Authentication::Gateway => {}
         }
         arguments.extend(options.iter().map(OsStr::new));
         let process = command::start_with_environment(&arguments, &environment)?;
@@ -87,9 +90,15 @@ impl Session {
         Ok(Self { process, cancelled })
     }
 
-    /// Answers a pairing host's request for its code.
+    /// Answers a pairing host's request for its code, or a gateway's for
+    /// one from the user's authenticator app.
     pub fn send_code(&self, code: &str) {
         command::write_line(&self.process, code);
+    }
+
+    /// Answers a gateway's request for the user's name and password.
+    pub fn send_credentials(&self, user: &str, password: &str) {
+        command::write_lines(&self.process, &[user, password]);
     }
 
     /// Ends the session, as when the user declines to pair.

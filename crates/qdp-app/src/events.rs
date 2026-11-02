@@ -17,13 +17,17 @@
 //! | `stats <fps> <latency_ms\|-> <decode_ms> <worst>` | The last second's video. |
 //! | `pair first\|retry` | Pairing needs the code the host shows; `retry` after a code that did not work. |
 //! | `paired <pin>` | Pairing succeeded with the host whose key pin is `<pin>`, in hexadecimal. |
+//! | `signin first\|retry <gateway>` | The gateway named `<gateway>` needs the user's name and password; `retry` after an attempt that failed. |
+//! | `totp first\|retry <uri\|-> <gateway>` | The gateway needs a code from the user's authenticator app; `<uri>` is an `otpauth://` URI to show as a QR code first, for an app without the gateway's secret yet. |
 //! | `ended` | The session ended normally. |
 //! | `failed <error>` | The session failed. |
 //!
 //! A `stats` line's `<worst>` is the slowest frame's latency, then the stages
 //! it went through: capture to its first fragment, transfer, waiting for the
 //! decoder and decoding, each in milliseconds; or five `-` when no frame's
-//! latency is known. The app answers a `pair` line with `Native.pairingCode`.
+//! latency is known. The app answers a `pair` line with `Native.pairingCode`,
+//! a `signin` line with the user's name and password, and a `totp` line with
+//! the code.
 
 use std::fmt;
 use std::time::Duration;
@@ -86,17 +90,46 @@ pub enum Event {
     /// Pairing succeeded with the host whose key this is, which the app
     /// keeps to connect with from then on.
     Paired(KeyPin),
+    /// A gateway needs the user's directory name and password (Section 13.4).
+    GatewaySignIn {
+        /// Whether an earlier attempt failed.
+        request: CodeRequest,
+        /// The gateway's name for users.
+        gateway: String,
+    },
+    /// A gateway needs a TOTP code from the user's authenticator app.
+    GatewayCode {
+        /// Whether an earlier code did not work.
+        request: CodeRequest,
+        /// An `otpauth://` URI with a secret for the user to add to their
+        /// app first, as a QR code, if the gateway offers one.
+        enrollment: Option<String>,
+        /// The gateway's name for users.
+        gateway: String,
+    },
     /// The session ended.
     Ended(Ending),
 }
 
-/// Why the app is asked for a pairing code.
+/// Whether the app is asked for something the first time, or again after
+/// an answer that did not work: a pairing code, a gateway's credentials or
+/// code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CodeRequest {
-    /// The host shows a code for the first time.
+    /// The first time: for a pairing code, the host shows one.
     First,
-    /// The last code did not work, and the host shows a new one.
+    /// Again: for a pairing code, the host shows a new one.
     Retry,
+}
+
+impl CodeRequest {
+    /// Returns the request's word in event lines.
+    fn word(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::Retry => "retry",
+        }
+    }
 }
 
 /// How a session ended.
@@ -185,11 +218,22 @@ impl fmt::Display for Event {
                     milliseconds(stats.decode)
                 )
             }
-            Self::PairingCode(request) => formatter.write_str(match request {
-                CodeRequest::First => "pair first",
-                CodeRequest::Retry => "pair retry",
-            }),
+            Self::PairingCode(request) => write!(formatter, "pair {}", request.word()),
             Self::Paired(pin) => write!(formatter, "paired {}", format_pin(*pin)),
+            Self::GatewaySignIn { request, gateway } => {
+                write!(formatter, "signin {} {gateway}", request.word())
+            }
+            Self::GatewayCode {
+                request,
+                enrollment,
+                gateway,
+            } => write!(
+                formatter,
+                "totp {} {} {gateway}",
+                request.word(),
+                // A URI has no spaces, which its percent-encoding escapes.
+                enrollment.as_deref().unwrap_or("-")
+            ),
             Self::Ended(Ending::Normal) => formatter.write_str("ended"),
             Self::Ended(Ending::Failed(error)) => write!(formatter, "failed {error}"),
         }
@@ -270,6 +314,29 @@ mod tests {
             ),
             (Event::PairingCode(CodeRequest::First), "pair first"),
             (Event::PairingCode(CodeRequest::Retry), "pair retry"),
+            (
+                Event::GatewaySignIn {
+                    request: CodeRequest::First,
+                    gateway: "Example Corp".to_owned(),
+                },
+                "signin first Example Corp",
+            ),
+            (
+                Event::GatewayCode {
+                    request: CodeRequest::First,
+                    enrollment: Some("otpauth://totp/Example%20Corp:alice?secret=AB".to_owned()),
+                    gateway: "Example Corp".to_owned(),
+                },
+                "totp first otpauth://totp/Example%20Corp:alice?secret=AB Example Corp",
+            ),
+            (
+                Event::GatewayCode {
+                    request: CodeRequest::Retry,
+                    enrollment: None,
+                    gateway: "Example Corp".to_owned(),
+                },
+                "totp retry - Example Corp",
+            ),
             (Event::Ended(Ending::Normal), "ended"),
             (
                 Event::Ended(Ending::Failed("closed by peer".to_owned())),

@@ -369,6 +369,10 @@ pub struct WindowApp {
     /// Whether the user released the confinement with the local release
     /// action, until the host's next pointer mode.
     confinement_released: bool,
+    /// Whether the window shows yet: it opens hidden, and shows with the
+    /// first frame, so that it covers nothing while the client pairs or
+    /// signs in to a gateway, as in an app's dialog.
+    shown: bool,
     /// The modifier keys held.
     modifiers: ModifiersState,
     /// The fingers touching the window.
@@ -503,6 +507,7 @@ impl WindowApp {
             captured: false,
             confinement: None,
             confinement_released: false,
+            shown: false,
             modifiers: ModifiersState::empty(),
             fingers: HashSet::new(),
             held_buttons: HashSet::new(),
@@ -734,6 +739,13 @@ impl WindowApp {
     /// refresh later, after a newer frame replaced it; at the next redraw
     /// otherwise.
     fn frame_ready(&mut self) {
+        if !self.shown
+            && let Some(display) = &self.display
+        {
+            // Wayland shows windows from the start.
+            display.window.set_visible(true);
+            self.shown = true;
+        }
         if self.on_gpu() {
             self.draw();
             return;
@@ -908,7 +920,8 @@ impl WindowApp {
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<Display, String> {
         let attributes = Window::default_attributes()
             .with_title(self.window_title())
-            .with_inner_size(INITIAL_SIZE);
+            .with_inner_size(INITIAL_SIZE)
+            .with_visible(false);
         let window = event_loop
             .create_window(attributes)
             .map(Rc::new)

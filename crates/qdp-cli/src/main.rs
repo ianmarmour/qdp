@@ -1166,10 +1166,9 @@ async fn receive(
     // The endpoint of the attempt under way, which closes when the viewer
     // stops.
     let current = Mutex::new(direct.as_ref().map(|(endpoint, _)| Arc::clone(endpoint)));
-    // An app reading the events signs in from a session token the
-    // terminal's sign-in kept.
+    // An app reading the events asks its user itself.
     let sign_in = if events.enabled() {
-        SignInPrompt::new(|_| Box::pin(async { None }))
+        events.sign_in_prompt()
     } else {
         gateway::terminal_prompt(args.user.clone(), password().ok())
     };
