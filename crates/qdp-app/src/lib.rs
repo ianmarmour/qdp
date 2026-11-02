@@ -16,6 +16,8 @@
 //! - [`placement`] fits the picture in the app's view, keeping its shape.
 //! - [`qr`] encodes the QR code that enrolls a user's authenticator app
 //!   with a gateway.
+//! - [`virtual_gamepad`] lays out the on-screen gamepad the phone and
+//!   tablet apps can show, and works out its state from the touches on it.
 //! - `window_input`, with the `winit` feature, converts the input of winit's
 //!   windows to QDP's and measures the display they show, for the desktop
 //!   clients.
@@ -30,5 +32,6 @@ pub mod qr;
 pub mod session;
 pub mod settings;
 pub mod sink;
+pub mod virtual_gamepad;
 #[cfg(feature = "winit")]
 pub mod window_input;
