@@ -36,6 +36,22 @@
  *                                  key pin is <pin>, in hexadecimal, which
  *                                  the app keeps to connect with from then
  *                                  on.
+ *   signin first|retry <gateway>   The gateway named <gateway> needs the
+ *                                  user's name and password; "retry" after
+ *                                  an attempt that failed. Answer with
+ *                                  qdp_session_sign_in.
+ *   totp first|retry <uri|-> <gateway>
+ *                                  The gateway needs a code from the
+ *                                  user's authenticator app; <uri> is an
+ *                                  otpauth:// URI to show as a QR code
+ *                                  first, for an app without the gateway's
+ *                                  secret yet. Answer with
+ *                                  qdp_session_sign_in_code.
+ *   gatewaysession <token> <seconds>
+ *                                  The gateway gave a session token, in
+ *                                  hexadecimal, valid for <seconds>, which
+ *                                  the app keeps to start later sessions
+ *                                  with, so that they ask nothing.
  *   ended                          The session ended: the user or the host
  *                                  closed it.
  *   failed <error>                 The session failed.
@@ -70,6 +86,9 @@ enum QdpAuthentication {
     QDP_AUTH_PAIRED = 1,
     /* Pairing with the code the host shows. */
     QDP_AUTH_PAIR = 2,
+    /* Through the gateway, which vouches for the user, asking for their
+     * password and a code with "signin" and "totp" lines. */
+    QDP_AUTH_GATEWAY = 3,
 };
 
 /* Where the video is decoded. */
@@ -152,6 +171,15 @@ typedef struct QdpConfig {
     /* 1 if the stream's statistics show over the picture as it starts; 0
      * if not. */
     int32_t statistics;
+    /* The organization's gateway the host is reached through, or NULL or
+     * empty to reach it directly: its address; its key pin, or NULL or
+     * empty to verify it by the system's certificate authorities; and the
+     * token of the last "gatewaysession" line, or NULL or empty to sign
+     * in. Through a gateway, host is the computer's ID there or its name
+     * inside the network. */
+    const char *gateway_address;
+    const char *gateway_pin;
+    const char *gateway_token;
 } QdpConfig;
 
 /* A running session. */
@@ -186,6 +214,20 @@ char *qdp_session_next_event(QdpSession *session, uint32_t timeout_millis);
 /* Answers a "pair" line with the code the host shows, or declines with
  * null. */
 void qdp_session_pairing_code(QdpSession *session, const char *code);
+
+/* Answers a "signin" line with the user's name and password, or declines
+ * with a NULL user, which ends the session. Any thread may call it. */
+void qdp_session_sign_in(QdpSession *session, const char *user, const char *password);
+
+/* Answers a "totp" line with the code from the user's authenticator app,
+ * or declines with NULL, which ends the session. Any thread may call it. */
+void qdp_session_sign_in_code(QdpSession *session, const char *code);
+
+/* Returns the QR code of text, as a "totp" line's URI is shown: its
+ * modules on a side, a colon, then each module, row by row, '1' if dark
+ * and '0' if light; or NULL if it is too long for a QR code. The app frees
+ * it with qdp_string_free. */
+char *qdp_qr_modules(const char *text);
 
 /* Ends the session and closes its window, returning at once; its last line
  * follows once it has ended. Any thread may call it. */

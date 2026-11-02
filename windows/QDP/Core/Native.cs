@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace Qdp.Core;
@@ -20,6 +21,15 @@ internal static partial class Native
     /// <summary><c>QDP_AUTH_PAIR</c>: pairing with the code the host shows.</summary>
     internal const int AuthPair = 2;
 
+    /// <summary><c>QDP_AUTH_GATEWAY</c>: through the gateway, which vouches for the user.</summary>
+    internal const int AuthGateway = 3;
+
+    /// <summary>What separates a QR code's size from its modules in <c>qdp_qr_modules</c>'s string.</summary>
+    private const char QrSizeSeparator = ':';
+
+    /// <summary>A dark module in <c>qdp_qr_modules</c>'s string.</summary>
+    private const char QrDarkModule = '1';
+
     /// <summary>What a session connects with, as <c>QdpConfig</c> lays it out.</summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct QdpConfig
@@ -41,6 +51,9 @@ internal static partial class Native
         public int Shortcuts;
         public int Clipboard;
         public int Statistics;
+        public IntPtr GatewayAddress;
+        public IntPtr GatewayPin;
+        public IntPtr GatewayToken;
     }
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
@@ -64,6 +77,15 @@ internal static partial class Native
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial void qdp_session_pairing_code(IntPtr session, string? code);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial void qdp_session_sign_in(IntPtr session, string? user, string? password);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial void qdp_session_sign_in_code(IntPtr session, string? code);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr qdp_qr_modules(string text);
 
     [LibraryImport(Library)]
     internal static partial void qdp_session_stop(IntPtr session);
@@ -101,4 +123,29 @@ internal static partial class Native
     /// pairing, or null if the device's key cannot be kept.
     /// </summary>
     internal static string? ClientPin => TakeString(qdp_client_pin());
+
+    /// <summary>
+    /// Returns the QR code of <paramref name="text"/>, as the core makes it,
+    /// or null if it is too long for one.
+    /// </summary>
+    internal static QrCode? QrCodeOf(string text)
+    {
+        var modules = TakeString(qdp_qr_modules(text));
+        var separator = modules?.IndexOf(QrSizeSeparator) ?? -1;
+        if (modules is null || separator < 0 || !int.TryParse(modules.AsSpan(0, separator), NumberStyles.None, CultureInfo.InvariantCulture, out var size))
+        {
+            return null;
+        }
+        var dark = modules[(separator + 1)..].Select(module => module == QrDarkModule).ToArray();
+        return dark.Length == size * size ? new QrCode(size, dark) : null;
+    }
+}
+
+/// <summary>A QR code's modules, without its quiet zone.</summary>
+/// <param name="Size">Its modules on a side.</param>
+/// <param name="Dark">Whether each module is dark, row by row.</param>
+internal sealed record QrCode(int Size, bool[] Dark)
+{
+    /// <summary>Returns whether the module in column <paramref name="x"/> of row <paramref name="y"/> is dark.</summary>
+    internal bool IsDark(int x, int y) => Dark[(y * Size) + x];
 }

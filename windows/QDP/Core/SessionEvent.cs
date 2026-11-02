@@ -11,6 +11,12 @@ internal sealed record VideoStats(int Frames, double? LatencyMs, double DecodeMs
 /// <summary>Something a session tells the app, from one of its lines.</summary>
 internal abstract record SessionEvent
 {
+    /// <summary>The word that asks again, after an answer that did not work.</summary>
+    private const string RetryWord = "retry";
+
+    /// <summary>What a <c>totp</c> line has in place of an enrollment URI when it has none.</summary>
+    private const string NoEnrollmentWord = "-";
+
     /// <summary>Connecting to the host.</summary>
     internal sealed record Connecting : SessionEvent;
 
@@ -34,6 +40,27 @@ internal abstract record SessionEvent
 
     /// <summary>Pairing succeeded with the host whose key pin this is.</summary>
     internal sealed record Paired(string Pin) : SessionEvent;
+
+    /// <summary>
+    /// The gateway named <paramref name="Gateway"/> needs the user's name and
+    /// password; again after an attempt that failed.
+    /// </summary>
+    internal sealed record GatewaySignIn(bool Retry, string Gateway) : SessionEvent;
+
+    /// <summary>
+    /// The gateway named <paramref name="Gateway"/> needs a code from the
+    /// user's authenticator app; again after one that did not work. The
+    /// <paramref name="Enrollment"/> URI, to show as a QR code, adds the
+    /// gateway to an app that does not have it yet.
+    /// </summary>
+    internal sealed record GatewayCode(bool Retry, string? Enrollment, string Gateway) : SessionEvent;
+
+    /// <summary>
+    /// The gateway gave a session token, in hexadecimal, valid for
+    /// <paramref name="LifetimeSeconds"/>, which later sessions start with
+    /// so that they ask nothing.
+    /// </summary>
+    internal sealed record GatewaySession(string Token, long LifetimeSeconds) : SessionEvent;
 
     /// <summary>The session ended; with why, if it failed.</summary>
     internal sealed record Ended(string? Failure) : SessionEvent;
@@ -59,8 +86,16 @@ internal abstract record SessionEvent
                 double.TryParse(values[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var latency) ? latency : null,
                 double.TryParse(values[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var decode) ? decode : 0)),
             "microphone" => new Microphone(rest == "on"),
-            "pair" => new PairingCode(rest == "retry"),
+            "pair" => new PairingCode(rest == RetryWord),
             "paired" => new Paired(rest),
+            "signin" when values.Length >= 1 => new GatewaySignIn(values[0] == RetryWord, AfterFirstValue(rest)),
+            "totp" when values.Length >= 2 => new GatewayCode(
+                values[0] == RetryWord,
+                values[1] == NoEnrollmentWord ? null : values[1],
+                AfterFirstValue(AfterFirstValue(rest))),
+            "gatewaysession" when values.Length >= 2
+                && long.TryParse(values[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var lifetime) =>
+                new GatewaySession(values[0], lifetime),
             "ended" => new Ended(null),
             "failed" => new Ended(rest.Length > 0 ? rest : "The session failed."),
             _ => null,

@@ -56,6 +56,32 @@ public class SessionEventTests
         Assert.Equal(new SessionEvent.Microphone(false), SessionEvent.Parse("microphone off"));
     }
 
+    /// <summary>
+    /// The gateway asks for the user's name and password, then a code, with
+    /// the URI that adds it to an authenticator app the first time, and
+    /// gives a session token; its name may have spaces.
+    /// </summary>
+    [Fact]
+    public void ParsesTheGatewaysSignIn()
+    {
+        Assert.Equal(
+            new SessionEvent.GatewaySignIn(false, "Example Corp"),
+            SessionEvent.Parse("signin first Example Corp"));
+        Assert.Equal(
+            new SessionEvent.GatewaySignIn(true, "gw.corp.example.com"),
+            SessionEvent.Parse("signin retry gw.corp.example.com"));
+        Assert.Equal(
+            new SessionEvent.GatewayCode(false, "otpauth://totp/Example%20Corp:alice?secret=AB", "Example Corp"),
+            SessionEvent.Parse("totp first otpauth://totp/Example%20Corp:alice?secret=AB Example Corp"));
+        Assert.Equal(
+            new SessionEvent.GatewayCode(true, null, "Example Corp"),
+            SessionEvent.Parse("totp retry - Example Corp"));
+        Assert.Equal(
+            new SessionEvent.GatewaySession("01ab", 43200),
+            SessionEvent.Parse("gatewaysession 01ab 43200"));
+        Assert.Null(SessionEvent.Parse("gatewaysession 01ab soon"));
+    }
+
     /// <summary>Lines the app does not use are none of its events.</summary>
     [Fact]
     public void IgnoresOtherLines()

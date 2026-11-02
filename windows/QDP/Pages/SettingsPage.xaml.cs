@@ -8,8 +8,9 @@ using Windows.ApplicationModel.DataTransfer;
 namespace Qdp.Pages;
 
 /// <summary>
-/// What streams ask for and how they show, kept as soon as the user
-/// changes it; and the app's version and this PC's key pin.
+/// What streams ask for and how they show, and the organization's gateway,
+/// kept as soon as the user changes them; and the app's version and this
+/// PC's key pin.
 /// </summary>
 public sealed partial class SettingsPage : Page
 {
@@ -18,6 +19,9 @@ public sealed partial class SettingsPage : Page
 
     /// <summary>Whether the controls are being set from the settings, which changes nothing.</summary>
     private bool loading;
+
+    /// <summary>Whether the core is there to check key pins, as it is unless the app cannot stream.</summary>
+    private bool canCheckPins;
 
     /// <summary>Makes the page.</summary>
     public SettingsPage() => InitializeComponent();
@@ -40,7 +44,11 @@ public sealed partial class SettingsPage : Page
         ShortcutsBox.SelectedIndex = (int)settings.Shortcuts;
         ClipboardSwitch.IsOn = settings.ShareClipboard;
         StatisticsSwitch.IsOn = settings.ShowStatistics;
+        GatewayAddressBox.Text = settings.Gateway.Address;
+        GatewayUserBox.Text = settings.Gateway.User;
+        GatewayPinBox.Text = settings.Gateway.Pin;
         loading = false;
+        canCheckPins = window.Problem is null;
         if (window.Problem is null)
         {
             VersionText.Text = $"Version {Native.Version}";
@@ -76,6 +84,32 @@ public sealed partial class SettingsPage : Page
         settings.Shortcuts = (ShortcutsChoice)Math.Max(ShortcutsBox.SelectedIndex, 0);
         settings.ShareClipboard = ClipboardSwitch.IsOn;
         settings.ShowStatistics = StatisticsSwitch.IsOn;
+        Storage.SaveSettings(settings);
+    }
+
+    /// <summary>
+    /// Keeps the gateway as typed, once its key pin, if given, is one: the
+    /// stream through it would fail otherwise.
+    /// </summary>
+    private void OnGatewayChanged(object sender, TextChangedEventArgs args)
+    {
+        if (loading || settings is null)
+        {
+            return;
+        }
+        var pin = GatewayPinBox.Text.Trim().ToLowerInvariant();
+        var valid = pin.Length == 0 || (canCheckPins && Native.qdp_is_pin(pin));
+        GatewayPinError.Visibility = valid ? Visibility.Collapsed : Visibility.Visible;
+        if (!valid)
+        {
+            return;
+        }
+        settings.Gateway = new GatewaySettings
+        {
+            Address = GatewayAddressBox.Text.Trim(),
+            User = GatewayUserBox.Text.Trim(),
+            Pin = pin,
+        };
         Storage.SaveSettings(settings);
     }
 

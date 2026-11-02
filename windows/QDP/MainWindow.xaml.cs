@@ -42,8 +42,8 @@ public sealed partial class MainWindow : Window
     /// <summary>The stream, while one starts or runs.</summary>
     private StreamSession? session;
 
-    /// <summary>The pairing code dialog, while it shows.</summary>
-    private ContentDialog? pairingDialog;
+    /// <summary>The dialog that asks for a pairing code or signs in to the gateway, while it shows.</summary>
+    private ContentDialog? sessionDialog;
 
     /// <summary>Why the app cannot stream at all, if it cannot.</summary>
     private readonly string? problem;
@@ -110,7 +110,8 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// Starts a stream of <paramref name="target"/>, unless one runs, with
     /// the token the Credential Locker keeps for it if it needs one and has
-    /// none.
+    /// none, and through the gateway set in the settings, with its last
+    /// session token, if the host is reached through it.
     /// </summary>
     internal void Connect(StreamTarget target)
     {
@@ -119,6 +120,19 @@ public sealed partial class MainWindow : Window
             return;
         }
         HostsPage?.ClearProblem();
+        GatewayRoute? gateway = null;
+        if (target.Authentication == Authentication.Gateway)
+        {
+            if (!Settings.Gateway.IsSet)
+            {
+                HostsPage?.ShowProblem(
+                    $"Couldn't connect to {target.Name}",
+                    "It is reached through your organization's gateway. Set the gateway in Settings.");
+                return;
+            }
+            var address = Settings.Gateway.Address.Trim();
+            gateway = new GatewayRoute(address, Settings.Gateway.Pin.Trim(), GatewaySessions.Find(address) ?? "");
+        }
         if (target is { Authentication: Authentication.Token, Token: "" })
         {
             if (Tokens.Find(target.Pin) is not { } token)
@@ -133,7 +147,7 @@ public sealed partial class MainWindow : Window
         try
         {
             session = StreamSession.Start(
-                target, Settings, WindowNative.GetWindowHandle(this), DispatcherQueue, OnSessionEvent);
+                target, gateway, Settings, WindowNative.GetWindowHandle(this), DispatcherQueue, OnSessionEvent);
         }
         catch (Exception exception) when (exception is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException)
         {
@@ -220,6 +234,21 @@ public sealed partial class MainWindow : Window
             case SessionEvent.Paired(var pin):
                 Hosts.Keep(new KeptHost { Name = name, Address = running.Target.Address, Pin = pin });
                 break;
+            case SessionEvent.GatewaySignIn(var retry, var gateway):
+                ComeBack();
+                var credentials = await GatewayDialogs.AskSignIn(
+                    Content.XamlRoot, gateway, retry, Settings.Gateway.User, dialog => sessionDialog = dialog);
+                KeepGatewayUser(credentials?.User);
+                running.AnswerSignIn(credentials?.User, credentials?.Password);
+                break;
+            case SessionEvent.GatewayCode(var retry, var enrollment, var gateway):
+                ComeBack();
+                running.AnswerSignInCode(await GatewayDialogs.AskCode(
+                    Content.XamlRoot, gateway, enrollment, retry, dialog => sessionDialog = dialog));
+                break;
+            case SessionEvent.GatewaySession(var token, var lifetime) when running.Gateway is { } route:
+                GatewaySessions.Keep(route.Address, token, lifetime);
+                break;
             case SessionEvent.Ended(var failure):
                 Ended(name, failure);
                 break;
@@ -238,6 +267,7 @@ public sealed partial class MainWindow : Window
         {
             Authentication.Paired => HostAccess.Paired,
             Authentication.Token => HostAccess.Token,
+            Authentication.Gateway => HostAccess.Gateway,
             _ => null,
         };
         if (access is { } kept)
@@ -245,6 +275,19 @@ public sealed partial class MainWindow : Window
             Hosts.Keep(
                 new KeptHost { Name = target.Name, Address = target.Address, Pin = target.Pin, Access = kept },
                 target.Token);
+        }
+    }
+
+    /// <summary>
+    /// Keeps the name the user signed in to the gateway with, if the settings
+    /// had none, so that the next sign-in asks only for the password.
+    /// </summary>
+    private void KeepGatewayUser(string? user)
+    {
+        if (user is { Length: > 0 } && Settings.Gateway.User.Trim().Length == 0)
+        {
+            Settings.Gateway.User = user;
+            Storage.SaveSettings(Settings);
         }
     }
 
@@ -286,7 +329,7 @@ public sealed partial class MainWindow : Window
         streaming = false;
         cameBackToReconnect = false;
         reconnectingTimer.Stop();
-        pairingDialog?.Hide();
+        sessionDialog?.Hide();
         StreamOverlay.Visibility = Visibility.Collapsed;
         Hosts.SetStreaming(false);
         ComeBack();
@@ -327,9 +370,9 @@ public sealed partial class MainWindow : Window
             IsPrimaryButtonEnabled = false,
         };
         code.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = code.Text.Trim().Length > 0;
-        pairingDialog = dialog;
+        sessionDialog = dialog;
         var result = await dialog.ShowAsync();
-        pairingDialog = null;
+        sessionDialog = null;
         return result == ContentDialogResult.Primary ? code.Text.Trim() : null;
     }
 

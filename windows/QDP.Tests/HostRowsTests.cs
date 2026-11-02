@@ -24,6 +24,14 @@ public class HostRowsTests
         Access = HostAccess.Token,
     };
 
+    /// <summary>A host reached through the gateway as build-01, named Build.</summary>
+    private static readonly KeptHost BuildMachine = new()
+    {
+        Name = "Build",
+        Address = "build-01",
+        Access = HostAccess.Gateway,
+    };
+
     /// <summary>A paired host found again streams at the address it has now.</summary>
     [Fact]
     public void ListsFoundPairedHostsReady()
@@ -115,6 +123,35 @@ public class HostRowsTests
         var row = Assert.Single(HostRows.Build([new DiscoveredHost("Desk", null, PinA, false)], []));
         Assert.Equal(HostStatus.Resolving, row.Status);
         Assert.False(row.CanChoose);
+    }
+
+    /// <summary>
+    /// A host reached through the gateway streams through it, by what the
+    /// gateway knows it as; it is listed after those found and before those
+    /// not found, and never as a host on the network, whatever its name.
+    /// </summary>
+    [Fact]
+    public void ListsHostsReachedThroughTheGateway()
+    {
+        var rows = HostRows.Build(
+            [new DiscoveredHost("Build", "10.0.0.7:4433", PinB, true)],
+            [BuildMachine, Desk]);
+        Assert.Equal(
+            new[] { HostStatus.New, HostStatus.Gateway, HostStatus.NotSeen },
+            rows.Select(row => row.Status));
+        var row = rows[1];
+        Assert.Equal(new StreamTarget("Build", "build-01", Authentication.Gateway), row.Target);
+        Assert.Equal("Build, Through the gateway · build-01", row.ToString());
+        Assert.Equal("Connect", row.Action);
+        Assert.True(row.CanForget);
+    }
+
+    /// <summary>Hosts reached through the gateway are kept by what it knows them as, the others by their pin.</summary>
+    [Fact]
+    public void KeysHostsByPinOrGatewayTarget()
+    {
+        Assert.Equal(PinA, Desk.Key);
+        Assert.Equal("gateway:build-01", BuildMachine.Key);
     }
 
     /// <summary>Hosts found are listed by name.</summary>
