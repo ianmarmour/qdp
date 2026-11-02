@@ -7,6 +7,9 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.touchMode) private var touchMode = TouchMode.trackpad
     @AppStorage(SettingsKey.showStats) private var showStats = false
     @AppStorage(SettingsKey.microphone) private var microphone = false
+    @AppStorage(SettingsKey.gatewayAddress) private var gatewayAddress = ""
+    @AppStorage(SettingsKey.gatewayUser) private var gatewayUser = ""
+    @AppStorage(SettingsKey.gatewayPin) private var gatewayPin = ""
 
     @State private var clientPin: String?
 
@@ -42,6 +45,31 @@ struct SettingsView: View {
                 Text("Advanced")
             } footer: {
                 Text("Automatic decodes on the graphics hardware where this device can, and in software otherwise.")
+            }
+            Section {
+                TextField("Address", text: $gatewayAddress, prompt: Text("gateway.example.com"))
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    #endif
+                TextField("User name", text: $gatewayUser)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                TextField("Key pin (optional)", text: $gatewayPin)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+            } header: {
+                Text("Gateway")
+            } footer: {
+                if !gatewayPin.isEmpty && !Core.isPin(gatewayPin.trimmingCharacters(in: .whitespaces)) {
+                    Text("A key pin is 64 hexadecimal digits, as qdp-gateway keys prints.")
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Your organization's gateway, to reach its computers from outside its network. You sign in with your organization's account and a code from an authenticator app. Ask its administrator for its address, and its key pin if they give one.")
+                }
             }
             Section {
                 if let clientPin {

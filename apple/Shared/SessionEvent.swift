@@ -28,6 +28,16 @@ enum SessionEvent: Equatable {
     case pairingCode(retry: Bool)
     /// Pairing succeeded with the host whose key pin this is.
     case paired(pin: String)
+    /// The gateway needs the user's name and password; `retry` after an
+    /// attempt that failed.
+    case gatewaySignIn(retry: Bool, gateway: String)
+    /// The gateway needs a code from the user's authenticator app, which
+    /// `enrollment`, an `otpauth://` URI, adds to it first if given; `retry`
+    /// after a code that did not work.
+    case gatewayCode(retry: Bool, enrollment: String?, gateway: String)
+    /// The gateway gave a session token, in hexadecimal, valid for
+    /// `lifetimeSeconds`, with which later sessions sign in without asking.
+    case gatewaySession(token: String, lifetimeSeconds: Int)
     /// The session ended normally.
     case ended
     /// The session failed.
@@ -72,6 +82,16 @@ enum SessionEvent: Equatable {
         case "paired":
             guard let pin = values.first else { return nil }
             return .paired(pin: pin)
+        case "signin":
+            let fields = rest.split(separator: " ", maxSplits: 1).map(String.init)
+            return .gatewaySignIn(retry: fields.first == "retry", gateway: fields.count > 1 ? fields[1] : "")
+        case "totp":
+            let fields = rest.split(separator: " ", maxSplits: 2).map(String.init)
+            guard fields.count == 3 else { return nil }
+            return .gatewayCode(retry: fields[0] == "retry", enrollment: fields[1] == "-" ? nil : fields[1], gateway: fields[2])
+        case "gatewaysession":
+            guard values.count >= 2, let lifetime = Int(values[1]) else { return nil }
+            return .gatewaySession(token: values[0], lifetimeSeconds: lifetime)
         case "ended":
             return .ended
         case "failed":

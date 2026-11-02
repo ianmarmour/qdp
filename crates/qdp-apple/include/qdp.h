@@ -27,6 +27,9 @@ typedef enum {
     QDP_AUTH_PAIRED = 1,
     /* Pairing with the code the host shows, asked for with a "pair" event. */
     QDP_AUTH_PAIR = 2,
+    /* Through the gateway, which vouches for the user, asking for their
+       password and a code with "signin" and "totp" events. */
+    QDP_AUTH_GATEWAY = 3,
 } QdpAuthentication;
 
 /* Where video is decoded. */
@@ -75,6 +78,15 @@ typedef struct {
     QdpDecoder decoder;
     /* Whether the microphone starts on. */
     bool microphone;
+    /* The organization's gateway the host is reached through, or NULL or
+       empty to reach it directly: its address; its key pin, or NULL or empty
+       to verify it by the system's certificate authorities; and the token of
+       the last "gatewaysession" event, or NULL or empty to sign in. Through
+       a gateway, host is the computer's ID there or its name inside the
+       network. */
+    const char *gateway_address;
+    const char *gateway_pin;
+    const char *gateway_token;
 } QdpConfig;
 
 /* The host's cursor image. */
@@ -146,6 +158,14 @@ void qdp_session_cursor_at(QdpSession *session, float x, float y);
 /* Answers a "pair" event with the code typed, or declines with NULL, which
    ends the session. */
 void qdp_session_pairing_code(QdpSession *session, const char *code);
+
+/* Answers a "signin" event with the user's name and password, or declines
+   with a NULL user, which ends the session. */
+void qdp_session_sign_in(QdpSession *session, const char *user, const char *password);
+
+/* Answers a "totp" event with the code from the user's authenticator app, or
+   declines with NULL, which ends the session. */
+void qdp_session_sign_in_code(QdpSession *session, const char *code);
 
 /* Tells the host the display changed. */
 void qdp_session_display(QdpSession *session, uint32_t width, uint32_t height,

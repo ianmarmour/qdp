@@ -52,6 +52,8 @@ final class HostStore {
     private(set) var paired: [PairedHost] = []
     /// The hosts on the local network.
     private(set) var discovered: [DiscoveredHost] = []
+    /// The computers reached through the gateway, most recently added first.
+    private(set) var gatewayHosts: [GatewayHost] = []
     /// Whether the local network can be browsed; `false` once the user
     /// declined the permission.
     private(set) var networkAllowed = true
@@ -66,6 +68,8 @@ final class HostStore {
 
     /// Where paired hosts are kept.
     private static let pairedKey = "pairedHosts"
+    /// Where the computers reached through the gateway are kept.
+    private static let gatewayHostsKey = "gatewayHosts"
     /// The service type of QDP hosts.
     private static let serviceType = "_qdp._udp"
     /// The TXT key of the host's key pin.
@@ -81,6 +85,29 @@ final class HostStore {
         if let data = defaults.data(forKey: Self.pairedKey),
            let hosts = try? JSONDecoder().decode([PairedHost].self, from: data) {
             paired = hosts
+        }
+        if let data = defaults.data(forKey: Self.gatewayHostsKey),
+           let hosts = try? JSONDecoder().decode([GatewayHost].self, from: data) {
+            gatewayHosts = hosts
+        }
+    }
+
+    /// Keeps `host`, to reach through the gateway, replacing the one with
+    /// its target.
+    func keepGatewayHost(_ host: GatewayHost) {
+        gatewayHosts = [host] + gatewayHosts.filter { $0.target != host.target }
+        saveGatewayHosts()
+    }
+
+    /// Forgets the computer reached through the gateway as `target`.
+    func forgetGatewayHost(target: String) {
+        gatewayHosts.removeAll { $0.target == target }
+        saveGatewayHosts()
+    }
+
+    private func saveGatewayHosts() {
+        if let data = try? JSONEncoder().encode(gatewayHosts) {
+            defaults.set(data, forKey: Self.gatewayHostsKey)
         }
     }
 

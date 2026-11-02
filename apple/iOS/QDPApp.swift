@@ -43,7 +43,7 @@ struct HostsScreen: View {
                 }
         }
         .sheet(isPresented: $adding) {
-            AddHostView { target in
+            AddHostView(keepGatewayHost: store.keepGatewayHost) { target in
                 // The stream covers the screen once the sheet has gone.
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.sheetDismissal) {
                     streaming = target

@@ -18,13 +18,15 @@ use std::time::Duration;
 
 use qdp::message::DeviceFeatures;
 use qdp_app::gamepad::GamepadState;
-use qdp_app::session::{Authentication, Config, Session};
+use qdp_app::session::{Authentication, Config, GatewayConfig, Session};
 use qdp_app::settings::{format_pin, parse_pin};
 use qdp_app::sink::SharedCursor;
 use qdp_codec::CodecPreference;
 use qdp_desktop::MetalVideo;
 use qdp_quic::{IdentityFiles, TlsIdentity};
-use qdp_runtime::{DisplaySize, Focus, Microphone, PointerButton, TouchPhase, UserInput};
+use qdp_runtime::{
+    Credentials, DisplaySize, Focus, Microphone, PointerButton, SignInAnswer, TouchPhase, UserInput,
+};
 use tracing::{info, warn};
 
 use crate::stage::{ApplePresenter, FrameId, Presentations, SharedStage, Stage, lock, reporter};
@@ -41,6 +43,9 @@ const AUTH_PAIRED: i32 = 1;
 
 /// `QDP_AUTH_PAIR`: pairing with the code the host shows.
 const AUTH_PAIR: i32 = 2;
+
+/// `QDP_AUTH_GATEWAY`: through the gateway, which vouches for the user.
+const AUTH_GATEWAY: i32 = 3;
 
 /// `QDP_DECODER_HARDWARE`: VideoToolbox only. Any value but this and
 /// [`DECODER_SOFTWARE`] decodes in hardware when the device can.
@@ -89,6 +94,13 @@ pub struct QdpConfig {
     decoder: i32,
     /// Whether the microphone starts on.
     microphone: bool,
+    /// The gateway's address, or empty or null to reach the host directly.
+    gateway_address: *const c_char,
+    /// The gateway's key pin, or empty or null to verify it by the system's
+    /// certificate authorities.
+    gateway_pin: *const c_char,
+    /// The token of the last `gatewaysession` event, or empty or null.
+    gateway_token: *const c_char,
 }
 
 /// The host's cursor image, as `QdpCursor` lays it out.
@@ -308,8 +320,17 @@ unsafe fn start(
             pin: parse_pin(&pin)?,
         },
         AUTH_PAIR => Authentication::Pair { device_name },
+        AUTH_GATEWAY => Authentication::Gateway,
         other => return Err(format!("unknown authentication {other}")),
     };
+    // SAFETY: the caller promises live strings or nulls.
+    let gateway = unsafe {
+        GatewayConfig::parse(
+            &read(config.gateway_address),
+            &read(config.gateway_pin),
+            &read(config.gateway_token),
+        )
+    }?;
     let identity_directory = FILES_DIRECTORY
         .get()
         .cloned()
@@ -331,8 +352,7 @@ unsafe fn start(
             client_name: CLIENT_NAME.to_owned(),
             host,
             authentication,
-            // The app reaches hosts through no gateway yet.
-            gateway: None,
+            gateway,
             identity_directory,
             display: display(
                 config.width,
@@ -536,6 +556,53 @@ pub unsafe extern "C" fn qdp_session_pairing_code(session: *mut QdpSession, code
         // SAFETY: as the caller promises.
         if let Some(handle) = unsafe { self::session(session) } {
             handle.session.answer_pairing(code);
+        }
+    });
+}
+
+/// Answers the gateway's request for the user's name and password with
+/// `user` and `password`, or declines with a null user, which ends the
+/// session.
+///
+/// # Safety
+///
+/// `session` is null or a live handle, and `user` and `password` null or
+/// live strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_session_sign_in(
+    session: *mut QdpSession,
+    user: *const c_char,
+    password: *const c_char,
+) {
+    guarded((), || {
+        // SAFETY: as the caller promises.
+        let answer = (!user.is_null()).then(|| unsafe {
+            SignInAnswer::Credentials(Credentials {
+                user: read(user),
+                password: read(password),
+            })
+        });
+        // SAFETY: as the caller promises.
+        if let Some(handle) = unsafe { self::session(session) } {
+            handle.session.answer_sign_in(answer);
+        }
+    });
+}
+
+/// Answers the gateway's request for a code from the user's authenticator
+/// app with `code`, or declines with null, which ends the session.
+///
+/// # Safety
+///
+/// `session` is null or a live handle, and `code` null or a live string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_session_sign_in_code(session: *mut QdpSession, code: *const c_char) {
+    guarded((), || {
+        // SAFETY: as the caller promises.
+        let code = (!code.is_null()).then(|| unsafe { read(code) });
+        // SAFETY: as the caller promises.
+        if let Some(handle) = unsafe { self::session(session) } {
+            handle.session.answer_sign_in(code.map(SignInAnswer::Code));
         }
     });
 }
