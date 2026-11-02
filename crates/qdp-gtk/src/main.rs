@@ -10,9 +10,13 @@ mod command;
 #[cfg(target_os = "linux")]
 mod discovery;
 #[cfg(target_os = "linux")]
+mod gateway;
+#[cfg(target_os = "linux")]
 mod hosts;
 #[cfg(target_os = "linux")]
 mod key_pin;
+#[cfg(target_os = "linux")]
+mod qr;
 #[cfg(target_os = "linux")]
 mod rows;
 #[cfg(target_os = "linux")]

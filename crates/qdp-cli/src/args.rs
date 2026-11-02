@@ -131,8 +131,9 @@ Connect options:
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
   --headless           Open no window; only log statistics
   --events             Report the session's progress as lines on standard
-                       output, and read a pairing code from standard input,
-                       for an app that runs qdp connect for its stream
+                       output, and read a pairing code, or a gateway's user
+                       name, password and code, from standard input, for an
+                       app that runs qdp connect for its stream
   --resolution WxH     Ask the host for video WIDTHxHEIGHT pixels, whatever
                        the window's size, and stretch it to fill the window,
                        to stream less at a large or full-screen window

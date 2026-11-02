@@ -1,12 +1,15 @@
 //! `qdp connect --events`: the session's progress as the lines the apps'
 //! cores report (see [`qdp_app::events`]), on standard output, for an app
-//! that runs `qdp connect` for its stream window, as the Linux app does. The
-//! code a pairing host shows is read from standard input, a line for each
-//! `pair` line. The log stays on standard error.
+//! that runs `qdp connect` for its stream window, as the Linux app does. What
+//! the app answers is read from standard input: the code a pairing host
+//! shows, a line for each `pair` line; a gateway's user name and password,
+//! two lines for each `signin` line; and a TOTP code, a line for each `totp`
+//! line. The log stays on standard error.
 
 use std::io::{BufRead, Write};
 
 use qdp_app::events::{CodeRequest, Ending, Event};
+use qdp_runtime::{Credentials, SignInAnswer, SignInPrompt, SignInRequest};
 
 use crate::args::EventOutput;
 
@@ -54,10 +57,68 @@ impl EventLines {
     /// `None` once its input closes.
     pub fn ask_code(self, request: CodeRequest) -> Option<String> {
         self.send(&Event::PairingCode(request));
-        let mut line = String::new();
-        match std::io::stdin().lock().read_line(&mut line) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(line.trim().to_owned()),
+        read_answer()
+    }
+
+    /// Returns the prompt that asks the app what a gateway's sign-in needs.
+    pub fn sign_in_prompt(self) -> SignInPrompt {
+        SignInPrompt::new(move |request| {
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || self.ask_sign_in(&request))
+                    .await
+                    .ok()
+                    .flatten()
+            })
+        })
+    }
+
+    /// Asks the app what `request` asks for, and returns its answer, or
+    /// `None` once its input closes.
+    fn ask_sign_in(self, request: &SignInRequest) -> Option<SignInAnswer> {
+        let attempt = |retry: &Option<String>| {
+            if retry.is_some() {
+                CodeRequest::Retry
+            } else {
+                CodeRequest::First
+            }
+        };
+        match request {
+            SignInRequest::Credentials { gateway, retry } => {
+                self.send(&Event::GatewaySignIn {
+                    request: attempt(retry),
+                    gateway: gateway.clone(),
+                });
+                let user = read_answer()?;
+                let password = read_raw_answer()?;
+                Some(SignInAnswer::Credentials(Credentials { user, password }))
+            }
+            SignInRequest::Code {
+                gateway,
+                enrollment,
+                retry,
+            } => {
+                self.send(&Event::GatewayCode {
+                    request: attempt(retry),
+                    enrollment: enrollment.clone(),
+                    gateway: gateway.clone(),
+                });
+                read_answer().map(SignInAnswer::Code)
+            }
         }
+    }
+}
+
+/// Reads the app's next answer, trimmed, or `None` once its input closes.
+fn read_answer() -> Option<String> {
+    read_raw_answer().map(|answer| answer.trim().to_owned())
+}
+
+/// Reads the app's next answer as it is, but for its line ending, as a
+/// password, whose spaces count, or `None` once its input closes.
+fn read_raw_answer() -> Option<String> {
+    let mut line = String::new();
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim_end_matches(['\r', '\n']).to_owned()),
     }
 }

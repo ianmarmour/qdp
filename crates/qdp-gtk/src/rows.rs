@@ -36,6 +36,9 @@ pub enum Authentication {
     },
     /// By pairing, with the code the host shows.
     Pair,
+    /// Through the gateway, which vouches for the user and knows the host's
+    /// key.
+    Gateway,
 }
 
 impl Authentication {
@@ -65,11 +68,12 @@ pub struct Target {
 
 impl Target {
     /// Returns what tells this target's sessions apart from others': the
-    /// host's pin once paired, its address until then.
+    /// host's pin once paired, its address until then, and what the gateway
+    /// knows it as through one.
     pub fn key(&self) -> &str {
         match &self.authentication {
             Authentication::Paired(pin) | Authentication::Token { pin, .. } => pin.as_str(),
-            Authentication::Pair => &self.address,
+            Authentication::Pair | Authentication::Gateway => &self.address,
         }
     }
 }

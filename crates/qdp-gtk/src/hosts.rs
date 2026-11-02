@@ -28,6 +28,10 @@ const NAMES_FILE: &str = "host-names";
 /// separated by tabs.
 const TOKEN_HOSTS_FILE: &str = "token-hosts";
 
+/// The file in the app's directory of the computers reached through the
+/// gateway.
+const GATEWAY_HOSTS_FILE: &str = "gateway-hosts";
+
 /// The token hosts file's permissions: its tokens are credentials.
 const TOKEN_HOSTS_MODE: u32 = 0o600;
 
@@ -86,6 +90,11 @@ impl AppFiles {
     /// takes as `--identity`.
     pub fn identity(&self) -> PathBuf {
         self.directory.join(IDENTITY_DIRECTORY)
+    }
+
+    /// Returns the file of the computers reached through the gateway.
+    pub fn gateway_hosts(&self) -> PathBuf {
+        self.directory.join(GATEWAY_HOSTS_FILE)
     }
 
     /// Returns the hosts paired with, most recently paired first, and none

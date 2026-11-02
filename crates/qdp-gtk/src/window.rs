@@ -1,7 +1,9 @@
-//! The app's window: the computers to stream from, found on the network or
-//! paired with, each a click away; adding one by its address; pairing with
-//! the code a host shows; and what went wrong, if anything. Each stream
-//! shows in the window `qdp connect` opens.
+//! The app's window: the computers to stream from, found on the network,
+//! paired with, or reached through the organization's gateway, each a click
+//! away; adding one by its address; pairing with the code a host shows;
+//! signing in to the gateway, with the QR code that adds it to an
+//! authenticator app the first time; and what went wrong, if anything. Each
+//! stream shows in the window `qdp connect` opens.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -14,8 +16,10 @@ use gtk::{gio, glib};
 
 use crate::command;
 use crate::discovery::{self, Change, FoundHost};
+use crate::gateway::{self, Gateway, GatewayHost};
 use crate::hosts::{AppFiles, PairedHost, Token};
 use crate::key_pin::KeyPin;
+use crate::qr;
 use crate::rows::{self, Authentication, Row, Status, Target};
 use crate::session::Session;
 use crate::session_events::{CodeRequest, SessionEvent};
@@ -29,6 +33,9 @@ const APP_DIRECTORY: &str = "qdp";
 
 /// The number of digits in a pairing code (Section 4.4.9).
 const CODE_DIGITS: usize = 4;
+
+/// The number of digits in a gateway's TOTP code (Section 4.4.10).
+const TOTP_DIGITS: usize = 6;
 
 /// How long after the network could not be searched to try again.
 const SEARCH_RETRY_SECONDS: u32 = 10;
@@ -54,6 +61,12 @@ const PAIR: &str = "pair";
 
 /// The response that adds a host.
 const ADD: &str = "add";
+
+/// The response that signs in to a gateway.
+const SIGN_IN: &str = "sign-in";
+
+/// The file of the gateway, in the app's configuration directory.
+const GATEWAY_FILE: &str = "gateway";
 
 /// The file of the user's settings, in the app's configuration directory.
 const SETTINGS_FILE: &str = "settings";
@@ -110,6 +123,8 @@ enum Phase {
     Connecting,
     /// Waiting for the code the host shows.
     Pairing,
+    /// Signing in to the gateway.
+    SigningIn,
     /// Streaming, in `qdp connect`'s window.
     Streaming,
     /// Connecting again after the connection was lost.
@@ -122,6 +137,7 @@ impl Phase {
         match self {
             Self::Connecting => "Connecting…",
             Self::Pairing => "Pairing…",
+            Self::SigningIn => "Signing in…",
             Self::Streaming => "Streaming",
             Self::Reconnecting => "Reconnecting…",
         }
@@ -137,7 +153,8 @@ struct Running {
     phase: Phase,
     /// The session.
     session: Session,
-    /// The dialog asking for the host's code, while it shows.
+    /// The dialog asking for the host's code, or the gateway's sign-in,
+    /// while it shows.
     code_dialog: Option<adw::AlertDialog>,
 }
 
@@ -171,6 +188,10 @@ struct State {
     groups: Vec<adw::PreferencesGroup>,
     /// What the user chose for every stream.
     settings: Settings,
+    /// The organization's gateway, if the user set one.
+    gateway: Option<Gateway>,
+    /// The computers reached through it.
+    gateway_hosts: Vec<GatewayHost>,
 }
 
 /// The app's window.
@@ -191,6 +212,8 @@ struct Window {
     files: AppFiles,
     /// The file of the user's settings.
     settings_path: PathBuf,
+    /// The file of the gateway.
+    gateway_path: PathBuf,
     /// What it shows and runs.
     state: RefCell<State>,
 }
@@ -256,6 +279,9 @@ impl Window {
         let settings_path = glib::user_config_dir()
             .join(APP_DIRECTORY)
             .join(SETTINGS_FILE);
+        let gateway_path = glib::user_config_dir()
+            .join(APP_DIRECTORY)
+            .join(GATEWAY_FILE);
         let this = Rc::new(Self {
             window,
             toasts,
@@ -271,9 +297,12 @@ impl Window {
                 next_session: 0,
                 groups: Vec::new(),
                 settings: Settings::load(&settings_path),
+                gateway: Gateway::load(&gateway_path),
+                gateway_hosts: gateway::hosts(&files.gateway_hosts()),
             }),
             files,
             settings_path,
+            gateway_path,
         });
         let adding = Rc::clone(&this);
         let add_action = gio::ActionEntry::builder("add")
@@ -341,7 +370,7 @@ impl Window {
 
     /// Shows the rows as they now stand.
     fn refresh(self: &Rc<Self>) {
-        let (rows, search, phases) = {
+        let (rows, search, phases, through) = {
             let state = self.state.borrow();
             let found: Vec<_> = state.found.values().cloned().collect();
             let phases: Vec<_> = state
@@ -349,14 +378,31 @@ impl Window {
                 .values()
                 .map(|running| (running.target.key().to_owned(), running.phase))
                 .collect();
-            (rows::rows(&found, &state.paired), state.search, phases)
+            // The computers reached through the gateway, while one is set.
+            let through = state
+                .gateway
+                .as_ref()
+                .filter(|_| !state.gateway_hosts.is_empty())
+                .map(|gateway| (gateway.address.clone(), state.gateway_hosts.clone()));
+            (
+                rows::rows(&found, &state.paired),
+                state.search,
+                phases,
+                through,
+            )
+        };
+        let phase_of = |key: &str| {
+            phases
+                .iter()
+                .find(|(running, _)| running == key)
+                .map(|(_, phase)| *phase)
         };
         for group in self.state.borrow_mut().groups.drain(..) {
             self.page.remove(&group);
         }
         self.banner
             .set_revealed(search == Search::Unavailable && !rows.is_empty());
-        if rows.is_empty() {
+        if rows.is_empty() && through.is_none() {
             self.stack.set_visible_child_name(match search {
                 Search::Searching => EMPTY_PAGE,
                 Search::Unavailable => UNAVAILABLE_PAGE,
@@ -369,12 +415,10 @@ impl Window {
         let nearby = adw::PreferencesGroup::builder().title("Nearby").build();
         let (mut any_yours, mut any_nearby) = (false, false);
         for row in rows {
-            let phase = row.target.as_ref().and_then(|target| {
-                phases
-                    .iter()
-                    .find(|(key, _)| key == target.key())
-                    .map(|(_, phase)| *phase)
-            });
+            let phase = row
+                .target
+                .as_ref()
+                .and_then(|target| phase_of(target.key()));
             let widget = self.row_widget(row.clone(), phase);
             if row.paired.is_some() {
                 yours.add(&widget);
@@ -384,14 +428,59 @@ impl Window {
                 any_nearby = true;
             }
         }
+        let gateway_group = adw::PreferencesGroup::new();
+        if let Some((address, hosts)) = &through {
+            gateway_group.set_title(&format!("Through {address}"));
+            for host in hosts {
+                gateway_group.add(&self.gateway_row(host.clone(), phase_of(&host.target)));
+            }
+        }
         let mut state = self.state.borrow_mut();
-        for (group, any) in [(yours, any_yours), (nearby, any_nearby)] {
+        for (group, any) in [
+            (yours, any_yours),
+            (gateway_group, through.is_some()),
+            (nearby, any_nearby),
+        ] {
             if any {
                 self.page.add(&group);
                 state.groups.push(group);
             }
         }
         self.stack.set_visible_child_name(LIST_PAGE);
+    }
+
+    /// Returns the widget of `host`, reached through the gateway, whose
+    /// session, if one runs, does `phase`.
+    fn gateway_row(self: &Rc<Self>, host: GatewayHost, phase: Option<Phase>) -> adw::ActionRow {
+        let widget = adw::ActionRow::builder()
+            .title(host.name.as_str())
+            .subtitle(phase.map_or_else(|| host.target.clone(), |phase| phase.detail().to_owned()))
+            .use_markup(false)
+            .activatable(true)
+            .build();
+        widget.add_prefix(&gtk::Image::from_icon_name("computer-symbolic"));
+        if phase.is_some_and(|phase| phase != Phase::Streaming) {
+            widget.add_suffix(&gtk::Spinner::builder().spinning(true).build());
+        }
+        let forget = gtk::Button::builder()
+            .icon_name("user-trash-symbolic")
+            .tooltip_text("Forget")
+            .valign(gtk::Align::Center)
+            .build();
+        forget.add_css_class("flat");
+        let this = Rc::clone(self);
+        let forgotten = host.clone();
+        forget.connect_clicked(move |_| this.confirm_forget_gateway_host(forgotten.clone()));
+        widget.add_suffix(&forget);
+        let this = Rc::clone(self);
+        widget.connect_activated(move |_| {
+            this.stream(Target {
+                name: host.name.clone(),
+                address: host.target.clone(),
+                authentication: Authentication::Gateway,
+            });
+        });
+        widget
     }
 
     /// Returns the widget of `row`, whose session, if one runs, does
@@ -476,8 +565,18 @@ impl Window {
             state.next_session += 1;
             SessionId(state.next_session)
         };
+        let mut options = self.state.borrow().settings.arguments();
+        if target.authentication == Authentication::Gateway {
+            let Some(gateway) = self.state.borrow().gateway.clone() else {
+                self.alert(
+                    &format!("Can’t Reach {}", target.name),
+                    "It’s reached through your organization’s gateway, which isn’t set. Set it in Preferences.",
+                );
+                return;
+            };
+            options.extend(gateway.arguments());
+        }
         let this = Rc::clone(self);
-        let options = self.state.borrow().settings.arguments();
         let started = Session::start(&target, &self.files.identity(), &options, move |event| {
             this.session_event(id, event);
         });
@@ -510,6 +609,18 @@ impl Window {
             SessionEvent::PairingCode(request) => {
                 self.set_phase(id, Phase::Pairing);
                 self.ask_code(id, request);
+            }
+            SessionEvent::GatewaySignIn { request, gateway } => {
+                self.set_phase(id, Phase::SigningIn);
+                self.ask_sign_in(id, request, &gateway);
+            }
+            SessionEvent::GatewayCode {
+                request,
+                enrollment,
+                gateway,
+            } => {
+                self.set_phase(id, Phase::SigningIn);
+                self.ask_totp(id, request, enrollment.as_deref(), &gateway);
             }
             SessionEvent::Paired(pin) => {
                 let name = {
@@ -600,6 +711,168 @@ impl Window {
         entry.connect_changed(move |entry| {
             enabling.set_response_enabled(PAIR, is_code(&entry.text()));
         });
+        self.ask(id, dialog, move |session, response| {
+            if response == PAIR {
+                session.send_code(entry.text().trim());
+            } else {
+                session.cancel();
+            }
+        });
+    }
+
+    /// Asks for the user's name and password for the gateway named
+    /// `gateway` of session `id`, `request` saying whether an earlier
+    /// attempt failed, and answers the session.
+    fn ask_sign_in(self: &Rc<Self>, id: SessionId, request: CodeRequest, gateway: &str) {
+        let known_user = self
+            .state
+            .borrow()
+            .gateway
+            .as_ref()
+            .and_then(|gateway| gateway.user.clone())
+            .unwrap_or_default();
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        list.add_css_class("boxed-list");
+        let user = adw::EntryRow::builder()
+            .title("User name")
+            .text(known_user.as_str())
+            .activates_default(true)
+            .build();
+        let password = adw::PasswordEntryRow::builder()
+            .title("Password")
+            .activates_default(true)
+            .build();
+        list.append(&user);
+        list.append(&password);
+        let focus: gtk::Widget = if known_user.is_empty() {
+            user.clone().upcast()
+        } else {
+            password.clone().upcast()
+        };
+        let dialog = adw::AlertDialog::builder()
+            .heading(format!("Sign In to {gateway}"))
+            .body(match request {
+                CodeRequest::First => "Use your organization’s account.",
+                CodeRequest::Retry => "That didn’t work. Check your user name and password.",
+            })
+            .extra_child(&list)
+            .focus_widget(&focus)
+            .close_response(CANCEL)
+            .default_response(SIGN_IN)
+            .build();
+        dialog.add_responses(&[(CANCEL, "Cancel"), (SIGN_IN, "Sign In")]);
+        dialog.set_response_appearance(SIGN_IN, adw::ResponseAppearance::Suggested);
+        let update = Rc::new({
+            let (dialog, user, password) = (dialog.clone(), user.clone(), password.clone());
+            move || {
+                let filled = !user.text().trim().is_empty() && !password.text().is_empty();
+                dialog.set_response_enabled(SIGN_IN, filled);
+            }
+        });
+        update();
+        for entry in [user.upcast_ref::<gtk::Editable>(), password.upcast_ref()] {
+            let update = Rc::clone(&update);
+            entry.connect_changed(move |_| update());
+        }
+        self.ask(id, dialog, move |session, response| {
+            if response == SIGN_IN {
+                session.send_credentials(user.text().trim(), &password.text());
+            } else {
+                session.cancel();
+            }
+        });
+    }
+
+    /// Asks for a code from the user's authenticator app for the gateway
+    /// named `gateway` of session `id`, showing the QR code of
+    /// `enrollment` to add it to the app first, if given, and answers the
+    /// session.
+    fn ask_totp(
+        self: &Rc<Self>,
+        id: SessionId,
+        request: CodeRequest,
+        enrollment: Option<&str>,
+        gateway: &str,
+    ) {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        if let Some(uri) = enrollment {
+            if let Some(texture) = qr::texture(uri) {
+                let picture = gtk::Picture::for_paintable(&texture);
+                picture.set_can_shrink(false);
+                picture.set_halign(gtk::Align::Center);
+                picture.set_alternative_text(Some(
+                    "QR code that adds the gateway to an authenticator app",
+                ));
+                content.append(&picture);
+            }
+            // For an authenticator on this computer, or a phone without a
+            // camera.
+            let copy = gtk::Button::builder()
+                .label("Copy Setup Link")
+                .halign(gtk::Align::Center)
+                .build();
+            copy.add_css_class("flat");
+            let (this, link) = (Rc::clone(self), uri.to_owned());
+            copy.connect_clicked(move |_| {
+                this.window.clipboard().set_text(&link);
+                this.toast("Copied the setup link");
+            });
+            content.append(&copy);
+        }
+        let entry = gtk::Entry::builder()
+            .placeholder_text("Code")
+            .input_purpose(gtk::InputPurpose::Digits)
+            .max_length(i32::try_from(TOTP_DIGITS).unwrap_or(i32::MAX))
+            .activates_default(true)
+            .xalign(0.5)
+            .build();
+        content.append(&entry);
+        let body = match (enrollment.is_some(), request) {
+            (true, CodeRequest::First) => {
+                "Scan this with an authenticator app, such as Google Authenticator, Microsoft Authenticator or Authy, then type its code."
+            }
+            (true, CodeRequest::Retry) => {
+                "That code didn’t work. Scan this with your authenticator app if you haven’t yet, then type its code."
+            }
+            (false, CodeRequest::First) => "Type the six-digit code your authenticator app shows.",
+            (false, CodeRequest::Retry) => {
+                "That code didn’t work. Type the code your authenticator app shows now."
+            }
+        };
+        let dialog = adw::AlertDialog::builder()
+            .heading(format!("Sign In to {gateway}"))
+            .body(body)
+            .extra_child(&content)
+            .focus_widget(&entry)
+            .close_response(CANCEL)
+            .default_response(SIGN_IN)
+            .build();
+        dialog.add_responses(&[(CANCEL, "Cancel"), (SIGN_IN, "Sign In")]);
+        dialog.set_response_appearance(SIGN_IN, adw::ResponseAppearance::Suggested);
+        dialog.set_response_enabled(SIGN_IN, false);
+        let enabling = dialog.clone();
+        entry.connect_changed(move |entry| {
+            enabling.set_response_enabled(SIGN_IN, is_digits(&entry.text(), TOTP_DIGITS));
+        });
+        self.ask(id, dialog, move |session, response| {
+            if response == SIGN_IN {
+                session.send_code(entry.text().trim());
+            } else {
+                session.cancel();
+            }
+        });
+    }
+
+    /// Shows `dialog` for session `id`, which closes it if it ends first,
+    /// and gives the session and the response to `answer` otherwise.
+    fn ask(
+        self: &Rc<Self>,
+        id: SessionId,
+        dialog: adw::AlertDialog,
+        answer: impl FnOnce(&Session, &str) + 'static,
+    ) {
         if let Some(running) = self.state.borrow_mut().sessions.get_mut(&id) {
             running.code_dialog = Some(dialog.clone());
         }
@@ -612,17 +885,14 @@ impl Window {
                 return;
             };
             running.code_dialog = None;
-            if response == PAIR {
-                running.session.send_code(entry.text().trim());
-            } else {
-                running.session.cancel();
-            }
+            answer(&running.session, response.as_str());
         });
     }
 
     /// Asks for a host's address, and pairs with it, or adds it with the key
     /// pin and token its administrator gave.
     fn add_by_address(self: &Rc<Self>) {
+        let gateway = self.state.borrow().gateway.clone();
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .build();
@@ -631,6 +901,18 @@ impl Window {
             .title("Name or IP address")
             .input_purpose(gtk::InputPurpose::Url)
             .activates_default(true)
+            .build();
+        // Through the gateway, while one is set: by its ID there, or its
+        // name inside the organization's network.
+        let through = adw::SwitchRow::builder()
+            .title(
+                gateway
+                    .as_ref()
+                    .map_or_else(String::new, |gateway| format!("Through {}", gateway.address)),
+            )
+            .subtitle("Your organization’s gateway, by the computer’s ID there or its name inside the network")
+            .active(gateway.is_some())
+            .visible(gateway.is_some())
             .build();
         let with_token = adw::SwitchRow::builder()
             .title("Use a key pin and token")
@@ -652,13 +934,13 @@ impl Window {
             .activates_default(true)
             .build();
         list.append(&address);
+        list.append(&through);
         list.append(&with_token);
         list.append(&pin);
         list.append(&token);
         list.append(&name);
         let dialog = adw::AlertDialog::builder()
             .heading("Add a Computer")
-            .body("Type its name or IP address, with :PORT if it isn’t 4433. Pair with the code it shows, or use the key pin and token its administrator gave you.")
             .extra_child(&list)
             .focus_widget(&address)
             .close_response(CANCEL)
@@ -668,24 +950,29 @@ impl Window {
         dialog.set_response_appearance(ADD, adw::ResponseAppearance::Suggested);
         dialog.set_response_enabled(ADD, false);
         let update = Rc::new({
-            let (dialog, address, with_token, pin, token, name) = (
+            let (dialog, address, through, with_token, pin, token, name) = (
                 dialog.clone(),
                 address.clone(),
+                through.clone(),
                 with_token.clone(),
                 pin.clone(),
                 token.clone(),
                 name.clone(),
             );
             move || {
-                let tokened = with_token.is_active();
-                for row in [
-                    pin.upcast_ref::<gtk::Widget>(),
-                    token.upcast_ref(),
-                    name.upcast_ref(),
-                ] {
+                let gatewayed = through.is_active();
+                let tokened = with_token.is_active() && !gatewayed;
+                dialog.set_body(if gatewayed {
+                    "Type its ID on your organization’s gateway, or its name inside the organization’s network."
+                } else {
+                    "Type its name or IP address, with :PORT if it isn’t 4433. Pair with the code it shows, or use the key pin and token its administrator gave you."
+                });
+                with_token.set_visible(!gatewayed);
+                for row in [pin.upcast_ref::<gtk::Widget>(), token.upcast_ref()] {
                     row.set_visible(tokened);
                 }
-                dialog.set_response_label(ADD, if tokened { "Add" } else { "Pair" });
+                name.set_visible(tokened || gatewayed);
+                dialog.set_response_label(ADD, if tokened || gatewayed { "Add" } else { "Pair" });
                 let valid = !address.text().trim().is_empty()
                     && (!tokened
                         || (typed_pin(&pin.text()).is_some()
@@ -693,6 +980,7 @@ impl Window {
                 dialog.set_response_enabled(ADD, valid);
             }
         });
+        update();
         for entry in [
             address.upcast_ref::<gtk::Editable>(),
             pin.upcast_ref(),
@@ -701,14 +989,39 @@ impl Window {
             let update = Rc::clone(&update);
             entry.connect_changed(move |_| update());
         }
-        let toggled = Rc::clone(&update);
-        with_token.connect_active_notify(move |_| toggled());
+        for switch in [&with_token, &through] {
+            let toggled = Rc::clone(&update);
+            switch.connect_active_notify(move |_| toggled());
+        }
         let this = Rc::clone(self);
         glib::spawn_future_local(async move {
             if dialog.choose_future(Some(&this.window)).await != ADD {
                 return;
             }
             let address = address.text().trim().to_owned();
+            if through.is_active() {
+                let host = GatewayHost {
+                    name: match name.text().trim() {
+                        "" => address.clone(),
+                        typed => typed.to_owned(),
+                    },
+                    target: address,
+                };
+                if let Err(error) = gateway::add_host(&this.files.gateway_hosts(), &host) {
+                    this.alert(
+                        &format!("Couldn’t Add {}", host.name),
+                        &sentence(&error.to_string()),
+                    );
+                    return;
+                }
+                this.reload_gateway_hosts();
+                this.stream(Target {
+                    name: host.name,
+                    address: host.target,
+                    authentication: Authentication::Gateway,
+                });
+                return;
+            }
             if !with_token.is_active() {
                 this.stream(Target {
                     name: address.clone(),
@@ -851,9 +1164,95 @@ impl Window {
         page.add(&video);
         page.add(&sound_group);
         page.add(&input);
+        page.add(&self.gateway_preferences());
         let dialog = adw::PreferencesDialog::new();
         dialog.add(&page);
         dialog.present(Some(&self.window));
+    }
+
+    /// Returns the preferences of the organization's gateway, each kept as
+    /// it is applied.
+    fn gateway_preferences(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let gateway = self.state.borrow().gateway.clone();
+        let group = adw::PreferencesGroup::builder()
+            .title("Gateway")
+            .description(
+                "Your organization’s gateway, to reach its computers from outside its network. \
+                 You sign in with your organization’s account and a code from an authenticator \
+                 app. Ask its administrator for its address, and its key pin if they give one.",
+            )
+            .build();
+        let entry = |title: &str, text: &str| {
+            adw::EntryRow::builder()
+                .title(title)
+                .text(text)
+                .show_apply_button(true)
+                .build()
+        };
+        let address = entry(
+            "Address",
+            gateway
+                .as_ref()
+                .map_or("", |gateway| gateway.address.as_str()),
+        );
+        address.set_input_purpose(gtk::InputPurpose::Url);
+        let user = entry(
+            "User name",
+            gateway
+                .as_ref()
+                .and_then(|gateway| gateway.user.as_deref())
+                .unwrap_or(""),
+        );
+        let pin = entry(
+            "Key pin (optional)",
+            gateway
+                .as_ref()
+                .and_then(|gateway| gateway.pin.as_ref())
+                .map_or("", KeyPin::as_str),
+        );
+        for row in [&address, &user, &pin] {
+            let (this, address, user, pin) =
+                (Rc::clone(self), address.clone(), user.clone(), pin.clone());
+            row.connect_apply(move |_| {
+                this.set_gateway(&address.text(), &user.text(), &pin.text());
+            });
+            group.add(row);
+        }
+        group
+    }
+
+    /// Keeps the gateway at `address`, signing in as `user`, with the key
+    /// pin `pin` if given; forgets it if `address` is empty.
+    fn set_gateway(self: &Rc<Self>, address: &str, user: &str, pin: &str) {
+        let gateway = match (address.trim(), pin.trim()) {
+            ("", _) => None,
+            (address, "") => Some(Gateway {
+                address: address.to_owned(),
+                pin: None,
+                user: Some(user.trim().to_owned()).filter(|user| !user.is_empty()),
+            }),
+            (address, pin) => {
+                let Some(pin) = typed_pin(pin) else {
+                    self.toast("A key pin is 64 hexadecimal digits");
+                    return;
+                };
+                Some(Gateway {
+                    address: address.to_owned(),
+                    pin: Some(pin),
+                    user: Some(user.trim().to_owned()).filter(|user| !user.is_empty()),
+                })
+            }
+        };
+        let kept = match &gateway {
+            Some(gateway) => gateway.save(&self.gateway_path),
+            None => Gateway::remove(&self.gateway_path),
+        };
+        if let Err(error) = kept {
+            self.toast(&format!("Can’t keep the gateway: {error}"));
+            return;
+        }
+        self.state.borrow_mut().gateway = gateway;
+        self.refresh();
     }
 
     /// Changes the settings as `change` does, and keeps them.
@@ -913,6 +1312,38 @@ impl Window {
             let _ = this.files.set_name(&host.pin, None);
             this.reload_paired();
         });
+    }
+
+    /// Asks whether to forget `host`, reached through the gateway, and
+    /// forgets it if so.
+    fn confirm_forget_gateway_host(self: &Rc<Self>, host: GatewayHost) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Forget {}?", host.name)),
+            Some("You can add it again by its ID or name."),
+        );
+        dialog.add_responses(&[(CANCEL, "Cancel"), (FORGET, "Forget")]);
+        dialog.set_response_appearance(FORGET, adw::ResponseAppearance::Destructive);
+        dialog.set_close_response(CANCEL);
+        dialog.set_default_response(Some(CANCEL));
+        let this = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            if dialog.choose_future(Some(&this.window)).await != FORGET {
+                return;
+            }
+            match gateway::remove_host(&this.files.gateway_hosts(), &host.target) {
+                Ok(()) => this.reload_gateway_hosts(),
+                Err(error) => this.alert(
+                    &format!("Couldn’t Forget {}", host.name),
+                    &sentence(&error.to_string()),
+                ),
+            }
+        });
+    }
+
+    /// Reads the computers reached through the gateway again.
+    fn reload_gateway_hosts(self: &Rc<Self>) {
+        self.state.borrow_mut().gateway_hosts = gateway::hosts(&self.files.gateway_hosts());
+        self.refresh();
     }
 
     /// Reads the paired hosts again, as after pairing or forgetting one.
@@ -987,7 +1418,12 @@ fn typed_pin(text: &str) -> Option<KeyPin> {
 
 /// Returns whether `text` is a whole pairing code.
 fn is_code(text: &str) -> bool {
-    text.trim().len() == CODE_DIGITS && text.trim().bytes().all(|byte| byte.is_ascii_digit())
+    is_digits(text, CODE_DIGITS)
+}
+
+/// Returns whether `text` is `digits` digits, as a code is.
+fn is_digits(text: &str, digits: usize) -> bool {
+    text.trim().len() == digits && text.trim().bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -1010,5 +1446,7 @@ mod tests {
         assert!(is_code(" 0420 "));
         assert!(!is_code("042"));
         assert!(!is_code("04a0"));
+        assert!(is_digits("123456", TOTP_DIGITS));
+        assert!(!is_digits("12345", TOTP_DIGITS));
     }
 }
