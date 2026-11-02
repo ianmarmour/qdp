@@ -597,7 +597,9 @@ Option, Shift and Z are pressed together. On iPhone and iPad touches work as a
 trackpad or as the host's touchscreen, a keyboard, mouse or trackpad attached
 to an iPad work as on a computer, and controllers are sent as gamepads with
 rumble; the button at the top corner, or Select, Start and both shoulder
-buttons together, opens the stream's menu.
+buttons together, opens the stream's menu. The menu's Show Controller puts an
+on-screen controller over the stream, as on Android, for games on an iPhone or
+iPad without one.
 
 ## Windows app
 

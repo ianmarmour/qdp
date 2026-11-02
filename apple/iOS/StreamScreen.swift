@@ -10,6 +10,8 @@ struct StreamScreen: View {
     @State private var model: StreamModel
     @State private var menuOpen = false
     @State private var keyboardRequests = 0
+    /// Whether the on-screen gamepad shows: off as each stream starts.
+    @State private var controllerShown = false
     @AppStorage(SettingsKey.showStats) private var showStats = false
     @AppStorage(SettingsKey.touchMode) private var touchMode = TouchMode.trackpad
     @Environment(\.dismiss) private var dismiss
@@ -26,6 +28,8 @@ struct StreamScreen: View {
                 model: model,
                 touchMode: touchMode,
                 keyboardRequests: keyboardRequests,
+                controllerShown: controllerShown,
+                menuOpen: menuOpen,
                 openMenu: { menuOpen = true }
             )
             .ignoresSafeArea()
@@ -37,9 +41,12 @@ struct StreamScreen: View {
                     .padding(.vertical, 6)
                     .glassEffect(.regular, in: .capsule)
                     .padding(12)
+                    .allowsHitTesting(false)
             }
+            // Over the on-screen gamepad, the button moves to the middle,
+            // clear of its shoulder buttons.
             menuButton
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: controllerShown ? .center : .trailing)
                 .padding(12)
         }
         .statusBarHidden()
@@ -47,6 +54,7 @@ struct StreamScreen: View {
         .defersSystemGestures(on: .all)
         .confirmationDialog(model.target.name, isPresented: $menuOpen, titleVisibility: .visible) {
             Button("Show Keyboard") { keyboardRequests += 1 }
+            Button(controllerShown ? "Hide Controller" : "Show Controller") { controllerShown.toggle() }
             if TouchSource.current == .touchscreen {
                 Button(touchMode == .trackpad ? "Use Direct Touch" : "Use Trackpad") {
                     touchMode = touchMode == .trackpad ? .direct : .trackpad
@@ -183,6 +191,8 @@ struct StreamViewRepresentable: UIViewControllerRepresentable {
     let model: StreamModel
     let touchMode: TouchMode
     let keyboardRequests: Int
+    let controllerShown: Bool
+    let menuOpen: Bool
     let openMenu: () -> Void
 
     func makeUIViewController(context: Context) -> StreamViewController {
@@ -191,6 +201,8 @@ struct StreamViewRepresentable: UIViewControllerRepresentable {
 
     func updateUIViewController(_ controller: StreamViewController, context: Context) {
         controller.touchMode = touchMode
+        controller.controllerShown = controllerShown
+        controller.menuOpen = menuOpen
         controller.showKeyboard(request: keyboardRequests)
     }
 
