@@ -68,6 +68,14 @@ const FAILED_REASON: &str = "Sign-in failed";
 /// The reason of an attempt the directory could not answer.
 const UNAVAILABLE_REASON: &str = "The directory cannot be reached; try again later";
 
+/// How long the gateway waits for a host's handshake when it learns the
+/// host's key.
+const KEY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The reason the gateway closes the connection with which it learned a
+/// host's key.
+const KEY_LEARNED: &[u8] = b"the gateway learned the host's key";
+
 /// The methods a client may start with (Section 13.4).
 const FIRST_METHODS: [AuthMethod; 2] = [AuthMethod::PASSWORD, AuthMethod::TOKEN];
 
@@ -188,6 +196,33 @@ pub async fn serve_until(config: Config, stop: impl Future<Output = ()>) -> Resu
     endpoint.wait_idle().await;
     serving.abort();
     Ok(())
+}
+
+/// Returns the key pin of the host at `address`, learned by a TLS handshake
+/// with it, sending `server_name`, which closes once it completes, before
+/// the host is asked anything (Section 13.5).
+async fn learn_host_key(address: SocketAddr, server_name: &str) -> io::Result<KeyPin> {
+    let local: SocketAddr = if address.is_ipv4() {
+        (Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let endpoint = Endpoint::client(local)?;
+    // Any key the host proves it holds is the one learned.
+    let config = qdp_quic::client_config(qdp_quic::HostVerification::Pairing, None)
+        .map_err(io::Error::other)?;
+    let connecting = endpoint
+        .connect_with(config, address, server_name)
+        .map_err(io::Error::other)?;
+    let connection = tokio::time::timeout(KEY_HANDSHAKE_TIMEOUT, connecting)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the host did not answer"))?
+        .map_err(io::Error::other)?;
+    let pin = qdp_quic::peer_key_pin(&connection);
+    connection.close(quinn_code(GatewayErrorCode::NO_ERROR), KEY_LEARNED);
+    // The close goes out while the tunnel opens.
+    tokio::spawn(async move { endpoint.wait_idle().await });
+    pin.ok_or_else(|| io::Error::other("the host showed no certificate"))
 }
 
 /// Returns a gateway error code as quinn's.
@@ -603,7 +638,7 @@ impl<D: Directory> Session<'_, D> {
                     .ok()
                     .and_then(|mut addresses| addresses.next())
                     .ok_or_else(unknown)?;
-                (address, Some(host.key_pin()), host.server_name.clone())
+                (address, host.key_pin(), host.server_name.clone())
             } else {
                 let routed = RoutedTarget::parse(target).ok_or_else(unknown)?;
                 let addresses: Vec<SocketAddr> = match routed.address() {
@@ -636,6 +671,17 @@ impl<D: Directory> Session<'_, D> {
                 code: OpenFailure::UNREACHABLE,
                 reason: "The gateway cannot reach the host".to_owned(),
             }
+        };
+        // A host whose pin the configuration does not give is verified by
+        // the key it shows the gateway inside the network.
+        let host_pin = match host_pin {
+            Some(pin) => Some(pin),
+            None if config.assertions.learn_host_keys => Some(
+                learn_host_key(address, &server_name)
+                    .await
+                    .map_err(unreachable)?,
+            ),
+            None => None,
         };
         let socket = UdpSocket::bind(local).await.map_err(unreachable)?;
         socket.connect(address).await.map_err(unreachable)?;

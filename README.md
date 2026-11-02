@@ -546,8 +546,25 @@ Authenticator or Authy. A user without one yet is shown a QR code to add it
 to their app the first time, and asked for a code at every sign-in after;
 `enrollment = "admin-only"` leaves enrolling to administrators instead. It
 tunnels their QDP sessions, end to end, to the hosts it lists for them or
-that its routes let them open by their names inside the network. It stands apart from QDP's apps
-and hosts, and runs as a service on Linux and Windows servers.
+that its routes let them open by their names inside the network. It stands
+apart from QDP's apps and hosts, and runs as a service on Linux and Windows
+servers.
+
+Deploying it takes one setting on each side, none of them per host:
+
+1. On the gateway: the directory, and a route to the hosts' network, such as
+   every name under `desktops.corp.example.com` in `10.20.0.0/16` for the
+   group `QDP Users`.
+2. On every host: the gateway's assertion key, which `qdp-gateway keys`
+   prints, the same on every host, as `qdp serve --gateway-key KEY` (or in
+   the service's options), which configuration management can set fleet-wide.
+
+When a user opens a host, the gateway learns its key with a handshake of its
+own inside the network, vouches for the user to that key, and tells the client
+to verify the host by it. That trusts the network's names for hosts'
+identities, as users inside it do; a host listed in `[[host]]` with the pin
+`qdp pin` prints is verified by that pin instead, and
+`learn_host_keys = false` vouches only for such hosts.
 
 On Linux, install the release's `qdp-gateway-linux-x86_64.rpm`, or run
 `sudo qdp-gateway service install`, which makes the user `qdp-gateway`, a
@@ -572,8 +589,7 @@ sudo qdp-gateway keys                   # the pin clients pin, the key hosts tru
 sudo qdp-gateway service install        # start it, now and at every boot
 ```
 
-Hosts behind it admit its users with `qdp serve --gateway-key KEY`. Users
-connect through it with `qdp connect`, naming the host by its ID on the
+Users connect through it with `qdp connect`, naming the host by its ID on the
 gateway or its name inside the network:
 
 ```bash
@@ -583,7 +599,8 @@ qdp connect build-01 --gateway gw.corp.example.com --user alice
 The first time, it asks for alice's domain password and shows a QR code to
 scan with her authenticator app, then a code from the app; a mistyped code is
 asked for again with the same QR code. The gateway then vouches for her to the
-host, which verifies the host's key with the pin the gateway knows. Later
+host, and the client verifies the host's key with the pin the gateway knows,
+refusing a host whose key differs from one it pinned itself. Later
 connections sign in with the session token kept in the client's identity
 directory, without asking, until it expires. `--gateway-pin` pins the
 gateway's key, from `qdp-gateway keys`, where its certificate is not from a

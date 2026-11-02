@@ -33,17 +33,24 @@ enrollment = "first-login"
 [assertions]
 # The groups hosts are told users are in.
 groups = ["QDP Users"]
+# The gateway learns the key of each host it opens that is not listed with
+# its pin, by a handshake with it inside the network, to vouch for users to
+# it; false vouches only for hosts listed with their pins.
+# learn_host_keys = true
 
-# Hosts users are listed, by ID. `qdp pin` on a host prints its pin.
-[[host]]
-id = "build-01"
-name = "Build machine"
-address = "10.0.4.20:4433"
-pin = "0000000000000000000000000000000000000000000000000000000000000000"
-groups = ["QDP Users"]
-
-# Hosts users may open by their names inside the network.
+# Hosts users may open by their names inside the network, such as
+# desk-12.desktops.corp.example.com. Hosts need only trust the gateway's key,
+# the same on every host: `qdp serve --gateway-key KEY`, with the key
+# `qdp-gateway keys` prints.
 [[route]]
 names = ["*.desktops.corp.example.com"]
 networks = ["10.20.0.0/16"]
 groups = ["QDP Users"]
+
+# Hosts listed to users by ID, optionally with the pin `qdp pin` prints on
+# each, which the gateway then verifies them by instead of learning it.
+# [[host]]
+# id = "build-01"
+# name = "Build machine"
+# address = "10.0.4.20:4433"
+# groups = ["QDP Users"]
