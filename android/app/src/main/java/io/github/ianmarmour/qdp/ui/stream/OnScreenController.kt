@@ -7,6 +7,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -73,8 +74,13 @@ private const val LABEL_SHARE = 0.42f
 /** A glyph's size, as a share of its button's radius. */
 private const val GLYPH_SHARE = 0.5f
 
-/** A shoulder button's corners, as a share of its height. */
-private const val SHOULDER_CORNER_SHARE = 0.35f
+/** The other half of each shoulder button's and trigger's pill. */
+private val PILL_PARTNERS = mapOf(
+    VirtualControl.LEFT_TRIGGER to VirtualControl.LEFT_SHOULDER,
+    VirtualControl.LEFT_SHOULDER to VirtualControl.LEFT_TRIGGER,
+    VirtualControl.RIGHT_TRIGGER to VirtualControl.RIGHT_SHOULDER,
+    VirtualControl.RIGHT_SHOULDER to VirtualControl.RIGHT_TRIGGER,
+)
 
 /** A directional pad arrow's size, as a share of an arm's width. */
 private const val ARROW_SHARE = 0.3f
@@ -90,8 +96,9 @@ fun OnScreenController(controls: List<VirtualControl>) {
     val description = stringResource(R.string.controller_description)
     Canvas(modifier = Modifier.fillMaxSize().semantics { contentDescription = description }) {
         val outline = Stroke(width = 2.dp.toPx())
+        val frames = controls.associate { it.code to frameOf(it) }
         for (control in controls) {
-            val frame = Rect(control.left, control.top, control.left + control.width, control.top + control.height)
+            val frame = frameOf(control)
             when (control.code) {
                 VirtualControl.LEFT_STICK, VirtualControl.RIGHT_STICK -> drawStick(frame, control, outline)
                 VirtualControl.DPAD -> drawDPad(frame, control.directions, outline)
@@ -99,12 +106,16 @@ fun OnScreenController(controls: List<VirtualControl>) {
                 VirtualControl.RIGHT_SHOULDER,
                 VirtualControl.LEFT_TRIGGER,
                 VirtualControl.RIGHT_TRIGGER,
-                -> drawShoulder(frame, control, outline, measurer)
+                -> drawPillHalf(frame, control, PILL_PARTNERS[control.code]?.let(frames::get), outline, measurer)
                 else -> drawRoundButton(frame, control, outline, measurer)
             }
         }
     }
 }
+
+/** Returns where [control] is. */
+private fun frameOf(control: VirtualControl) =
+    Rect(control.left, control.top, control.left + control.width, control.top + control.height)
 
 /** Draws a stick: its base, and its knob where its tilt has it. */
 private fun DrawScope.drawStick(frame: Rect, control: VirtualControl, outline: Stroke) {
@@ -155,11 +166,29 @@ private fun DrawScope.drawArrow(center: Offset, size: Float, direction: Int) {
     drawPath(path, INK)
 }
 
-/** Draws a shoulder button or trigger: a rounded rectangle and its label. */
-private fun DrawScope.drawShoulder(frame: Rect, control: VirtualControl, outline: Stroke, measurer: TextMeasurer) {
-    val corner = CornerRadius(frame.height * SHOULDER_CORNER_SHARE)
-    drawRoundRect(if (control.held) FILL_HELD else FILL, frame.topLeft, frame.size, corner)
-    drawRoundRect(OUTLINE, frame.topLeft, frame.size, corner, style = outline)
+/**
+ * Draws a shoulder button or trigger as its half of the pill it shares with
+ * [partner], beside it, rounded on its outer side, the line between the two
+ * halves where they meet; or a whole pill alone.
+ */
+private fun DrawScope.drawPillHalf(
+    frame: Rect,
+    control: VirtualControl,
+    partner: Rect?,
+    outline: Stroke,
+    measurer: TextMeasurer,
+) {
+    val round = CornerRadius(frame.height / 2)
+    val (left, right) = when {
+        partner == null -> round to round
+        partner.left >= frame.left -> round to CornerRadius.Zero
+        else -> CornerRadius.Zero to round
+    }
+    val shape = Path().apply {
+        addRoundRect(RoundRect(frame, topLeft = left, topRight = right, bottomRight = right, bottomLeft = left))
+    }
+    drawPath(shape, if (control.held) FILL_HELD else FILL)
+    drawPath(shape, OUTLINE, style = outline)
     drawLabel(measurer, LABELS[control.code].orEmpty(), frame, INK)
 }
 

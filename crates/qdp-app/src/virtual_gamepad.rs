@@ -1,11 +1,10 @@
 //! The on-screen gamepad the phone and tablet apps can show over the
-//! stream, for games on a device without a controller, laid out as phone
-//! games lay theirs out, within reach of the thumbs: the left stick in the
-//! bottom left corner, the directional pad beside it and the left stick's
-//! button above it; A, the largest, in the bottom right corner, B, X and Y on
-//! an arc around it, and the right stick beside them, its button above it;
-//! the shoulder buttons and triggers in the top corners; and Select and
-//! Start between them.
+//! stream, for games on a device without a controller, laid out within
+//! reach of the thumbs: a stick in each bottom corner, A, B, X and Y on an
+//! arc around the right one, each side's trigger and shoulder button as a
+//! pill in its top corner, and Select and Start between them. The left
+//! stick stands in for the directional pad, which the default layout
+//! leaves out, as it does the sticks' buttons.
 //!
 //! The apps draw the controls [`VirtualGamepad::controls`] returns and pass
 //! every touch on them to [`VirtualGamepad::touch`], which works out the
@@ -18,8 +17,6 @@
 //! UIKit's points, and [`Screen::density`] says how many make a
 //! density-independent pixel, in which the layout is designed. On a screen
 //! smaller than the layout is designed for, it scales down to fit.
-
-use std::f32::consts::FRAC_1_SQRT_2;
 
 use qdp_runtime::TouchPhase;
 
@@ -50,91 +47,58 @@ pub const LEFT: u32 = 1 << 2;
 /// [`ControlView::directions`]'s bit for right.
 pub const RIGHT: u32 = 1 << 3;
 
-/// The space between the controls and the screen's safe area, in dp.
-const MARGIN: f32 = 24.0;
+/// The space between the sticks and the safe area's sides and bottom, and
+/// between the shoulder pills and its sides, in dp.
+const MARGIN: f32 = 20.0;
+
+/// The space between the top row, the shoulder pills, Select and Start, and
+/// the top of the safe area, in dp: what the app's own menu button between
+/// Select and Start keeps.
+const TOP_MARGIN: f32 = 12.0;
 
 /// The radius of a stick's base, in dp.
-const STICK_RADIUS: f32 = 60.0;
+const STICK_RADIUS: f32 = 56.0;
 
-/// The directional pad's width and height, in dp.
-const DPAD_SIZE: f32 = 112.0;
-
-/// The radius of A, the main button, in the bottom right corner, in dp.
-const MAIN_BUTTON_RADIUS: f32 = 38.0;
-
-/// The radius of B, X and Y, on an arc around A, in dp: 52 dp across,
-/// more than the 48 a touch target should be.
-const ARC_BUTTON_RADIUS: f32 = 26.0;
-
-/// How far the arc's buttons' centres are from A's, in dp: far enough that
-/// neighbours, 45° apart on the arc, keep [`CLEARANCE`] between them.
-const ARC_SPREAD: f32 = 84.0;
-
-/// The radius of a stick button and of Select and Start, in dp.
-const SMALL_BUTTON_RADIUS: f32 = 20.0;
-
-/// A shoulder button's or trigger's width, in dp.
-const SHOULDER_WIDTH: f32 = 88.0;
-
-/// A shoulder button's or trigger's height, in dp.
-const SHOULDER_HEIGHT: f32 = 40.0;
-
-/// The space between a trigger and the shoulder button under it, in dp.
-const SHOULDER_GAP: f32 = 8.0;
+/// The radius of A, B, X and Y, in dp: 52 dp across, more than the 48 a
+/// touch target should be.
+const FACE_BUTTON_RADIUS: f32 = 26.0;
 
 /// The least space between neighbouring controls, in dp.
 const CLEARANCE: f32 = 12.0;
 
-/// From the safe area's left edge to the left stick's centre, in the
-/// corner, in dp.
-const LEFT_STICK_COLUMN: f32 = MARGIN + STICK_RADIUS;
+/// How far A, B, X and Y's centres are from the right stick's, on an arc
+/// around it, in dp.
+const FACE_RING: f32 = STICK_RADIUS + CLEARANCE + FACE_BUTTON_RADIUS;
 
-/// From the safe area's left edge to the directional pad's centre, beside
-/// the left stick, in dp.
-const DPAD_COLUMN: f32 = LEFT_STICK_COLUMN + STICK_RADIUS + CLEARANCE + DPAD_SIZE / 2.0;
+/// Where A, X, Y and B are on their arc around the right stick, in degrees
+/// counter-clockwise from its right: round its top left, from below its
+/// left to straight above it, in the order a controller's diamond has them
+/// going round. 38° apart, neighbours keep clear of each other.
+const FACE_ANGLES: [(Control, f32); 4] = [
+    (Control::A, 204.0),
+    (Control::X, 166.0),
+    (Control::Y, 128.0),
+    (Control::B, 90.0),
+];
 
-/// From the safe area's right edge to A's centre, in the corner, in dp.
-const MAIN_BUTTON_COLUMN: f32 = MARGIN + MAIN_BUTTON_RADIUS;
+/// The width of each half of a shoulder pill, a trigger and its shoulder
+/// button side by side, in dp.
+const SHOULDER_WIDTH: f32 = 64.0;
 
-/// From the safe area's right edge to the right stick's centre, beside the
-/// arc, in dp.
-const RIGHT_STICK_COLUMN: f32 =
-    MAIN_BUTTON_COLUMN + ARC_SPREAD + ARC_BUTTON_RADIUS + CLEARANCE + STICK_RADIUS;
+/// A shoulder pill's height, in dp.
+const SHOULDER_HEIGHT: f32 = 44.0;
 
-/// From the safe area's bottom edge to the sticks' centres, in dp.
-const STICK_ROW: f32 = MARGIN + STICK_RADIUS;
-
-/// From the safe area's bottom edge to the directional pad's centre, in dp.
-const DPAD_ROW: f32 = MARGIN + DPAD_SIZE / 2.0;
-
-/// From the safe area's bottom edge to A's centre, in dp.
-const MAIN_BUTTON_ROW: f32 = MARGIN + MAIN_BUTTON_RADIUS;
-
-/// From the safe area's bottom edge to the stick buttons' centres, above
-/// the sticks, in dp.
-const STICK_BUTTON_ROW: f32 = STICK_ROW + STICK_RADIUS + CLEARANCE + SMALL_BUTTON_RADIUS;
-
-/// From the safe area's top edge to Select's and Start's centres, between
-/// the shoulder buttons, in dp.
-const MIDDLE_ROW: f32 = MARGIN + SMALL_BUTTON_RADIUS;
+/// The radius of Select and Start, in dp: 44 across, the least a touch
+/// target should be.
+const SMALL_BUTTON_RADIUS: f32 = 22.0;
 
 /// The space between Select and Start, in dp, which leaves room between
 /// them for the app's own button that opens the stream's menu.
 const MIDDLE_GAP: f32 = 80.0;
 
-/// The width the layout is designed for, in dp, the bottom row's: narrower
-/// safe areas scale it down.
-const DESIGN_WIDTH: f32 =
-    DPAD_COLUMN + DPAD_SIZE / 2.0 + CLEARANCE + RIGHT_STICK_COLUMN + STICK_RADIUS;
-
-/// The height the layout is designed for, in dp: shorter safe areas scale
-/// it down.
-const DESIGN_HEIGHT: f32 = STICK_BUTTON_ROW
-    + SMALL_BUTTON_RADIUS
-    + CLEARANCE
-    + MARGIN
-    + 2.0 * SHOULDER_HEIGHT
-    + SHOULDER_GAP;
+/// From the safe area's side and bottom edges to each stick's centre, in
+/// its bottom corner, in dp.
+const STICK_INSET: f32 = MARGIN + STICK_RADIUS;
 
 /// How far beyond a button or the directional pad a touch still takes it,
 /// in dp.
@@ -387,8 +351,9 @@ impl VirtualGamepad {
             self.unit = 0.0;
             return before != self.state();
         }
-        let scale = ((right - left) / density / DESIGN_WIDTH)
-            .min((bottom - top) / density / DESIGN_HEIGHT)
+        let (design_width, design_height) = design_size();
+        let scale = ((right - left) / density / design_width)
+            .min((bottom - top) / density / design_height)
             .min(1.0);
         let unit = scale * density;
         self.unit = unit;
@@ -403,94 +368,65 @@ impl VirtualGamepad {
             control,
             frame: Rect::around(Point { x, y }, radius * unit),
         };
-        let shoulder = |control, x: f32, y: f32| Placed {
+        let shoulder = |control, x: f32| Placed {
             control,
             frame: Rect {
                 x,
-                y,
+                y: from_top(TOP_MARGIN),
                 width: SHOULDER_WIDTH * unit,
                 height: SHOULDER_HEIGHT * unit,
             },
         };
-        let lower_shoulder = MARGIN + SHOULDER_HEIGHT + SHOULDER_GAP;
         let middle_offset = (MIDDLE_GAP / 2.0 + SMALL_BUTTON_RADIUS) * unit;
-        // A, in the corner, and B, X and Y on an arc around it, from its top
-        // to its left.
-        let main = Point {
-            x: from_right(MAIN_BUTTON_COLUMN),
-            y: from_bottom(MAIN_BUTTON_ROW),
+        let top_row = from_top(TOP_MARGIN + SMALL_BUTTON_RADIUS);
+        let left_stick = Point {
+            x: from_left(STICK_INSET),
+            y: from_bottom(STICK_INSET),
         };
-        let spread = ARC_SPREAD * unit;
-        let diagonal = spread * FRAC_1_SQRT_2;
-        self.controls = vec![
-            shoulder(Control::LeftTrigger, from_left(MARGIN), from_top(MARGIN)),
-            shoulder(
-                Control::LeftShoulder,
-                from_left(MARGIN),
-                from_top(lower_shoulder),
-            ),
-            shoulder(
-                Control::RightTrigger,
-                from_right(MARGIN + SHOULDER_WIDTH),
-                from_top(MARGIN),
-            ),
+        let right_stick = Point {
+            x: from_right(STICK_INSET),
+            y: from_bottom(STICK_INSET),
+        };
+        let mut controls = vec![
+            // Each side's trigger outermost and its shoulder button beside
+            // it, one pill in each top corner.
+            shoulder(Control::LeftTrigger, from_left(MARGIN)),
+            shoulder(Control::LeftShoulder, from_left(MARGIN + SHOULDER_WIDTH)),
             shoulder(
                 Control::RightShoulder,
-                from_right(MARGIN + SHOULDER_WIDTH),
-                from_top(lower_shoulder),
+                from_right(MARGIN + 2.0 * SHOULDER_WIDTH),
             ),
+            shoulder(Control::RightTrigger, from_right(MARGIN + SHOULDER_WIDTH)),
             circle(
                 Control::Select,
                 middle - middle_offset,
-                from_top(MIDDLE_ROW),
+                top_row,
                 SMALL_BUTTON_RADIUS,
             ),
             circle(
                 Control::Start,
                 middle + middle_offset,
-                from_top(MIDDLE_ROW),
+                top_row,
                 SMALL_BUTTON_RADIUS,
             ),
-            circle(
-                Control::LeftStick,
-                from_left(LEFT_STICK_COLUMN),
-                from_bottom(STICK_ROW),
-                STICK_RADIUS,
-            ),
-            circle(
-                Control::LeftStickButton,
-                from_left(LEFT_STICK_COLUMN),
-                from_bottom(STICK_BUTTON_ROW),
-                SMALL_BUTTON_RADIUS,
-            ),
-            circle(
-                Control::DPad,
-                from_left(DPAD_COLUMN),
-                from_bottom(DPAD_ROW),
-                DPAD_SIZE / 2.0,
-            ),
-            circle(Control::A, main.x, main.y, MAIN_BUTTON_RADIUS),
-            circle(Control::B, main.x, main.y - spread, ARC_BUTTON_RADIUS),
-            circle(Control::X, main.x - spread, main.y, ARC_BUTTON_RADIUS),
-            circle(
-                Control::Y,
-                main.x - diagonal,
-                main.y - diagonal,
-                ARC_BUTTON_RADIUS,
-            ),
+            circle(Control::LeftStick, left_stick.x, left_stick.y, STICK_RADIUS),
             circle(
                 Control::RightStick,
-                from_right(RIGHT_STICK_COLUMN),
-                from_bottom(STICK_ROW),
+                right_stick.x,
+                right_stick.y,
                 STICK_RADIUS,
             ),
-            circle(
-                Control::RightStickButton,
-                from_right(RIGHT_STICK_COLUMN),
-                from_bottom(STICK_BUTTON_ROW),
-                SMALL_BUTTON_RADIUS,
-            ),
         ];
+        controls.extend(FACE_ANGLES.iter().map(|&(control, angle)| {
+            let (sin, cos) = angle.to_radians().sin_cos();
+            circle(
+                control,
+                right_stick.x + cos * FACE_RING * unit,
+                right_stick.y - sin * FACE_RING * unit,
+                FACE_BUTTON_RADIUS,
+            )
+        }));
+        self.controls = controls;
         before != self.state()
     }
 
@@ -615,10 +551,17 @@ impl VirtualGamepad {
             Control::DPad => 1,
             _ => 0,
         };
+        // Among controls alike, as a trigger and the shoulder button beside
+        // it, the nearest.
+        let nearness = |placed: &Placed| distance(placed.frame.center(), at);
         self.controls
             .iter()
             .filter(reaches)
-            .min_by_key(|placed| rank(placed.control))
+            .min_by(|a, b| {
+                rank(a.control)
+                    .cmp(&rank(b.control))
+                    .then_with(|| nearness(a).total_cmp(&nearness(b)))
+            })
             .map(|placed| placed.control)
     }
 
@@ -676,6 +619,34 @@ impl VirtualGamepad {
             .filter(|control| self.fingers.iter().any(|finger| finger.control == *control))
             .collect()
     }
+}
+
+/// Returns the width and height, in dp, the layout is designed for: the
+/// widest of its top row and its sticks' row, and the sticks' row and the
+/// top row stacked. Narrower or shorter safe areas scale it down.
+fn design_size() -> (f32, f32) {
+    // How far A, B, X and Y reach left of the right stick's centre, and
+    // above it.
+    let (reach_left, reach_up) =
+        FACE_ANGLES
+            .iter()
+            .fold((0.0_f32, 0.0_f32), |(left, up), &(_, angle)| {
+                let (sin, cos) = angle.to_radians().sin_cos();
+                (
+                    left.max(-cos * FACE_RING + FACE_BUTTON_RADIUS),
+                    up.max(sin * FACE_RING + FACE_BUTTON_RADIUS),
+                )
+            });
+    let sticks_row = 2.0 * STICK_INSET + STICK_RADIUS + CLEARANCE + reach_left;
+    let top_row = 2.0
+        * (MARGIN
+            + 2.0 * SHOULDER_WIDTH
+            + CLEARANCE
+            + MIDDLE_GAP / 2.0
+            + 2.0 * SMALL_BUTTON_RADIUS);
+    let height =
+        STICK_INSET + reach_up.max(STICK_RADIUS) + CLEARANCE + TOP_MARGIN + SHOULDER_HEIGHT;
+    (sticks_row.max(top_row), height)
 }
 
 /// Returns the distance between `a` and `b`.
@@ -784,7 +755,7 @@ mod tests {
             let mut gamepad = VirtualGamepad::new();
             gamepad.lay_out(&screen);
             let views = gamepad.controls();
-            assert_eq!(views.len(), 15);
+            assert_eq!(views.len(), 12);
             for view in &views {
                 let frame = view.frame;
                 assert!(frame.width > 0.0, "{screen:?}: {view:?}");
@@ -831,6 +802,55 @@ mod tests {
             .find(|view| view.control == Control::LeftStick)
             .unwrap();
         assert_eq!(stick.frame.width, 2.0 * STICK_RADIUS);
+    }
+
+    /// The sticks are in the bottom corners, A, B, X and Y around the right
+    /// one, each side's trigger and shoulder button side by side in its top
+    /// corner, the trigger outermost, and a touch on either half of a pill
+    /// takes that half.
+    #[test]
+    fn lays_out_the_default_layout() {
+        let gamepad = phone();
+        let left = center(&gamepad, Control::LeftStick);
+        let right = center(&gamepad, Control::RightStick);
+        assert!(left.x < PHONE.width / 3.0 && left.y > PHONE.height / 2.0);
+        assert!(right.x > PHONE.width * 2.0 / 3.0 && right.y > PHONE.height / 2.0);
+        for face in [Control::A, Control::B, Control::X, Control::Y] {
+            let ring = distance(center(&gamepad, face), right);
+            assert!((ring - FACE_RING * gamepad.unit).abs() < 0.01, "{face:?}");
+        }
+        let views = gamepad.controls();
+        let frame = |control| {
+            views
+                .iter()
+                .find(|view| view.control == control)
+                .unwrap()
+                .frame
+        };
+        assert!(frame(Control::LeftTrigger).x < frame(Control::LeftShoulder).x);
+        assert!(frame(Control::RightShoulder).x < frame(Control::RightTrigger).x);
+        assert_eq!(
+            frame(Control::LeftTrigger).x + frame(Control::LeftTrigger).width,
+            frame(Control::LeftShoulder).x
+        );
+        for absent in [
+            Control::DPad,
+            Control::LeftStickButton,
+            Control::RightStickButton,
+        ] {
+            assert!(
+                views.iter().all(|view| view.control != absent),
+                "{absent:?}"
+            );
+        }
+        let mut gamepad = gamepad;
+        let bumper = frame(Control::LeftShoulder);
+        let near_seam = Point {
+            x: bumper.x + 2.0,
+            y: bumper.y + bumper.height / 2.0,
+        };
+        gamepad.touch(1, TouchPhase::Down, near_seam);
+        assert_eq!(gamepad.state().buttons, 1 << Control::LeftShoulder.code());
     }
 
     /// A button holds while touched, and says it was pressed.
@@ -910,8 +930,16 @@ mod tests {
     /// thumb as it rolls.
     #[test]
     fn presses_directions_as_the_thumb_rolls() {
-        let mut gamepad = phone();
-        let pad = center(&gamepad, Control::DPad);
+        // The default layout leaves the pad out; a layout of it alone.
+        let pad = Point { x: 300.0, y: 300.0 };
+        let mut gamepad = VirtualGamepad {
+            controls: vec![Placed {
+                control: Control::DPad,
+                frame: Rect::around(pad, 168.0),
+            }],
+            fingers: Vec::new(),
+            unit: 3.0,
+        };
         let bit = |direction: u32| direction << Control::DPad.code();
         assert!(gamepad.touch(1, TouchPhase::Down, pad).redraw);
         assert_eq!(gamepad.state().buttons, 0);
