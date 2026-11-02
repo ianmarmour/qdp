@@ -464,3 +464,5 @@ impl FrameSource for DesktopDuplication {
         Some(self.pointer.state())
     }
 }
+
+// Runs the Windows tests on a check branch; not merged.
