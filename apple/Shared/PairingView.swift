@@ -36,7 +36,13 @@ struct PairingView: View {
                         cell(index)
                     }
                 }
+                // The field that takes the typing is invisible: the cells
+                // show the digits, and the active one shows the focus, so the
+                // system's focus ring, which the Mac draws outside the field's
+                // opacity, stays off.
                 TextField("", text: $code)
+                    .textFieldStyle(.plain)
+                    .focusEffectDisabled()
                     .focused($focused)
                     .textContentType(.oneTimeCode)
                     #if os(iOS)
