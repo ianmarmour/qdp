@@ -14,6 +14,22 @@ members = [
     "crates/qdp-runtime",
     "crates/qdp-windows",
 ]
+# What a plain `cargo build` builds: everything but the Linux app, whose GTK
+# 4 and libadwaita development files a host or the gateway does not need.
+# `cargo build -p qdp-gtk` builds it, and `--workspace` builds everything.
+default-members = [
+    "crates/qdp",
+    "crates/qdp-android",
+    "crates/qdp-app",
+    "crates/qdp-apple",
+    "crates/qdp-cli",
+    "crates/qdp-codec",
+    "crates/qdp-desktop",
+    "crates/qdp-gateway",
+    "crates/qdp-quic",
+    "crates/qdp-runtime",
+    "crates/qdp-windows",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -40,6 +40,9 @@ Build the `qdp` command, which is both the host and the client:
 cargo build --release
 ```
 
+This builds every crate but the Linux app, which needs GTK's development files
+besides (see [Linux app](#linux-app)).
+
 On the host, serve. The host creates its key in `./qdp-identity` the first
 time, listens on UDP port 4433 unless given `--listen`, and advertises itself
 on the local network with DNS-SD as `_qdp._udp`, so that clients such as the
