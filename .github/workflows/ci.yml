@@ -145,7 +145,7 @@ jobs:
         if: github.event_name == 'push'
         run: tar -czf qdp-linux-x86_64.tar.gz -C target/release qdp
 
-      - name: Package as an RPM
+      - name: Package as an RPM and a Debian package
         if: github.event_name == 'push'
         # A version tag is the version's first release; a build of main is
         # numbered by its run, so that each upgrades the last.
@@ -153,6 +153,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends rpm
           if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
           packaging/linux/build-rpm.sh target/release/qdp "$release" qdp-linux-x86_64.rpm
+          packaging/linux/build-deb.sh qdp target/release/qdp "$release" qdp-linux-x86_64.deb
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
@@ -161,6 +162,7 @@ jobs:
           path: |
             qdp-linux-x86_64.tar.gz
             qdp-linux-x86_64.rpm
+            qdp-linux-x86_64.deb
           if-no-files-found: error
 
       - name: Build and package the Linux app
@@ -191,6 +193,22 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
           packaging/linux/build-gateway-rpm.sh target/release/qdp-gateway "$release" \
             qdp-gateway-linux-x86_64.rpm
+          packaging/linux/build-deb.sh qdp-gateway target/release/qdp-gateway "$release" \
+            qdp-gateway-linux-x86_64.deb
+
+      - name: Try the Debian packages
+        if: github.event_name == 'push'
+        # They install with their dependencies, leave their services off,
+        # give the gateway's configuration to its group alone, and remove.
+        run: |
+          sudo apt-get install -y ./qdp-linux-x86_64.deb ./qdp-gateway-linux-x86_64.deb
+          qdp help >/dev/null
+          qdp-gateway help >/dev/null
+          test "$(systemctl is-enabled qdp.service)" = disabled
+          test "$(systemctl is-enabled qdp-gateway.service)" = disabled
+          test "$(sudo stat -c '%U:%G %a' /etc/qdp-gateway/gateway.toml)" = "root:qdp-gateway 640"
+          sudo apt-get purge -y qdp qdp-gateway
+          test ! -e /usr/bin/qdp && test ! -e /usr/bin/qdp-gateway
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
@@ -199,6 +217,7 @@ jobs:
           path: |
             qdp-gateway-linux-x86_64.tar.gz
             qdp-gateway-linux-x86_64.rpm
+            qdp-gateway-linux-x86_64.deb
           if-no-files-found: error
 
   windows:
@@ -422,12 +441,14 @@ jobs:
           | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
           | Linux (x86-64) | \`qdp-linux-x86_64.tar.gz\` |
           | Linux RPM (x86-64; Fedora 40 or later, openSUSE Tumbleweed) | \`qdp-linux-x86_64.rpm\` |
+          | Linux Debian package (x86-64; Debian 12 or later, Ubuntu 22.04 or later) | \`qdp-linux-x86_64.deb\` |
           | Linux app (x86-64; GTK 4.14 and libadwaita 1.5 or later) | \`qdp-gtk-linux-x86_64.tar.gz\` |
           | Linux app RPM (x86-64; Fedora 40 or later; needs the qdp RPM) | \`qdp-gtk-linux-x86_64.rpm\` |
           | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
           | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
           | Gateway for Linux (x86-64) | \`qdp-gateway-linux-x86_64.tar.gz\` |
           | Gateway RPM (x86-64; Fedora 40 or later, RHEL 9 or later) | \`qdp-gateway-linux-x86_64.rpm\` |
+          | Gateway Debian package (x86-64; Debian 12 or later, Ubuntu 22.04 or later) | \`qdp-gateway-linux-x86_64.deb\` |
           | Gateway installer for Windows (x86-64; Windows Server 2019 or later) | \`qdp-gateway-windows-x64.msi\` |
           | Gateway for Windows, without installing (x86-64) | \`qdp-gateway-windows-x86_64.zip\` |
 

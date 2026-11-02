@@ -1,0 +1,21 @@
+#!/bin/sh
+# After QDP is installed or upgraded: the modules load and the rule applies
+# now, so that input works before the next boot, and systemd learns of the
+# service, which an upgrade restarts with the new command if it runs. A new
+# service is off: the package does not turn it on, as systemd's presets,
+# which enable everything on Debian, would.
+set -e
+
+if [ "$1" = configure ]; then
+  modprobe -a uinput uhid >/dev/null 2>&1 || true
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+  udevadm trigger --subsystem-match=misc >/dev/null 2>&1 || true
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [ -n "$2" ]; then
+      systemctl try-restart qdp.service >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+exit 0

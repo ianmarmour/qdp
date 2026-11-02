@@ -268,8 +268,8 @@ button is held, its pointer reports the motion of each move along with the
 position, as a mouse does and in the desktop's own units at its interface
 scale, which the screen cast portal tells, so that games which follow the
 mouse's motion, as many do to drag their interface's elements, see the drag
-as far as the pointer goes. The RPM below allows both for the user at the
-machine and members of the `input` group. Otherwise, to allow both for members
+as far as the pointer goes. The RPM and Debian package below allow both for
+the user at the machine and members of the `input` group. Otherwise, to allow both for members
 of the `input` group:
 
 ```bash
@@ -368,8 +368,8 @@ service. `sudo qdp service install` writes a systemd unit that runs
 turns it on and starts it; a `qdp` run from outside the system's programs, such
 as a build in a home directory, which SELinux keeps services from running, is
 installed as `/usr/local/bin/qdp` for the service to run; `sudo qdp service status` shows how it is doing, and
-`sudo qdp service uninstall` removes it. The RPM ships the same service, off
-until `sudo systemctl enable --now qdp`. The service keeps the host's key and
+`sudo qdp service uninstall` removes it. The RPM and Debian package ship the
+same service, off until `sudo systemctl enable --now qdp`. The service keeps the host's key and
 paired devices in `/var/lib/qdp`, so `sudo qdp clients --identity /var/lib/qdp`
 lists them, and pairing codes show in the logged-in desktop and in
 `journalctl -u qdp -f`. To keep the devices paired with a host run by hand, copy its
@@ -578,7 +578,8 @@ identities, as users inside it do; a host listed in `[[host]]` with the pin
 `qdp pin` prints is verified by that pin instead, and
 `learn_host_keys = false` vouches only for such hosts.
 
-On Linux, install the release's `qdp-gateway-linux-x86_64.rpm`, or run
+On Linux, install the release's `qdp-gateway-linux-x86_64.rpm` or, on Debian
+and Ubuntu, `qdp-gateway-linux-x86_64.deb`, which make the same, or run
 `sudo qdp-gateway service install`, which makes the user `qdp-gateway`, a
 hardened systemd unit and, the first time, an example configuration in
 `/etc/qdp-gateway/gateway.toml` to edit. On Windows, install the release's
@@ -630,14 +631,22 @@ the run (the ten newest are kept). The newest build's files are always at
 `https://github.com/ianmarmour/qdp/releases/latest/download/FILE`, such as
 `qdp-android-arm64.apk`. On Linux, `qdp-linux-x86_64.rpm` packages the `qdp`
 command for Fedora 40 or later and openSUSE Tumbleweed, with the udev rule and
-kernel modules its input needs:
+kernel modules its input needs, and `qdp-linux-x86_64.deb` the same for Debian
+12 or later and Ubuntu 22.04 or later:
 
 ```bash
 sudo dnf install https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm
 ```
 
-[`packaging/linux/build-rpm.sh`](packaging/linux/build-rpm.sh) builds it from a
-built `qdp`, with `rpmbuild`. Pushing a version tag publishes a release of that
+```bash
+curl -LO https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb
+sudo apt install ./qdp-linux-x86_64.deb
+```
+
+[`packaging/linux/build-rpm.sh`](packaging/linux/build-rpm.sh) builds the RPM
+from a built `qdp`, with `rpmbuild`, and
+[`packaging/linux/build-deb.sh`](packaging/linux/build-deb.sh) the Debian
+packages of `qdp` and `qdp-gateway`, with `dpkg-deb`. Pushing a version tag publishes a release of that
 version, which is kept:
 
 ```bash
