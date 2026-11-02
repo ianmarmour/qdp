@@ -21,6 +21,7 @@ use qdp_app::gamepad::GamepadState;
 use qdp_app::session::{Authentication, Config, GatewayConfig, Session};
 use qdp_app::settings::{format_pin, parse_pin};
 use qdp_app::sink::SharedCursor;
+use qdp_app::virtual_gamepad::{self, Insets, Point, Screen, VirtualGamepad};
 use qdp_codec::CodecPreference;
 use qdp_desktop::MetalVideo;
 use qdp_quic::{IdentityFiles, TlsIdentity};
@@ -120,6 +121,37 @@ pub struct QdpCursor {
     rgba: *mut u8,
 }
 
+/// The on-screen gamepad, which the app holds as `QdpVirtualGamepad *`.
+pub struct QdpVirtualGamepad {
+    /// Its controls and the touches holding them.
+    gamepad: VirtualGamepad,
+}
+
+/// A control of the on-screen gamepad as the app draws it, as
+/// `QdpVirtualControl` lays it out.
+#[repr(C)]
+pub struct QdpVirtualControl {
+    /// Which control it is: a Standard Gamepad button index, 12 for the
+    /// directional pad, or 17 and 18 for the left and right sticks.
+    control: u32,
+    /// Its frame's left edge, in the app's points.
+    x: f32,
+    /// Its frame's top edge.
+    y: f32,
+    /// Its frame's width.
+    width: f32,
+    /// Its frame's height.
+    height: f32,
+    /// Whether a touch holds it.
+    held: bool,
+    /// A stick's tilt across, from -1 to 1, negative left.
+    tilt_x: f32,
+    /// A stick's tilt down, from -1 to 1, negative up.
+    tilt_y: f32,
+    /// The directional pad's directions held: 1 up, 2 down, 4 left, 8 right.
+    directions: u32,
+}
+
 /// A running session, which the app holds as `QdpSession *`.
 pub struct QdpSession {
     /// The session.
@@ -165,6 +197,32 @@ fn new_string(text: &str) -> *mut c_char {
 unsafe fn session<'a>(session: *mut QdpSession) -> Option<&'a QdpSession> {
     // SAFETY: as the caller promises.
     unsafe { session.as_ref() }
+}
+
+/// Returns the touch phase the app numbers `phase`, as `QdpTouchPhase`
+/// does.
+fn touch_phase(phase: i32) -> Option<TouchPhase> {
+    match phase {
+        0 => Some(TouchPhase::Down),
+        1 => Some(TouchPhase::Move),
+        2 => Some(TouchPhase::Up),
+        3 => Some(TouchPhase::Cancel),
+        _ => None,
+    }
+}
+
+/// Sends the on-screen gamepad's state to the session a handle points to.
+///
+/// # Safety
+///
+/// As for [`session`].
+unsafe fn send_virtual_gamepad(handle: *mut QdpSession, gamepad: &VirtualGamepad) {
+    let input = UserInput::Gamepad {
+        slot: virtual_gamepad::SLOT,
+        report: gamepad.state().report(),
+    };
+    // SAFETY: as the caller promises.
+    unsafe { send(handle, input) };
 }
 
 /// Sends `input` to the session a handle points to.
@@ -767,12 +825,8 @@ pub unsafe extern "C" fn qdp_session_touch(
     pressure: f32,
 ) {
     guarded((), || {
-        let phase = match phase {
-            0 => TouchPhase::Down,
-            1 => TouchPhase::Move,
-            2 => TouchPhase::Up,
-            3 => TouchPhase::Cancel,
-            _ => return,
+        let Some(phase) = touch_phase(phase) else {
+            return;
         };
         let input = UserInput::Touch {
             finger: finger.into(),
@@ -862,6 +916,200 @@ pub unsafe extern "C" fn qdp_session_gamepad(
         // SAFETY: as the caller promises.
         unsafe { send(session, input) };
     });
+}
+
+/// Returns a new on-screen gamepad, not laid out yet, which the app frees
+/// with [`qdp_virtual_gamepad_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn qdp_virtual_gamepad_new() -> *mut QdpVirtualGamepad {
+    guarded(ptr::null_mut(), || {
+        Box::into_raw(Box::new(QdpVirtualGamepad {
+            gamepad: VirtualGamepad::new(),
+        }))
+    })
+}
+
+/// Frees an on-screen gamepad.
+///
+/// # Safety
+///
+/// `gamepad` is null or a live handle from [`qdp_virtual_gamepad_new`], not
+/// used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_virtual_gamepad_free(gamepad: *mut QdpVirtualGamepad) {
+    if !gamepad.is_null() {
+        // SAFETY: as the caller promises.
+        drop(unsafe { Box::from_raw(gamepad) });
+    }
+}
+
+/// Connects the on-screen gamepad to the session, as its own gamepad, or
+/// disconnects it with every control released.
+///
+/// # Safety
+///
+/// `gamepad` and `session` are null or live handles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_virtual_gamepad_connect(
+    gamepad: *mut QdpVirtualGamepad,
+    session: *mut QdpSession,
+    connected: bool,
+) {
+    guarded((), || {
+        let input = if connected {
+            UserInput::GamepadConnected {
+                slot: virtual_gamepad::SLOT,
+                features: DeviceFeatures::default(),
+                name: virtual_gamepad::NAME.to_owned(),
+            }
+        } else {
+            // SAFETY: as the caller promises.
+            if let Some(handle) = unsafe { gamepad.as_mut() } {
+                handle.gamepad.release_all();
+            }
+            UserInput::GamepadDisconnected {
+                slot: virtual_gamepad::SLOT,
+            }
+        };
+        // SAFETY: as the caller promises.
+        unsafe { send(session, input) };
+    });
+}
+
+/// Lays the on-screen gamepad out on a view `width × height` points, inside
+/// the safe area the insets leave, releasing every control held.
+///
+/// # Safety
+///
+/// `gamepad` and `session` are null or live handles.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn qdp_virtual_gamepad_lay_out(
+    gamepad: *mut QdpVirtualGamepad,
+    session: *mut QdpSession,
+    width: f32,
+    height: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) {
+    guarded((), || {
+        // SAFETY: as the caller promises.
+        let Some(handle) = (unsafe { gamepad.as_mut() }) else {
+            return;
+        };
+        let screen = Screen {
+            width,
+            height,
+            // UIKit's points are density-independent already.
+            density: 1.0,
+            insets: Insets {
+                left,
+                top,
+                right,
+                bottom,
+            },
+        };
+        if handle.gamepad.lay_out(&screen) {
+            // SAFETY: as the caller promises.
+            unsafe { send_virtual_gamepad(session, &handle.gamepad) };
+        }
+    });
+}
+
+/// Takes touch `finger`'s `phase` at `x, y` in the view's points on the
+/// on-screen gamepad, sending its state to the session if that changed it.
+/// Returns what changed: 1 if the controls look different, plus 2 if a
+/// button or direction was pressed.
+///
+/// # Safety
+///
+/// `gamepad` and `session` are null or live handles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_virtual_gamepad_touch(
+    gamepad: *mut QdpVirtualGamepad,
+    session: *mut QdpSession,
+    finger: u32,
+    phase: i32,
+    x: f32,
+    y: f32,
+) -> u32 {
+    guarded(0, || {
+        // SAFETY: as the caller promises.
+        let (Some(handle), Some(phase)) = (unsafe { gamepad.as_mut() }, touch_phase(phase)) else {
+            return 0;
+        };
+        let outcome = handle.gamepad.touch(finger, phase, Point { x, y });
+        if outcome.state_changed {
+            // SAFETY: as the caller promises.
+            unsafe { send_virtual_gamepad(session, &handle.gamepad) };
+        }
+        outcome.flags()
+    })
+}
+
+/// Releases every control of the on-screen gamepad held, as when the
+/// stream's menu opens.
+///
+/// # Safety
+///
+/// `gamepad` and `session` are null or live handles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_virtual_gamepad_release(
+    gamepad: *mut QdpVirtualGamepad,
+    session: *mut QdpSession,
+) {
+    guarded((), || {
+        // SAFETY: as the caller promises.
+        if let Some(handle) = unsafe { gamepad.as_mut() }
+            && handle.gamepad.release_all()
+        {
+            // SAFETY: as the caller promises.
+            unsafe { send_virtual_gamepad(session, &handle.gamepad) };
+        }
+    });
+}
+
+/// Writes up to `capacity` of the on-screen gamepad's controls, as the app
+/// draws them, to `controls`, returning how many there are.
+///
+/// # Safety
+///
+/// `gamepad` is null or a live handle, and `controls` null or room for
+/// `capacity` controls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_virtual_gamepad_controls(
+    gamepad: *mut QdpVirtualGamepad,
+    controls: *mut QdpVirtualControl,
+    capacity: usize,
+) -> usize {
+    guarded(0, || {
+        // SAFETY: as the caller promises.
+        let Some(handle) = (unsafe { gamepad.as_ref() }) else {
+            return 0;
+        };
+        let views = handle.gamepad.controls();
+        if !controls.is_null() {
+            for (index, view) in views.iter().take(capacity).enumerate() {
+                let control = QdpVirtualControl {
+                    control: view.control.code(),
+                    x: view.frame.x,
+                    y: view.frame.y,
+                    width: view.frame.width,
+                    height: view.frame.height,
+                    held: view.held,
+                    tilt_x: view.tilt.0,
+                    tilt_y: view.tilt.1,
+                    directions: view.directions,
+                };
+                // SAFETY: the caller promises room for `capacity` controls,
+                // and `index` is below it.
+                unsafe { controls.add(index).write(control) };
+            }
+        }
+        views.len()
+    })
 }
 
 /// Tells the host whether the app has focus; losing it releases everything.

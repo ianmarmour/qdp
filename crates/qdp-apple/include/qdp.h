@@ -12,6 +12,7 @@
 #define QDP_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -209,6 +210,70 @@ void qdp_session_gamepad_disconnected(QdpSession *session, uint32_t slot);
 void qdp_session_gamepad(QdpSession *session, uint32_t slot, uint32_t buttons, float left_x,
                          float left_y, float right_x, float right_y, float left_trigger,
                          float right_trigger);
+
+/* The on-screen gamepad, which the iPhone and iPad app shows over the
+   stream from its menu: the app draws its controls and passes every touch on
+   them, and the core lays them out, works out the gamepad's state and sends
+   it as a gamepad of its own. */
+typedef struct QdpVirtualGamepad QdpVirtualGamepad;
+
+/* A control of the on-screen gamepad, as the app draws it. */
+typedef struct {
+    /* Which control it is: a Standard Gamepad button index (0 A, 1 B, 2 X,
+       3 Y, 4 and 5 the left and right shoulder buttons, 6 and 7 the left and
+       right triggers, 8 Select, 9 Start, 10 and 11 the left and right stick
+       buttons), 12 the directional pad, or 17 and 18 the left and right
+       sticks. */
+    uint32_t control;
+    /* Its frame in the view, in points: a circle's bounding square for the
+       sticks and round buttons, the rectangle of a shoulder button or
+       trigger, the directional pad's bounding square. */
+    float x;
+    float y;
+    float width;
+    float height;
+    /* Whether a touch holds it. */
+    bool held;
+    /* A stick's tilt, each from -1 to 1, negative left and up. */
+    float tilt_x;
+    float tilt_y;
+    /* The directional pad's directions held: 1 up, 2 down, 4 left, 8 right. */
+    uint32_t directions;
+} QdpVirtualControl;
+
+/* qdp_virtual_gamepad_touch's bit saying the controls look different. */
+#define QDP_VIRTUAL_GAMEPAD_REDRAW 1u
+/* qdp_virtual_gamepad_touch's bit saying a button or direction was pressed,
+   for a haptic tap. */
+#define QDP_VIRTUAL_GAMEPAD_PRESSED 2u
+
+/* Returns a new on-screen gamepad, freed with qdp_virtual_gamepad_free. */
+QdpVirtualGamepad *qdp_virtual_gamepad_new(void);
+
+/* Frees an on-screen gamepad. */
+void qdp_virtual_gamepad_free(QdpVirtualGamepad *gamepad);
+
+/* Connects the on-screen gamepad to the session as a gamepad of its own, or
+   disconnects it with every control released. */
+void qdp_virtual_gamepad_connect(QdpVirtualGamepad *gamepad, QdpSession *session, bool connected);
+
+/* Lays the on-screen gamepad out on a view width x height points, inside the
+   safe area the insets leave, releasing every control held. */
+void qdp_virtual_gamepad_lay_out(QdpVirtualGamepad *gamepad, QdpSession *session, float width,
+                                 float height, float left, float top, float right, float bottom);
+
+/* Takes a finger's touch at x, y in the view's points, sending the gamepad's
+   state to the session if it changed. Returns QDP_VIRTUAL_GAMEPAD_REDRAW and
+   QDP_VIRTUAL_GAMEPAD_PRESSED bits. */
+uint32_t qdp_virtual_gamepad_touch(QdpVirtualGamepad *gamepad, QdpSession *session,
+                                   uint32_t finger, QdpTouchPhase phase, float x, float y);
+
+/* Releases every control held, as when the stream's menu opens. */
+void qdp_virtual_gamepad_release(QdpVirtualGamepad *gamepad, QdpSession *session);
+
+/* Writes up to capacity controls to controls, returning how many there are. */
+size_t qdp_virtual_gamepad_controls(QdpVirtualGamepad *gamepad, QdpVirtualControl *controls,
+                                    size_t capacity);
 
 /* Tells the host whether the app has focus; losing it releases everything. */
 void qdp_session_focus(QdpSession *session, bool focused);
