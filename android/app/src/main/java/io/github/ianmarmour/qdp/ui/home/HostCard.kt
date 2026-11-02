@@ -109,7 +109,7 @@ fun statusLabelOf(status: HostStatus): Int = lookOf(status).label
 /** Returns the card's background: computers ready to use stand out, those not found recede. */
 @Composable
 private fun containerColor(status: HostStatus): Color = when (status) {
-    HostStatus.READY -> MaterialTheme.colorScheme.surfaceContainerHigh
+    HostStatus.READY, HostStatus.GATEWAY -> MaterialTheme.colorScheme.surfaceContainerHigh
     HostStatus.NOT_SEEN -> MaterialTheme.colorScheme.surfaceContainerLow
     else -> MaterialTheme.colorScheme.surfaceContainer
 }
@@ -230,7 +230,7 @@ private fun MenuEntry(@StringRes label: Int, @DrawableRes icon: Int, onClick: ()
 private fun HostAvatar(status: HostStatus) {
     val colors = MaterialTheme.colorScheme
     val (background, foreground) = when (status) {
-        HostStatus.READY -> colors.primaryContainer to colors.onPrimaryContainer
+        HostStatus.READY, HostStatus.GATEWAY -> colors.primaryContainer to colors.onPrimaryContainer
         HostStatus.NEW -> colors.tertiaryContainer to colors.onTertiaryContainer
         HostStatus.KEY_MISMATCH -> colors.errorContainer to colors.onErrorContainer
         HostStatus.PAIRING_OFF, HostStatus.NOT_SEEN -> colors.surfaceContainerHighest to colors.onSurfaceVariant
@@ -241,7 +241,7 @@ private fun HostAvatar(status: HostStatus) {
     ) {
         Icon(
             painter = painterResource(
-                if (status == HostStatus.READY) R.drawable.ic_computer_fill1 else R.drawable.ic_computer,
+                if (status.ready) R.drawable.ic_computer_fill1 else R.drawable.ic_computer,
             ),
             contentDescription = null,
             tint = foreground,
@@ -255,7 +255,7 @@ private fun StatusChip(status: HostStatus) {
     val look = lookOf(status)
     val colors = MaterialTheme.colorScheme
     val (background, foreground) = when (status) {
-        HostStatus.READY -> colors.secondaryContainer to colors.onSecondaryContainer
+        HostStatus.READY, HostStatus.GATEWAY -> colors.secondaryContainer to colors.onSecondaryContainer
         HostStatus.NEW -> colors.tertiaryContainer to colors.onTertiaryContainer
         HostStatus.KEY_MISMATCH -> colors.errorContainer to colors.onErrorContainer
         HostStatus.PAIRING_OFF, HostStatus.NOT_SEEN -> colors.surfaceContainerHighest to colors.onSurfaceVariant
@@ -271,7 +271,7 @@ private fun StatusChip(status: HostStatus) {
         Icon(
             painter = painterResource(look.icon),
             contentDescription = null,
-            tint = if (status == HostStatus.READY) colors.primary else foreground,
+            tint = if (status.ready) colors.primary else foreground,
             modifier = Modifier.size(CHIP_ICON_SIZE),
         )
         Text(stringResource(look.label), style = MaterialTheme.typography.labelLarge, color = foreground)

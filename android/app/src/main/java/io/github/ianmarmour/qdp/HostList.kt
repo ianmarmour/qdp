@@ -25,6 +25,10 @@ enum class HostStatus {
 
     /** Paired, and not found on the network. */
     NOT_SEEN,
+    ;
+
+    /** Whether the computer can be used now, as one paired and found or one reached through the gateway. */
+    val ready: Boolean get() = this == READY || this == GATEWAY
 }
 
 /**
