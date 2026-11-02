@@ -26,8 +26,10 @@ use qdp_runtime::{Focus, Microphone, PointerButton, TouchPhase, UserInput};
 use tracing::{info, warn};
 
 use qdp_app::gamepad::GamepadState;
-use qdp_app::session::{Authentication, Config, Session};
+use qdp_app::qr::QrModules;
+use qdp_app::session::{Authentication, Config, GatewayConfig, Session};
 use qdp_app::settings::{display_size, format_pin, parse_pin};
+use qdp_runtime::{Credentials, SignInAnswer};
 
 use crate::cursor::CursorBitmap;
 use crate::keymap::{HidKey, hid_key};
@@ -55,6 +57,10 @@ const AUTH_PAIRED: jint = 1;
 /// The `authentication` value of `connect` pairing with the code the host
 /// shows.
 const AUTH_PAIR: jint = 2;
+
+/// `connect` reaches the host through the gateway, which vouches for the
+/// user (Section 13.7).
+const AUTH_GATEWAY: jint = 3;
 
 /// The session, while one runs.
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -208,17 +214,20 @@ fn authentication(
             pin: parse_pin(pin)?,
         }),
         AUTH_PAIR => Ok(Authentication::Pair { device_name }),
+        AUTH_GATEWAY => Ok(Authentication::Gateway),
         other => Err(format!("unknown authentication {other}")),
     }
 }
 
 /// Starts a session with the host at `host`, authenticating as
-/// `authentication` says (one of [`AUTH_TOKEN`], [`AUTH_PAIRED`] and
-/// [`AUTH_PAIR`]) with the host's key pin `pin`, `token` and the device's
-/// name `device_name` where it takes them, showing the video in `surface`
-/// on a display of `width × height` pixels refreshing at
-/// `refresh_millihertz`. Returns `null` once it has started, or why it
-/// could not.
+/// `authentication` says (one of [`AUTH_TOKEN`], [`AUTH_PAIRED`],
+/// [`AUTH_PAIR`] and [`AUTH_GATEWAY`]) with the host's key pin `pin`, `token`
+/// and the device's name `device_name` where it takes them, through the
+/// gateway at `gateway_address`, if not empty, verified by `gateway_pin`, if
+/// not empty, signing in with `gateway_token`, a `gatewaysession` event's
+/// token, if not empty; showing the video in `surface` on a display of
+/// `width × height` pixels refreshing at `refresh_millihertz`. Returns
+/// `null` once it has started, or why it could not.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
@@ -230,6 +239,9 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
     pin: jstring,
     token: jstring,
     device_name: jstring,
+    gateway_address: jstring,
+    gateway_pin: jstring,
+    gateway_token: jstring,
     width: jint,
     height: jint,
     refresh_millihertz: jint,
@@ -248,14 +260,21 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
                 NativeWindow::from_surface(env, surface),
             )
         };
+        // SAFETY: as above.
+        let gateway = unsafe {
+            GatewayConfig::parse(
+                &read_string(env, gateway_address),
+                &read_string(env, gateway_pin),
+                &read_string(env, gateway_token),
+            )
+        };
         let config = authentication(authentication_kind, &pin, token, device_name).and_then(
             |authentication| {
                 Ok(Config {
                     client_name: CLIENT_NAME.to_owned(),
                     host,
                     authentication,
-                    // The app reaches hosts through no gateway yet.
-                    gateway: None,
+                    gateway: gateway?,
                     identity_directory: files_directory()?,
                     display: display_size(count(width), count(height), count(refresh_millihertz)),
                     decoder: match decoder {
@@ -660,6 +679,93 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_pairingCode(
             session.answer_pairing(code);
         }
     });
+}
+
+/// Answers the gateway's request for the user's name and password with
+/// `user` and `password`, or declines with a `null` user, which ends the
+/// session.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_signIn(
+    env: *mut JNIEnv,
+    _class: jclass,
+    user: jstring,
+    password: jstring,
+) {
+    guarded((), || {
+        // SAFETY: the VM calls this with its environment and live
+        // references, the user's possibly null.
+        let answer = (!user.is_null()).then(|| unsafe {
+            SignInAnswer::Credentials(Credentials {
+                user: read_string(env, user),
+                password: read_string(env, password),
+            })
+        });
+        answer_sign_in(answer);
+    });
+}
+
+/// Answers the gateway's request for a code from the user's authenticator
+/// app with `code`, or declines with `null`, which ends the session.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_signInCode(
+    env: *mut JNIEnv,
+    _class: jclass,
+    code: jstring,
+) {
+    guarded((), || {
+        // SAFETY: the VM calls this with its environment and a live
+        // reference or null.
+        let code = (!code.is_null()).then(|| unsafe { read_string(env, code) });
+        answer_sign_in(code.map(SignInAnswer::Code));
+    });
+}
+
+/// Gives the session the user's answer to the gateway's sign-in.
+fn answer_sign_in(answer: Option<SignInAnswer>) {
+    if let Some(session) = SESSION
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
+        session.answer_sign_in(answer);
+    }
+}
+
+/// Returns the QR code of `text`, as a `totp` event's enrollment URI is
+/// shown: its modules on a side, then each module, row by row, 1 if dark
+/// and 0 if light; or `null` if it is too long for a QR code.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_qrModules(
+    env: *mut JNIEnv,
+    _class: jclass,
+    text: jstring,
+) -> jintArray {
+    guarded(ptr::null_mut(), || {
+        // SAFETY: the VM calls this with its environment and a live
+        // reference.
+        let text = unsafe { read_string(env, text) };
+        let Some(code) = QrModules::encode(&text) else {
+            return ptr::null_mut();
+        };
+        let size = code.size();
+        let ints: Vec<jint> = std::iter::once(jint::try_from(size).unwrap_or(0))
+            .chain(
+                (0..size * size).map(|index| jint::from(code.is_dark(index % size, index / size))),
+            )
+            .collect();
+        let Ok(length) = jsize::try_from(ints.len()) else {
+            return ptr::null_mut();
+        };
+        // SAFETY: the VM calls this with its environment; the array holds
+        // `length` integers.
+        unsafe {
+            let array = jni!(env, NewIntArray, length);
+            if !array.is_null() {
+                jni!(env, SetIntArrayRegion, array, 0, length, ints.as_ptr());
+            }
+            array
+        }
+    })
 }
 
 /// Returns the device's key pin, generating its key the first time, for a

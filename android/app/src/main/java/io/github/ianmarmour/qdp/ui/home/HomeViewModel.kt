@@ -9,6 +9,8 @@ import io.github.ianmarmour.qdp.HostCard
 import io.github.ianmarmour.qdp.HostList
 import io.github.ianmarmour.qdp.LocalNetwork
 import io.github.ianmarmour.qdp.NetworkReach
+import io.github.ianmarmour.qdp.Gateway
+import io.github.ianmarmour.qdp.GatewayHost
 import io.github.ianmarmour.qdp.PairedHosts
 import io.github.ianmarmour.qdp.StreamTarget
 import kotlinx.coroutines.Job
@@ -72,6 +74,7 @@ sealed interface HomeDialog {
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val discovered = MutableStateFlow<List<DiscoveredHost>>(emptyList())
     private val paired = MutableStateFlow(PairedHosts.load(application))
+    private val throughGateway = MutableStateFlow(gatewayHosts(application))
     private val reach = MutableStateFlow(NetworkReach.LOCAL)
     private val searchedLong = MutableStateFlow(false)
     private val discovery = Discovery(application) { hosts -> discovered.value = hosts }
@@ -89,17 +92,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val dialog: StateFlow<HomeDialog?> = openDialog.asStateFlow()
 
     /** The computers and the search's progress. */
-    val state: StateFlow<HomeState> = combine(discovered, paired, reach, searchedLong) { found, pairedHosts, network, long ->
-        HomeState(HostList.cards(found, pairedHosts), phase(found, network, long))
-    }.stateIn(
-        viewModelScope,
-        SharingStarted.Eagerly,
-        HomeState(HostList.cards(emptyList(), paired.value), SearchPhase.SEARCHING),
-    )
+    val state: StateFlow<HomeState> =
+        combine(discovered, paired, throughGateway, reach, searchedLong) { found, pairedHosts, gatewayHosts, network, long ->
+            HomeState(HostList.cards(found, pairedHosts, gatewayHosts), phase(found, network, long))
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            HomeState(HostList.cards(emptyList(), paired.value, throughGateway.value), SearchPhase.SEARCHING),
+        )
 
     /** Starts looking for computers, as the screen comes into view; a stream may have paired with one meanwhile. */
     fun startSearching() {
         paired.value = PairedHosts.load(getApplication())
+        // The gateway may have been set or cleared in the settings.
+        throughGateway.value = gatewayHosts(getApplication())
         network.start()
         discovery.start()
         searchedLong.value = false
@@ -128,8 +134,24 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         openDialog.value = dialog
     }
 
-    /** Forgets [card]'s paired computer. */
+    /**
+     * Keeps the computer the gateway knows as [target], to reach through it,
+     * and returns the stream that reaches it.
+     */
+    fun addGatewayHost(target: String): StreamTarget {
+        val host = GatewayHost(target, target)
+        Gateway.keepHost(getApplication(), host)
+        throughGateway.value = gatewayHosts(getApplication())
+        return host.stream()
+    }
+
+    /** Forgets [card]'s paired computer, or the one it reaches through the gateway. */
     fun forget(card: HostCard) {
+        card.gateway?.let { host ->
+            Gateway.forgetHost(getApplication(), host.target)
+            throughGateway.value = gatewayHosts(getApplication())
+            return
+        }
         val host = card.paired ?: return
         PairedHosts.forget(getApplication(), host.pin)
         paired.value = PairedHosts.load(getApplication())
@@ -148,6 +170,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private companion object {
+        /** Returns the computers reached through the gateway, while one is set. */
+        fun gatewayHosts(application: Application): List<GatewayHost> =
+            if (Gateway.load(application) != null) Gateway.hosts(application) else emptyList()
+
         /** How long the search runs without finding anything before the screen suggests what to check. */
         const val QUIET_AFTER_MILLIS = 15_000L
 

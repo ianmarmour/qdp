@@ -45,6 +45,13 @@ object Native {
     /** [connect] pairs with the code the host shows, asking for it with a `pair` event. */
     const val AUTH_PAIR = 2
 
+    /**
+     * [connect] reaches the host through the organization's gateway, which
+     * vouches for the user, asking for their password and a code with
+     * `signin` and `totp` events.
+     */
+    const val AUTH_GATEWAY = 3
+
     /** The left pointer button. */
     const val BUTTON_LEFT = 0
 
@@ -71,10 +78,13 @@ object Native {
      * Starts a session with [host] (an address or name, with or without a
      * port), authenticating as [authentication], one of the `AUTH_` values,
      * says: with the host's key pin [pin] and [token], or the device's name
-     * [deviceName] for pairing. It shows the session in [surface] on a
-     * display of [width] × [height] pixels refreshing at
-     * [refreshMillihertz]. Returns `null` once it has started, or why it
-     * could not.
+     * [deviceName] for pairing. Through a gateway, [gatewayAddress] is its
+     * address, [gatewayPin] its key pin if the user set one, and
+     * [gatewayToken] the token of the last `gatewaysession` event, all empty
+     * otherwise, and [host] is the computer's ID on the gateway or its name
+     * inside the network. It shows the session in [surface] on a display of
+     * [width] × [height] pixels refreshing at [refreshMillihertz]. Returns
+     * `null` once it has started, or why it could not.
      */
     @JvmStatic external fun connect(
         surface: Surface,
@@ -83,6 +93,9 @@ object Native {
         pin: String,
         token: String,
         deviceName: String,
+        gatewayAddress: String,
+        gatewayPin: String,
+        gatewayToken: String,
         width: Int,
         height: Int,
         refreshMillihertz: Int,
@@ -165,6 +178,22 @@ object Native {
 
     /** Answers a `pair` event with the [code] the user typed, or `null` if they declined, which ends the session. */
     @JvmStatic external fun pairingCode(code: String?)
+
+    /**
+     * Answers a `signin` event with the [user]'s name and [password], or
+     * declines with a `null` user, which ends the session.
+     */
+    @JvmStatic external fun signIn(user: String?, password: String)
+
+    /** Answers a `totp` event with the [code] the user typed, or `null` if they declined, which ends the session. */
+    @JvmStatic external fun signInCode(code: String?)
+
+    /**
+     * Returns the QR code of [text]: its modules on a side, then each
+     * module, row by row, 1 if dark and 0 if light; or `null` if it is too
+     * long for a QR code.
+     */
+    @JvmStatic external fun qrModules(text: String): IntArray?
 
     /** Returns the device's key pin, for `qdp serve --client-key`, or `null` if its key cannot be kept. */
     @JvmStatic external fun clientPin(): String?

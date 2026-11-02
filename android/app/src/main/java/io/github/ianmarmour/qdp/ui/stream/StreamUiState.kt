@@ -72,6 +72,19 @@ enum class PairingStep {
  */
 data class PairingUi(val step: PairingStep, val wrongCodes: Int = 0, val failure: StreamError? = null)
 
+/**
+ * What the gateway named [gateway] asks while the user signs in: their name
+ * and password, or, with [code], a code from their authenticator app, which
+ * [enrollment], an `otpauth://` URI, adds to it first if given; [retry]
+ * after an answer that did not work.
+ */
+data class GatewaySignInUi(
+    val gateway: String,
+    val retry: Boolean,
+    val code: Boolean,
+    val enrollment: String? = null,
+)
+
 /** A short message the stream shows at its bottom. */
 enum class StreamNotice {
     /** Pairing succeeded. */
@@ -109,6 +122,9 @@ class StreamUiState(val hostName: String, val deviceName: String, touchMode: Tou
 
     /** The pairing dialog, while pairing. */
     var pairing by mutableStateOf<PairingUi?>(null)
+
+    /** The gateway's sign-in dialog, while it asks. */
+    var gatewaySignIn by mutableStateOf<GatewaySignInUi?>(null)
 
     /** Why the stream failed, while that shows. */
     var error by mutableStateOf<StreamError?>(null)

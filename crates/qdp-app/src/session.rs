@@ -134,6 +134,33 @@ pub struct GatewayConfig {
     pub session_token: Option<Vec<u8>>,
 }
 
+impl GatewayConfig {
+    /// Returns the gateway the app keeps as text: its `address`, its key
+    /// `pin` if any, and the `token` of `gatewaysession` events, in
+    /// hexadecimal, if any; `None` for an empty address, which sets no
+    /// gateway.
+    pub fn parse(address: &str, pin: &str, token: &str) -> Result<Option<Self>, String> {
+        let address = address.trim();
+        if address.is_empty() {
+            return Ok(None);
+        }
+        let pin = match pin.trim() {
+            "" => None,
+            pin => Some(crate::settings::parse_pin(pin)?),
+        };
+        let session_token = match token.trim() {
+            "" => None,
+            // A token that cannot be read is no token: the user signs in.
+            token => crate::settings::parse_hex(token),
+        };
+        Ok(Some(Self {
+            address: address.to_owned(),
+            pin,
+            session_token,
+        }))
+    }
+}
+
 /// Hides the session token.
 impl fmt::Debug for GatewayConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

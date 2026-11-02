@@ -197,4 +197,32 @@ verbs; errors give one cause and one next step. The UI says "computer";
     <string name="error_show_details">Show details</string>
     <string name="error_hide_details">Hide details</string>
     <string name="action_back_to_computers">Back to computers</string>
+
+    <!-- The organization's gateway (Section 13 of the specification). -->
+    <string name="status_gateway">Through gateway</string>
+    <string name="status_gateway_spoken">reached through your organization\'s gateway</string>
+    <string name="add_gateway_body">Enter the computer\'s ID on your organization\'s gateway, or its name inside the organization\'s network.</string>
+    <string name="add_through_gateway">Through %1$s</string>
+    <string name="add_through_gateway_supporting">Your organization\'s gateway. Turn off for a computer on this network.</string>
+    <string name="settings_gateway">Gateway</string>
+    <string name="settings_gateway_body">Your organization\'s gateway, to reach its computers from outside its network. You sign in with your organization\'s account and a code from an authenticator app. Ask its administrator for its address, and its key pin if they give one.</string>
+    <string name="settings_gateway_address">Address</string>
+    <string name="settings_gateway_address_hint">gateway.example.com</string>
+    <string name="settings_gateway_pin">Key pin (optional)</string>
+    <string name="gateway_sign_in_title">Sign in to %1$s</string>
+    <string name="gateway_sign_in_body">Use your organization\'s account.</string>
+    <string name="gateway_sign_in_retry">That didn\'t work. Check your user name and password.</string>
+    <string name="gateway_user_label">User name</string>
+    <string name="gateway_password_label">Password</string>
+    <string name="gateway_code_label">Code</string>
+    <string name="gateway_code_body">Enter the six-digit code your authenticator app shows.</string>
+    <string name="gateway_code_retry">That code didn\'t work. Enter the code your authenticator app shows now.</string>
+    <string name="gateway_enroll_body">Add the gateway to an authenticator app, such as Google Authenticator, Microsoft Authenticator or Authy, then enter the six-digit code it shows.</string>
+    <string name="gateway_enroll_retry">That code didn\'t work. Add the gateway to your authenticator app if you haven\'t yet, then enter the code it shows now.</string>
+    <string name="gateway_enroll_open">Add to authenticator app</string>
+    <string name="gateway_enroll_qr_description">QR code that adds the gateway to an authenticator app on another device</string>
+    <string name="gateway_enroll_copy">Copy setup link</string>
+    <string name="gateway_enroll_copied">Setup link copied</string>
+    <string name="gateway_enroll_no_app">No authenticator app on this device opens setup links. Scan the QR code with one on another device, or copy the setup link.</string>
+    <string name="action_sign_in">Sign in</string>
 </resources>

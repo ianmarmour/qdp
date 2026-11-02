@@ -16,6 +16,12 @@ class StreamActions(
     val submitCode: (String) -> Unit,
     /** Declines to pair, which ends the session. */
     val cancelPairing: () -> Unit,
+    /** Answers the gateway's request for the user's name and password. */
+    val submitSignIn: (user: String, password: String) -> Unit,
+    /** Answers the gateway's request for a code from the user's authenticator app. */
+    val submitSignInCode: (code: String) -> Unit,
+    /** Declines to sign in to the gateway, which ends the session. */
+    val cancelSignIn: () -> Unit,
     /** Connects again after a failure. */
     val tryAgain: () -> Unit,
     /** Leaves the stream after a failure. */
