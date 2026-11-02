@@ -588,7 +588,7 @@ which decodes AV1 with VideoToolbox where the device has an AV1 decoder (M3
 and later Macs, iPhone 15 Pro and later, iPads with an M4 or A17 Pro) and in
 software otherwise, and draws with Metal on a thread of its own, as `qdp
 connect` does on a Mac. [Building](#on-macos) says how to build them. On
-iPhone and iPad the app is called Quick Desktop, in its icon's teal and cream.
+iPhone and iPad the app is called Quick Desktop.
 
 Both apps list the hosts on the local network and those they paired with;
 choosing a new host pairs with it by the code the host shows, and choosing a
