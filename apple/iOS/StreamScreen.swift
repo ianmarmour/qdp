@@ -100,7 +100,7 @@ struct StreamScreen: View {
         }
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .circle)
-        .opacity(model.phase == .streaming ? 0.6 : 1)
+        .opacity(model.phase == .streaming ? StreamGlass.restingOpacity : 1)
         .accessibilityLabel("Stream menu")
     }
 

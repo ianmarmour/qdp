@@ -269,12 +269,26 @@ struct GamepadGlass: View {
     }
 }
 
+/// How the stream's own glass controls show over the picture.
+enum StreamGlass {
+    /// The opacity of a glass control at rest while the stream plays, which
+    /// lets more of the picture through: the menu button's and the on-screen
+    /// controller's alike.
+    static let restingOpacity = 0.6
+}
+
 /// How a held control's glass is tinted.
 private let heldTint = Color.white.opacity(0.32)
 
 /// Returns the glass of a control, lit while held.
 private func controlGlass(held: Bool) -> Glass {
     held ? Glass.regular.tint(heldTint) : Glass.regular
+}
+
+/// Returns the opacity of a control's glass: the stream's controls' at rest,
+/// and all of it while held.
+private func controlOpacity(held: Bool) -> Double {
+    held ? 1 : StreamGlass.restingOpacity
 }
 
 /// A control that is not half of a pill, in its frame.
@@ -300,8 +314,7 @@ private struct ControlGlass: View {
     }
 }
 
-/// A stick: clear glass for its base, and a knob of glass where its tilt
-/// has it.
+/// A stick: a base of glass, and a knob of glass where its tilt has it.
 private struct StickGlass: View {
     let control: QdpVirtualControl
     let side: CGFloat
@@ -314,12 +327,13 @@ private struct StickGlass: View {
         let travel = (side - knob) / 2
         ZStack {
             Color.clear
-                .glassEffect(Glass.clear, in: .circle)
+                .glassEffect(Glass.regular, in: .circle)
             Color.clear
                 .frame(width: knob, height: knob)
                 .glassEffect(controlGlass(held: control.held), in: .circle)
                 .offset(x: CGFloat(control.tilt_x) * travel, y: CGFloat(control.tilt_y) * travel)
         }
+        .opacity(controlOpacity(held: control.held))
     }
 }
 
@@ -344,6 +358,7 @@ private struct ButtonGlass: View {
         label
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .glassEffect(controlGlass(held: held), in: .circle)
+            .opacity(controlOpacity(held: held))
             .scaleEffect(held ? Self.heldScale : 1)
             .animation(.snappy(duration: Self.pressDuration), value: held)
     }
@@ -392,6 +407,7 @@ private struct PadGlass: View {
             }
         }
         .glassEffect(controlGlass(held: directions != 0), in: .circle)
+        .opacity(controlOpacity(held: directions != 0))
     }
 }
 
@@ -427,6 +443,7 @@ private struct PillGlass: View {
         }
         .clipShape(.capsule)
         .glassEffect(Glass.regular, in: .capsule)
+        .opacity(controlOpacity(held: pill.halves.contains { $0.held }))
         .frame(width: rect.width, height: rect.height)
         .position(x: rect.midX, y: rect.midY)
     }
