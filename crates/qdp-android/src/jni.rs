@@ -254,6 +254,8 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_connect(
                     client_name: CLIENT_NAME.to_owned(),
                     host,
                     authentication,
+                    // The app reaches hosts through no gateway yet.
+                    gateway: None,
                     identity_directory: files_directory()?,
                     display: display_size(count(width), count(height), count(refresh_millihertz)),
                     decoder: match decoder {

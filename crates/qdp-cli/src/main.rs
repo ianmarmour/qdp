@@ -39,7 +39,8 @@ use qdp_runtime::{
     ClipboardDirections, DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource,
     GatewayFailure, GatewayRoute, GatewayTrust, HostAudio, HostAuthenticator, HostDesktop,
     HostOptions, InputQueue, OpenedDesktop, Pairing, PairingEvent, PairingOutcome, PairingPrompt,
-    ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt, TestPattern, Tunnel, open_tunnel,
+    ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt, TestPattern, Tunnel,
+    gateway_verification, open_tunnel,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -1354,10 +1355,8 @@ async fn through_gateway(
     prompt: &SignInPrompt,
     wants_assertion: bool,
 ) -> Result<Tunnel, Failure> {
-    let verification = match gateway.pin {
-        Some(pin) => HostVerification::PinnedKeys(vec![pin]),
-        None => HostVerification::WebPki(Arc::new(system_roots())),
-    };
+    let verification =
+        gateway_verification(gateway.pin).map_err(|error| Failure::Fatal(error.to_string()))?;
     let route = GatewayRoute {
         address: gateway.address,
         server_name: gateway.name.clone(),
@@ -1393,18 +1392,6 @@ async fn through_gateway(
         );
     }
     Ok(tunnel)
-}
-
-/// Returns the system's certificate authorities, which verify a gateway
-/// given without its pin.
-fn system_roots() -> rustls::RootCertStore {
-    let mut roots = rustls::RootCertStore::empty();
-    let found = rustls_native_certs::load_native_certs();
-    for error in &found.errors {
-        debug!(%error, "a certificate authority of the system cannot be read");
-    }
-    roots.add_parsable_certificates(found.certs);
-    roots
 }
 
 /// Returns the prompt with which a client pairs: it asks on the terminal, or

@@ -331,6 +331,8 @@ unsafe fn start(
             client_name: CLIENT_NAME.to_owned(),
             host,
             authentication,
+            // The app reaches hosts through no gateway yet.
+            gateway: None,
             identity_directory,
             display: display(
                 config.width,

@@ -164,6 +164,29 @@ pub enum GatewayFailure {
     Cancelled,
 }
 
+/// Returns how to verify a gateway: by its key pin, if the user set one, or
+/// else by the system's certificate authorities, failing on a device whose
+/// authorities cannot be read, as phones' cannot here.
+pub fn gateway_verification(pin: Option<KeyPin>) -> Result<HostVerification, GatewayFailure> {
+    if let Some(pin) = pin {
+        return Ok(HostVerification::PinnedKeys(vec![pin]));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    let found = rustls_native_certs::load_native_certs();
+    for error in &found.errors {
+        tracing::debug!(%error, "a certificate authority of the system cannot be read");
+    }
+    roots.add_parsable_certificates(found.certs);
+    if roots.is_empty() {
+        return Err(GatewayFailure::Refused(
+            "this device cannot check the gateway's certificate: set the gateway's key pin, \
+             which `qdp-gateway keys` prints"
+                .to_owned(),
+        ));
+    }
+    Ok(HostVerification::WebPki(Arc::new(roots)))
+}
+
 impl From<TransportError> for GatewayFailure {
     fn from(error: TransportError) -> Self {
         Self::Unreachable(error.to_string())
