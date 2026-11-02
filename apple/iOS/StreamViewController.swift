@@ -79,6 +79,9 @@ final class StreamViewController: UIViewController {
         view.addSubview(keyboard)
         controllerView.frame = view.bounds
         controllerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // The session adds the video's Metal layer to this view's layer as
+        // the stream starts, after this view, which it would cover.
+        controllerView.layer.zPosition = 1
         view.addSubview(controllerView)
         installGestures()
         view.addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered)))
