@@ -91,7 +91,7 @@ fun StreamOverlay(ui: StreamUiState, actions: StreamActions, gatewayUser: String
         ) {
             MenuCoachmark(gamepad)
         }
-        if (ui.controller == Visibility.SHOWN && ui.phase != StreamPhase.CONNECTING) {
+        if (ui.controllerActive && ui.phase != StreamPhase.CONNECTING) {
             OnScreenController(ui.controllerControls)
         }
         AnimatedVisibility(visible = ui.phase == StreamPhase.CONNECTING, enter = fadeIn(), exit = fadeOut()) {

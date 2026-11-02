@@ -37,6 +37,9 @@ final class StreamModel {
     /// Whether the host's pointer is relative, so that the mouse is
     /// captured.
     private(set) var relativePointer = false
+    /// Whether a controller is connected and sent to the host, which the
+    /// on-screen controller steps aside for.
+    var gamepadConnected = false
 
     /// Called when the host's cursor changes.
     @ObservationIgnored var onCursorChanged: (() -> Void)?

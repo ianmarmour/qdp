@@ -88,6 +88,7 @@ final class Gamepads {
         }
         let name = controller.vendorName ?? "Controller"
         name.withCString { qdp_session_gamepad_connected(session, slot, $0, engines[slot] != nil) }
+        model.gamepadConnected = true
         pad.valueChangedHandler = { [weak self] pad, _ in
             MainActor.assumeIsolated { self?.send(pad, slot: slot) }
         }
@@ -103,6 +104,7 @@ final class Gamepads {
         if let session = model.session {
             qdp_session_gamepad_disconnected(session, slot)
         }
+        model.gamepadConnected = !slots.isEmpty
     }
 
     private func send(_ pad: GCExtendedGamepad, slot: UInt32) {

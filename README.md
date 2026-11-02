@@ -575,7 +575,8 @@ starts, shows an on-screen controller for games on a device without one: a
 stick in each bottom corner, A, B, X and Y around the right one, each side's
 trigger and bumper as a pill in its top corner, and View and Menu between
 them, which the host sees as a gamepad of its own; while it shows, touches go
-to it. Leaving the app ends the session, and
+to it. A controller connected takes its place: it steps aside, and leaves the
+menu, until the last controller disconnects. Leaving the app ends the session, and
 returning connects again.
 
 ## Mac, iPhone and iPad apps
@@ -599,7 +600,8 @@ to an iPad work as on a computer, and controllers are sent as gamepads with
 rumble; the button at the top corner, or Select, Start and both shoulder
 buttons together, opens the stream's menu. The menu's Show Controller puts the
 same on-screen controller as on Android over the stream, in Liquid Glass, for
-games on an iPhone or iPad without one.
+games on an iPhone or iPad without one; a controller connected takes its
+place there too.
 
 ## Windows app
 

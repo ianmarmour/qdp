@@ -10,7 +10,8 @@ struct StreamScreen: View {
     @State private var model: StreamModel
     @State private var menuOpen = false
     @State private var keyboardRequests = 0
-    /// Whether the on-screen gamepad shows: off as each stream starts.
+    /// Whether the menu turned the on-screen gamepad on: off as each stream
+    /// starts. It shows only while no controller is connected.
     @State private var controllerShown = false
     @AppStorage(SettingsKey.showStats) private var showStats = false
     @AppStorage(SettingsKey.touchMode) private var touchMode = TouchMode.trackpad
@@ -22,13 +23,15 @@ struct StreamScreen: View {
     }
 
     var body: some View {
+        // A connected controller takes the on-screen one's place.
+        let controllerVisible = controllerShown && !model.gamepadConnected
         ZStack(alignment: .topLeading) {
             Color.black.ignoresSafeArea()
             StreamViewRepresentable(
                 model: model,
                 touchMode: touchMode,
                 keyboardRequests: keyboardRequests,
-                controllerShown: controllerShown,
+                controllerShown: controllerVisible,
                 menuOpen: menuOpen,
                 openMenu: { menuOpen = true }
             )
@@ -46,7 +49,7 @@ struct StreamScreen: View {
             // Over the on-screen gamepad, the button moves to the middle,
             // between its View and Menu, clear of its shoulder buttons.
             menuButton
-                .frame(maxWidth: .infinity, alignment: controllerShown ? .center : .trailing)
+                .frame(maxWidth: .infinity, alignment: controllerVisible ? .center : .trailing)
                 .padding(12)
         }
         .statusBarHidden()
@@ -54,7 +57,9 @@ struct StreamScreen: View {
         .defersSystemGestures(on: .all)
         .confirmationDialog(model.target.name, isPresented: $menuOpen, titleVisibility: .visible) {
             Button("Show Keyboard") { keyboardRequests += 1 }
-            Button(controllerShown ? "Hide Controller" : "Show Controller") { controllerShown.toggle() }
+            if !model.gamepadConnected {
+                Button(controllerShown ? "Hide Controller" : "Show Controller") { controllerShown.toggle() }
+            }
             if TouchSource.current == .touchscreen {
                 Button(touchMode == .trackpad ? "Use Direct Touch" : "Use Trackpad") {
                     touchMode = touchMode == .trackpad ? .direct : .trackpad
