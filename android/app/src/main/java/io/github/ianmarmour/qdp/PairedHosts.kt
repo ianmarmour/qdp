@@ -38,9 +38,9 @@ object PairedHosts {
         }
     }
 
-    /** Keeps [host], replacing the host with its pin. */
+    /** Keeps [host], replacing the host with its pin, and the host paired before under its name, whose key it changed. */
     fun keep(context: Context, host: PairedHost) {
-        save(context, listOf(host) + load(context).filter { it.pin != host.pin })
+        save(context, listOf(host) + load(context).filter { it.pin != host.pin && it.name != host.name })
     }
 
     /** Forgets the host whose pin is [pin]. */

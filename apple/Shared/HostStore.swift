@@ -111,9 +111,10 @@ final class HostStore {
         }
     }
 
-    /// Keeps `host`, replacing the host with its pin.
+    /// Keeps `host`, replacing the host with its pin, and the host paired
+    /// before under its name, whose key it changed.
     func keep(_ host: PairedHost) {
-        paired = [host] + paired.filter { $0.pin != host.pin }
+        paired = [host] + paired.filter { $0.pin != host.pin && $0.name != host.name }
         save()
     }
 
@@ -130,17 +131,24 @@ final class HostStore {
     }
 
     /// The rows to list: hosts found on the network, recognized as paired by
-    /// their pin, then paired hosts not found.
+    /// their pin, then paired hosts not found. Each paired host is listed
+    /// once, among those paired with: found, still being resolved, or found
+    /// under its name with another key, in its place.
     var rows: [HostRow] {
         var found = Set<String>()
         let nearby = discovered.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         var rows: [HostRow] = nearby.map { host in
             let match = paired.first { $0.pin == host.pin }
+            // A paired host's name with another key: its key changed, or
+            // another poses as it.
+            let namesake = match == nil ? paired.first { $0.name == host.name } : nil
+            if let pairing = match ?? namesake {
+                found.insert(pairing.pin)
+            }
             guard let address = host.address else {
-                return HostRow(name: host.name, detail: "Finding its address…", status: .resolving)
+                return HostRow(name: host.name, detail: "Finding its address…", status: .resolving, paired: match ?? namesake)
             }
             if let match {
-                found.insert(match.pin)
                 return HostRow(
                     name: host.name,
                     detail: "Ready · \(address)",
@@ -149,12 +157,13 @@ final class HostStore {
                     paired: match
                 )
             }
-            if paired.contains(where: { $0.name == host.name }) {
+            if let namesake {
                 return HostRow(
                     name: host.name,
                     detail: "This isn't the \(host.name) you paired with",
                     status: .differentKey,
-                    target: host.pairing ? StreamTarget(name: host.name, address: address, authentication: .pair) : nil
+                    target: host.pairing ? StreamTarget(name: host.name, address: address, authentication: .pair) : nil,
+                    paired: namesake
                 )
             }
             if host.pairing {
