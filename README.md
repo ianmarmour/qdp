@@ -570,7 +570,12 @@ finger moves the pointer, a tap clicks, two fingers right-click or scroll, and
 a press held still drags; the menu switches to sending touches as the host's
 own. A mouse and keyboard work as on a computer. Back, or Select, Start and
 both bumpers together, opens the menu, which also shows the on-screen keyboard
-and statistics and disconnects. Leaving the app ends the session, and
+and statistics and disconnects. Its Controller tile, off as each stream
+starts, shows an on-screen controller for games on a device without one: two
+sticks, a D-pad, A, B, X and Y, the bumpers and triggers, the stick buttons,
+and View and Menu, laid out as on a controller within reach of the thumbs,
+which the host sees as a gamepad of its own; while it shows, touches go to
+it. Leaving the app ends the session, and
 returning connects again.
 
 ## Mac, iPhone and iPad apps
@@ -592,7 +597,9 @@ Option, Shift and Z are pressed together. On iPhone and iPad touches work as a
 trackpad or as the host's touchscreen, a keyboard, mouse or trackpad attached
 to an iPad work as on a computer, and controllers are sent as gamepads with
 rumble; the button at the top corner, or Select, Start and both shoulder
-buttons together, opens the stream's menu.
+buttons together, opens the stream's menu. The menu's Show Controller puts an
+on-screen controller over the stream, as on Android, for games on an iPhone or
+iPad without one.
 
 ## Windows app
 

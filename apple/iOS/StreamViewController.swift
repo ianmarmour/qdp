@@ -11,11 +11,23 @@ final class StreamViewController: UIViewController {
         didSet { if touchMode != oldValue { touchModeChanged() } }
     }
 
+    /// Whether the on-screen gamepad shows, taking the screen's touches.
+    var controllerShown = false {
+        didSet { if controllerShown != oldValue { controllerShownChanged() } }
+    }
+
+    /// Whether the stream's menu is open, which releases the on-screen
+    /// gamepad's controls held.
+    var menuOpen = false {
+        didSet { if menuOpen && !oldValue { controllerView.release() } }
+    }
+
     private let model: StreamModel
     private let openMenu: () -> Void
     private var gamepads: Gamepads?
     private var displayLink: CADisplayLink?
     private let keyboard = KeyboardField()
+    private lazy var controllerView = OnScreenControllerView(model: model)
     private var keyboardRequest = 0
     private var observers: [NSObjectProtocol] = []
 
@@ -65,6 +77,9 @@ final class StreamViewController: UIViewController {
         self.view = view
         keyboard.controller = self
         view.addSubview(keyboard)
+        controllerView.frame = view.bounds
+        controllerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(controllerView)
         installGestures()
         view.addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered)))
         let interaction = UIPointerInteraction(delegate: self)
@@ -94,6 +109,7 @@ final class StreamViewController: UIViewController {
         model.onRumble = { [weak gamepads] slot, low, high in gamepads?.rumble(slot: slot, low: low, high: high) }
         gamepads.start()
         self.gamepads = gamepads
+        controllerView.sessionStarted()
         touchModeChanged()
         followMice()
         let link = CADisplayLink(target: self, selector: #selector(step))
@@ -197,11 +213,20 @@ final class StreamViewController: UIViewController {
 
     private func touchModeChanged() {
         let trackpad = actsAsTrackpad
-        trackpadGestures.forEach { $0.isEnabled = trackpad }
+        // The trackpad's gestures, on this view, would also see the touches
+        // on the on-screen gamepad above it.
+        trackpadGestures.forEach { $0.isEnabled = trackpad && !controllerShown }
         pointerInteraction?.invalidate()
         if let session = model.session {
             qdp_session_draw_cursor(session, trackpad)
         }
+    }
+
+    /// Shows or hides the on-screen gamepad, which takes the touches the
+    /// trackpad or the host's touchscreen otherwise would.
+    private func controllerShownChanged() {
+        controllerView.show(controllerShown)
+        touchModeChanged()
     }
 
     /// Whether `touch` is a pointer's rather than a finger's: an attached

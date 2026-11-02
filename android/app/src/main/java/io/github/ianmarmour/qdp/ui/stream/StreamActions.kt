@@ -6,6 +6,8 @@ class StreamActions(
     val resume: () -> Unit,
     /** Closes the menu and shows the on-screen keyboard. */
     val showKeyboard: () -> Unit,
+    /** Closes the menu and shows or hides the on-screen gamepad. */
+    val toggleController: () -> Unit,
     /** Switches between trackpad and direct touch. */
     val toggleTouchMode: () -> Unit,
     /** Shows more, less or no statistics. */
