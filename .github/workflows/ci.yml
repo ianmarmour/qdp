@@ -1,29 +1,26 @@
-# Checks every change merged into main on Linux, Windows and macOS, builds
-# the qdp command for each, the Android, Apple and Windows apps, the gateway
-# and the Windows installers, and publishes them all as a GitHub release once
-# every job passed: a numbered build for each change merged into main, and a
-# version for each tag such as v0.2.0. Pull requests are not checked here, so
-# that merging never waits for it; a run can be started on any branch by
-# hand, which builds without releasing.
+# Checks QDP on Linux, Windows and macOS, builds the qdp command for each,
+# the Android, Apple and Windows apps, the gateway and the Windows
+# installers. It runs only when started by hand from the Actions tab, or when
+# a version tag such as v0.2.0 is pushed, which publishes them all as a
+# GitHub release once every job passed. Merging into main starts nothing, as
+# runs cost more minutes than every change needs.
 #
 # Runs started by hand check only what the branch changes, as Windows and
 # macOS runners cost two and ten times Linux's minutes: Linux always, and the
 # Windows, Windows app, Windows gateway, macOS, Apple and Android jobs only
 # when the branch touches their code or the build itself. They skip release
-# builds and packages, and the macOS tests, which main's runs keep.
+# builds and packages, and the macOS tests, which a tag's run keeps.
 name: CI
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # A newer run of a branch, main included, replaces its older one, whose
-  # build the newer commit supersedes, so that merges in quick succession
-  # are built once. A tag's release always finishes.
+  # A newer run of a branch replaces its older one, whose build the newer
+  # commit supersedes. A tag's release always finishes.
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
@@ -407,8 +404,9 @@ jobs:
 
   release:
     name: Release
-    # Every change merged into main and every version tag is released once
-    # all the builds passed; runs started by hand are not.
+    # Every version tag is released once all the builds passed; runs started
+    # by hand are not. While main's pushes start no run, the numbered builds
+    # below are not made; adding main back to the push trigger restores them.
     if: github.event_name == 'push'
     needs: [linux, windows, macos, android, apple, windows-app, windows-gateway]
     runs-on: ubuntu-24.04
