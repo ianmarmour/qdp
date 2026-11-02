@@ -6,17 +6,35 @@ namespace Qdp.Pages;
 
 /// <summary>
 /// Asks for a host by its address, for one the network does not show:
-/// pairing with the code it shows, or with its key pin and a token.
+/// pairing with the code it shows, or with its key pin and a token; or, with
+/// the organization's gateway set, by what the gateway knows it as, which it
+/// is reached through by default.
 /// </summary>
 internal static class AddHostDialog
 {
-    /// <summary>Returns the stream the user asked for, or null if they cancelled.</summary>
-    internal static async Task<StreamTarget?> Ask(XamlRoot root)
+    /// <summary>What the address asks for when the host is reached directly.</summary>
+    private const string DirectPlaceholder = "192.168.1.20, or my-pc.local";
+
+    /// <summary>What the address asks for when the host is reached through the gateway.</summary>
+    private const string GatewayPlaceholder = "Its ID at the gateway, or its name inside the network";
+
+    /// <summary>
+    /// Returns the stream the user asked for, or null if they cancelled;
+    /// through <paramref name="gateway"/> if it is set and the user left it
+    /// on.
+    /// </summary>
+    internal static async Task<StreamTarget?> Ask(XamlRoot root, GatewaySettings gateway)
     {
+        var through = new ToggleSwitch
+        {
+            Header = $"Through your organization's gateway, {gateway.Address.Trim()}",
+            IsOn = gateway.IsSet,
+            Visibility = gateway.IsSet ? Visibility.Visible : Visibility.Collapsed,
+        };
         var address = new TextBox
         {
             Header = "Address",
-            PlaceholderText = "192.168.1.20, or my-pc.local",
+            PlaceholderText = DirectPlaceholder,
         };
         var name = new TextBox
         {
@@ -38,7 +56,7 @@ internal static class AddHostDialog
             Visibility = Visibility.Collapsed,
         };
         var content = new StackPanel { Spacing = 12, MinWidth = 360 };
-        foreach (var element in new UIElement[] { address, name, method, pin, token })
+        foreach (var element in new UIElement[] { through, address, name, method, pin, token })
         {
             content.Children.Add(element);
         }
@@ -53,13 +71,17 @@ internal static class AddHostDialog
             IsPrimaryButtonEnabled = false,
         };
 
-        bool UsesToken() => method.SelectedIndex == 1;
+        bool ThroughGateway() => through.IsOn;
+        bool UsesToken() => !ThroughGateway() && method.SelectedIndex == 1;
         void Update()
         {
             var tokenShown = UsesToken() ? Visibility.Visible : Visibility.Collapsed;
             pin.Visibility = tokenShown;
             token.Visibility = tokenShown;
-            dialog.PrimaryButtonText = UsesToken() ? "Connect" : "Pair";
+            method.Visibility = ThroughGateway() ? Visibility.Collapsed : Visibility.Visible;
+            address.Header = ThroughGateway() ? "Computer" : "Address";
+            address.PlaceholderText = ThroughGateway() ? GatewayPlaceholder : DirectPlaceholder;
+            dialog.PrimaryButtonText = UsesToken() || ThroughGateway() ? "Connect" : "Pair";
             dialog.IsPrimaryButtonEnabled = address.Text.Trim().Length > 0
                 && (!UsesToken() || (Native.qdp_is_pin(pin.Text.Trim().ToLowerInvariant()) && token.Password.Length > 0));
         }
@@ -67,6 +89,8 @@ internal static class AddHostDialog
         pin.TextChanged += (_, _) => Update();
         token.PasswordChanged += (_, _) => Update();
         method.SelectionChanged += (_, _) => Update();
+        through.Toggled += (_, _) => Update();
+        Update();
 
         if (await dialog.ShowAsync() != ContentDialogResult.Primary)
         {
@@ -74,6 +98,10 @@ internal static class AddHostDialog
         }
         var host = address.Text.Trim();
         var title = name.Text.Trim().Length > 0 ? name.Text.Trim() : host;
+        if (ThroughGateway())
+        {
+            return new StreamTarget(title, host, Authentication.Gateway);
+        }
         return UsesToken()
             ? new StreamTarget(title, host, Authentication.Token, pin.Text.Trim().ToLowerInvariant(), token.Password)
             : new StreamTarget(title, host, Authentication.Pair);

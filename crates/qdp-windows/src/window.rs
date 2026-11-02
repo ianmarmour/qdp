@@ -21,7 +21,7 @@ use qdp_app::placement::confined;
 use qdp_app::session::{Config, EventReader, Session};
 use qdp_app::window_input::{Scroller, button_input, display_size, key_input, touch_phase};
 use qdp_desktop::{D3d11Video, GamepadCapture, SyncMode, SystemKeys, WindowPen};
-use qdp_runtime::{Focus, Microphone, PenInput, UserInput, WarpKind};
+use qdp_runtime::{Focus, Microphone, PenInput, SignInAnswer, UserInput, WarpKind};
 use tracing::{debug, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -243,6 +243,9 @@ pub(crate) enum SessionMessage {
     /// The user's answer to the request for a pairing code: the code, or
     /// `None` if they declined.
     PairingCode(Option<String>),
+    /// The user's answer to the gateway's sign-in: their credentials or
+    /// code, or `None` if they declined.
+    SignIn(Option<SignInAnswer>),
     /// The app ends the session.
     Stop,
 }
@@ -609,6 +612,11 @@ impl StreamWindow {
             SessionMessage::PairingCode(code) => {
                 if let Some(session) = &self.session {
                     session.answer_pairing(code);
+                }
+            }
+            SessionMessage::SignIn(answer) => {
+                if let Some(session) = &self.session {
+                    session.answer_sign_in(answer);
                 }
             }
             SessionMessage::Stop => return Continue::Close,

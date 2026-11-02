@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- What streams ask for and how they show, and about the app. -->
+<!-- What streams ask for and how they show, the organization's gateway, and about the app. -->
 <Page
     x:Class="Qdp.Pages.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -175,6 +175,32 @@
                     <TextBlock Grid.Row="3" Grid.Column="1" Text="Show or hide the statistics" />
                     <TextBlock Grid.Row="4" Text="Ctrl+Alt+Shift+Q" Style="{StaticResource BodyStrongTextBlockStyle}" />
                     <TextBlock Grid.Row="4" Grid.Column="1" Text="Disconnect" />
+                </Grid>
+            </Border>
+
+            <TextBlock Text="Your organization" Style="{StaticResource SectionHeaderStyle}" />
+            <Border Style="{StaticResource CardStyle}">
+                <Grid ColumnSpacing="16" RowSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <FontIcon Glyph="&#xE821;" VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="Gateway" />
+                        <TextBlock Text="Reach your organization's computers from anywhere, signing in with your work account. Your administrator gives you the gateway's address; computers you add then go through it." Style="{StaticResource DescriptionStyle}" />
+                    </StackPanel>
+                    <TextBox x:Name="GatewayAddressBox" Grid.Row="1" Grid.Column="1" Header="Gateway address" PlaceholderText="gateway.example.com" TextChanged="OnGatewayChanged" />
+                    <TextBox x:Name="GatewayUserBox" Grid.Row="2" Grid.Column="1" Header="User name" PlaceholderText="Optional: your name in your organization's directory" TextChanged="OnGatewayChanged" />
+                    <TextBox x:Name="GatewayPinBox" Grid.Row="3" Grid.Column="1" Header="Gateway key pin" PlaceholderText="Optional: only if your administrator gave you one" FontFamily="Consolas" TextChanged="OnGatewayChanged" />
+                    <TextBlock x:Name="GatewayPinError" Grid.Row="4" Grid.Column="1" Text="A key pin is 64 hexadecimal digits. Until it is one, the gateway is not changed." TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" Visibility="Collapsed" />
                 </Grid>
             </Border>
 

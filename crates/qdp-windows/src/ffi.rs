@@ -19,12 +19,15 @@ use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::Duration;
 
 use qdp_app::events::Ending;
-use qdp_app::session::{Authentication, Config};
+use qdp_app::qr::QrModules;
+use qdp_app::session::{Authentication, Config, GatewayConfig};
 use qdp_app::settings::{format_pin, parse_pin};
 use qdp_codec::CodecPreference;
 use qdp_desktop::SyncMode;
 use qdp_quic::{IdentityFiles, TlsIdentity};
-use qdp_runtime::{ClipboardDirections, DisplaySize, Microphone, SharedClipboard};
+use qdp_runtime::{
+    ClipboardDirections, Credentials, DisplaySize, Microphone, SharedClipboard, SignInAnswer,
+};
 use tracing::{info, warn};
 
 use crate::events::EventQueue;
@@ -47,6 +50,9 @@ const AUTH_PAIRED: i32 = 1;
 
 /// `QDP_AUTH_PAIR`: pairing with the code the host shows.
 const AUTH_PAIR: i32 = 2;
+
+/// `QDP_AUTH_GATEWAY`: through the gateway, which vouches for the user.
+const AUTH_GATEWAY: i32 = 3;
 
 /// `QDP_DECODER_HARDWARE`: D3D11 video only. Any value but this and
 /// [`DECODER_SOFTWARE`] decodes in hardware when the GPU can.
@@ -132,6 +138,13 @@ pub struct QdpConfig {
     /// Whether the stream's statistics show as it starts: 1 if so, 0 if
     /// not.
     statistics: i32,
+    /// The gateway's address, or empty or null to reach the host directly.
+    gateway_address: *const c_char,
+    /// The gateway's key pin, or empty or null to verify it by the system's
+    /// certificate authorities.
+    gateway_pin: *const c_char,
+    /// The token of the last `gatewaysession` line, or empty or null.
+    gateway_token: *const c_char,
 }
 
 /// A session, which the app holds as `QdpSession *`.
@@ -327,8 +340,17 @@ unsafe fn start(config: *const QdpConfig) -> Result<QdpSession, String> {
             pin: parse_pin(&pin)?,
         },
         AUTH_PAIR => Authentication::Pair { device_name },
+        AUTH_GATEWAY => Authentication::Gateway,
         other => return Err(format!("unknown authentication {other}")),
     };
+    // SAFETY: the caller promises live strings or nulls.
+    let gateway = unsafe {
+        GatewayConfig::parse(
+            &read(config.gateway_address),
+            &read(config.gateway_pin),
+            &read(config.gateway_token),
+        )
+    }?;
     let identity_directory = DATA_DIRECTORY
         .get()
         .cloned()
@@ -347,8 +369,7 @@ unsafe fn start(config: *const QdpConfig) -> Result<QdpSession, String> {
             client_name: CLIENT_NAME.to_owned(),
             host: host.clone(),
             authentication,
-            // The app reaches hosts through no gateway yet.
-            gateway: None,
+            gateway,
             identity_directory,
             // The stream window measures its display once it opens.
             display: DisplaySize {
@@ -447,6 +468,83 @@ pub unsafe extern "C" fn qdp_session_pairing_code(session: *mut QdpSession, code
             handle.tell(SessionMessage::PairingCode(code));
         }
     });
+}
+
+/// Answers the session's request for the user's name and password for the
+/// gateway with `user` and `password`, or declines with a null user.
+///
+/// # Safety
+///
+/// `session` is null or a live handle, and `user` and `password` null or
+/// live NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_session_sign_in(
+    session: *mut QdpSession,
+    user: *const c_char,
+    password: *const c_char,
+) {
+    guarded((), || {
+        // SAFETY: as the caller promises.
+        let answer = (!user.is_null()).then(|| unsafe {
+            SignInAnswer::Credentials(Credentials {
+                user: read(user),
+                password: read(password),
+            })
+        });
+        // SAFETY: as the caller promises.
+        if let Some(handle) = unsafe { self::session(session) } {
+            handle.tell(SessionMessage::SignIn(answer));
+        }
+    });
+}
+
+/// Answers the session's request for a code from the user's authenticator
+/// app with `code`, or declines with null.
+///
+/// # Safety
+///
+/// `session` is null or a live handle, and `code` null or a live
+/// NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_session_sign_in_code(session: *mut QdpSession, code: *const c_char) {
+    guarded((), || {
+        // SAFETY: as the caller promises.
+        let code = (!code.is_null()).then(|| unsafe { read(code) });
+        // SAFETY: as the caller promises.
+        if let Some(handle) = unsafe { self::session(session) } {
+            handle.tell(SessionMessage::SignIn(code.map(SignInAnswer::Code)));
+        }
+    });
+}
+
+/// Returns the QR code of `text`, as a `totp` line's enrollment URI is
+/// shown: its modules on a side, a colon, then each module, row by row, `1`
+/// if dark and `0` if light; or null if it is too long for a QR code. The
+/// caller frees it with [`qdp_string_free`].
+///
+/// # Safety
+///
+/// `text` is null or a live NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_qr_modules(text: *const c_char) -> *mut c_char {
+    guarded(ptr::null_mut(), || {
+        // SAFETY: as the caller promises.
+        let text = unsafe { read(text) };
+        let Some(code) = QrModules::encode(&text) else {
+            return ptr::null_mut();
+        };
+        let size = code.size();
+        let modules: String = (0..size * size)
+            .map(|index| {
+                if code.is_dark(index % size, index / size) {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+            .collect();
+        new_string(&format!("{size}:{modules}"))
+    })
 }
 
 /// Ends the session and closes its window, returning at once: its last line
@@ -552,6 +650,9 @@ mod tests {
             shortcuts: 0,
             clipboard: 0,
             statistics: 0,
+            gateway_address: ptr::null(),
+            gateway_pin: ptr::null(),
+            gateway_token: ptr::null(),
         };
         let mut error = ptr::null_mut();
         // SAFETY: the configuration's strings are static or null, and the

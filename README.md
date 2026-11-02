@@ -491,7 +491,13 @@ The app lists the hosts on the local network and those it connected to
 before; choosing a new host pairs with it by the code the host shows, and
 choosing one paired with streams at once, full screen or in a window as its
 settings say. A host added by its key pin and a token is listed too once it
-streamed, its token kept in Windows' Credential Locker.
+streamed, its token kept in Windows' Credential Locker. With the
+organization's [gateway](#gateway) set in its settings, a computer added by
+its ID on the gateway or its name inside the network is reached through it,
+and listed as such: the app asks for the user's password and a code from
+their authenticator app, showing the first time the QR code that adds the
+gateway to it, and later sessions sign in with the token the gateway gave,
+kept in the Credential Locker until it expires.
 The stream sends the keyboard, mouse, touch, pen and gamepads, with rumble;
 in full screen the Windows key, Alt+Tab and Alt+F4 act on the host. Holding
 Ctrl, Alt and Shift, Z releases the mouse, X switches between full screen and

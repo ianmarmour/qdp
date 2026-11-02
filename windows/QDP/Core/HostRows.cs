@@ -21,6 +21,9 @@ public enum HostStatus
     /// <summary>Kept, but not seen on this network: choosing it tries anyway.</summary>
     NotSeen,
 
+    /// <summary>Reached through the organization's gateway: choosing it streams.</summary>
+    Gateway,
+
     /// <summary>New and offering pairing: choosing it pairs.</summary>
     New,
 
@@ -67,7 +70,7 @@ public sealed class HostRow
     /// <summary>The action choosing it takes, for its button.</summary>
     public string Action => Status switch
     {
-        HostStatus.Ready => "Connect",
+        HostStatus.Ready or HostStatus.Gateway => "Connect",
         HostStatus.NotSeen => "Try to connect",
         HostStatus.New or HostStatus.DifferentKey => "Pair",
         _ => "",
@@ -78,6 +81,7 @@ public sealed class HostRow
     {
         HostStatus.Ready => "\uE73E",
         HostStatus.NotSeen => "\uE774",
+        HostStatus.Gateway => "\uE821",
         HostStatus.New => "\uE710",
         HostStatus.DifferentKey => "\uE7BA",
         HostStatus.PairingOff => "\uE72E",
@@ -93,17 +97,21 @@ public sealed class HostRow
 
 /// <summary>
 /// The list the app shows: hosts found on the network, recognized as kept by
-/// their pin, then kept hosts not found, by the same rules as the Mac and
-/// Android apps.
+/// their pin, then those reached through the gateway, then kept hosts not
+/// found, by the same rules as the Mac and Android apps.
 /// </summary>
 internal static class HostRows
 {
     /// <summary>
     /// The rows to list: hosts found on the network, recognized as kept by
-    /// their pin, then kept hosts not found, most recently kept first.
+    /// their pin, then those reached through the gateway, then kept hosts
+    /// not found, most recently kept first.
     /// </summary>
-    internal static List<HostRow> Build(IEnumerable<DiscoveredHost> discovered, IReadOnlyList<KeptHost> kept)
+    internal static List<HostRow> Build(IEnumerable<DiscoveredHost> discovered, IReadOnlyList<KeptHost> allKept)
     {
+        // Hosts reached through the gateway are never on the local network
+        // under their pin: the gateway checks their keys.
+        var kept = allKept.Where(host => host.Access != HostAccess.Gateway).ToList();
         var found = new HashSet<string>();
         var rows = new List<HostRow>();
         foreach (var host in discovered.OrderBy(host => host.Name, StringComparer.CurrentCultureIgnoreCase))
@@ -154,6 +162,14 @@ internal static class HostRows
                     Status = HostStatus.PairingOff,
                 });
         }
+        rows.AddRange(allKept.Where(host => host.Access == HostAccess.Gateway).Select(host => new HostRow
+        {
+            Name = host.Name,
+            Detail = $"Through the gateway · {host.Address}",
+            Status = HostStatus.Gateway,
+            Target = host.Target(host.Name, host.Address),
+            Kept = host,
+        }));
         rows.AddRange(kept.Where(host => !found.Contains(host.Pin)).Select(host => new HostRow
         {
             Name = host.Name,

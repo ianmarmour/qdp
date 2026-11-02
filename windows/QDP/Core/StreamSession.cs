@@ -3,6 +3,12 @@ using Microsoft.UI.Dispatching;
 
 namespace Qdp.Core;
 
+/// <summary>The gateway a stream reaches its host through.</summary>
+/// <param name="Address">The gateway's address.</param>
+/// <param name="Pin">Its key pin, or empty to verify it by the system's certificate authorities.</param>
+/// <param name="Token">The session token of the last sign-in, or empty to sign in.</param>
+internal sealed record GatewayRoute(string Address, string Pin, string Token);
+
 /// <summary>
 /// A session the core runs in a stream window of its own, telling the app
 /// of it on the UI thread until it ends.
@@ -24,23 +30,29 @@ internal sealed class StreamSession
     /// <summary>The stream's target.</summary>
     internal StreamTarget Target { get; }
 
+    /// <summary>The gateway the stream reaches its host through, if it does.</summary>
+    internal GatewayRoute? Gateway { get; }
+
     /// <summary>Raised on the UI thread for each event of the session.</summary>
     internal event Action<SessionEvent>? EventReceived;
 
-    private StreamSession(IntPtr handle, StreamTarget target, DispatcherQueue dispatcher)
+    private StreamSession(IntPtr handle, StreamTarget target, GatewayRoute? gateway, DispatcherQueue dispatcher)
     {
         this.handle = handle;
         this.dispatcher = dispatcher;
         Target = target;
+        Gateway = gateway;
     }
 
     /// <summary>
-    /// Starts a stream of <paramref name="target"/> as <paramref name="settings"/>
+    /// Starts a stream of <paramref name="target"/>, through
+    /// <paramref name="gateway"/> if given, as <paramref name="settings"/>
     /// say, opening on <paramref name="owner"/>'s monitor, or returns why it
     /// cannot.
     /// </summary>
     internal static StreamSession Start(
         StreamTarget target,
+        GatewayRoute? gateway,
         AppSettings settings,
         IntPtr owner,
         DispatcherQueue dispatcher,
@@ -68,6 +80,7 @@ internal sealed class StreamSession
                 {
                     Authentication.Paired => Native.AuthPaired,
                     Authentication.Pair => Native.AuthPair,
+                    Authentication.Gateway => Native.AuthGateway,
                     _ => Native.AuthToken,
                 },
                 Width = 0,
@@ -79,13 +92,16 @@ internal sealed class StreamSession
                 Shortcuts = (int)settings.Shortcuts,
                 Clipboard = settings.ShareClipboard ? 1 : 0,
                 Statistics = settings.ShowStatistics ? 1 : 0,
+                GatewayAddress = Utf8(gateway?.Address),
+                GatewayPin = Utf8(gateway?.Pin),
+                GatewayToken = Utf8(gateway?.Token),
             };
             var handle = Native.qdp_session_start(in config, out var error);
             if (handle == IntPtr.Zero)
             {
                 throw new InvalidOperationException(Native.TakeString(error) ?? "The stream could not start.");
             }
-            var session = new StreamSession(handle, target, dispatcher);
+            var session = new StreamSession(handle, target, gateway, dispatcher);
             session.EventReceived += received;
             var reader = new Thread(session.Read) { IsBackground = true, Name = "QDP session lines" };
             reader.Start();
@@ -105,6 +121,33 @@ internal sealed class StreamSession
             if (handle != IntPtr.Zero)
             {
                 Native.qdp_session_pairing_code(handle, code);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Answers the gateway's request for the user's name and password, or
+    /// declines with a null <paramref name="user"/>.
+    /// </summary>
+    internal void AnswerSignIn(string? user, string? password)
+    {
+        lock (gate)
+        {
+            if (handle != IntPtr.Zero)
+            {
+                Native.qdp_session_sign_in(handle, user, password);
+            }
+        }
+    }
+
+    /// <summary>Answers the gateway's request for a code from the user's authenticator app, or declines with null.</summary>
+    internal void AnswerSignInCode(string? code)
+    {
+        lock (gate)
+        {
+            if (handle != IntPtr.Zero)
+            {
+                Native.qdp_session_sign_in_code(handle, code);
             }
         }
     }

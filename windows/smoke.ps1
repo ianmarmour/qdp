@@ -238,6 +238,8 @@ public static class QdpCore {
         public int Authentication;
         public uint Width, Height;
         public int Decoder, Microphone, Screen, Sync, Shortcuts, Clipboard, Statistics;
+        // No gateway: null, as a new struct's are.
+        public IntPtr GatewayAddress, GatewayPin, GatewayToken;
     }
 
     [DllImport("qdp_windows", CallingConvention = CallingConvention.Cdecl)]

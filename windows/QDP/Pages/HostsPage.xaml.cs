@@ -83,18 +83,21 @@ public sealed partial class HostsPage : Page
         // row rides in the item's tag.
         if ((sender as FrameworkElement)?.Tag is HostRow { Kept: { } kept })
         {
-            window?.Hosts.Forget(kept.Pin);
+            window?.Hosts.Forget(kept.Key);
         }
     }
 
-    /// <summary>Adds a host by its address: pairing with it, or with its key pin and a token.</summary>
+    /// <summary>
+    /// Adds a host by its address: pairing with it, or with its key pin and a
+    /// token; or through the gateway.
+    /// </summary>
     private async void OnAddClicked(object sender, RoutedEventArgs args)
     {
         if (window is null)
         {
             return;
         }
-        var target = await AddHostDialog.Ask(XamlRoot);
+        var target = await AddHostDialog.Ask(XamlRoot, window.Settings.Gateway);
         if (target is not null)
         {
             window.Connect(target);
