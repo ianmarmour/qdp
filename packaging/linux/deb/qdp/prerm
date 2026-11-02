@@ -1,0 +1,12 @@
+#!/bin/sh
+# Before QDP is removed, not upgraded: the service stops and is turned off.
+set -e
+
+if [ "$1" = remove ]; then
+  systemctl --no-reload disable qdp.service >/dev/null 2>&1 || true
+  if [ -d /run/systemd/system ]; then
+    systemctl stop qdp.service >/dev/null 2>&1 || true
+  fi
+fi
+
+exit 0

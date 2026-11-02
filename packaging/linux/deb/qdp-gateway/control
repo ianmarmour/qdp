@@ -1,0 +1,19 @@
+Package: qdp-gateway
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Ian Armour <ianmarmour@gmail.com>
+Installed-Size: @INSTALLED_SIZE@
+Depends: @DEPENDS@, passwd
+Section: net
+Priority: optional
+Homepage: https://github.com/ianmarmour/qdp
+Description: QDP gateway: reach an organization's hosts with directory sign-in
+ The QDP gateway lets users outside an organization's network reach the QDP
+ hosts inside it through one public endpoint. It signs each user in with the
+ organization's directory, LDAP or Active Directory, then a TOTP code from
+ their authenticator app, and tunnels their QDP sessions, end to end, to the
+ hosts its policy lets them reach.
+ .
+ Its qdp-gateway service runs as the user qdp-gateway, and is off until
+ /etc/qdp-gateway/gateway.toml is configured and it is turned on with
+ systemctl enable --now qdp-gateway.

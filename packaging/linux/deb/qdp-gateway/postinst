@@ -1,0 +1,26 @@
+#!/bin/sh
+# After the QDP gateway is installed or upgraded: its user exists, as its
+# sysusers file has it; its configuration is readable by that user's group
+# alone, as dpkg then keeps it through upgrades; and systemd learns of its
+# service, which an upgrade restarts with the new program if it runs. A new
+# service is off, since its configuration is to be written first.
+set -e
+
+if [ "$1" = configure ]; then
+  getent group qdp-gateway >/dev/null || groupadd --system qdp-gateway
+  getent passwd qdp-gateway >/dev/null \
+    || useradd --system --gid qdp-gateway --home-dir /var/lib/qdp-gateway --no-create-home \
+      --shell /usr/sbin/nologin --comment "QDP gateway" qdp-gateway
+  dpkg-statoverride --list /etc/qdp-gateway >/dev/null \
+    || dpkg-statoverride --update --add root qdp-gateway 0750 /etc/qdp-gateway
+  dpkg-statoverride --list /etc/qdp-gateway/gateway.toml >/dev/null \
+    || dpkg-statoverride --update --add root qdp-gateway 0640 /etc/qdp-gateway/gateway.toml
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [ -n "$2" ]; then
+      systemctl try-restart qdp-gateway.service >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+exit 0

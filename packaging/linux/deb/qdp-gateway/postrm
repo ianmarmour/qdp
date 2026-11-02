@@ -1,0 +1,17 @@
+#!/bin/sh
+# After the QDP gateway is removed: systemd forgets its service. Purging it
+# also drops the ownership dpkg kept for its configuration, which dpkg
+# deletes; its user stays, and so does its state in /var/lib/qdp-gateway,
+# the users' TOTP secrets among it, so that reinstalling it asks no one to
+# enroll again.
+set -e
+
+if [ "$1" = purge ]; then
+  dpkg-statoverride --remove /etc/qdp-gateway/gateway.toml >/dev/null 2>&1 || true
+  dpkg-statoverride --remove /etc/qdp-gateway >/dev/null 2>&1 || true
+fi
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+exit 0

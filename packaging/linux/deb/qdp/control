@@ -1,0 +1,21 @@
+Package: qdp
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Ian Armour <ianmarmour@gmail.com>
+Installed-Size: @INSTALLED_SIZE@
+Depends: @DEPENDS@
+Recommends: libva2, libva-drm2
+Section: net
+Priority: optional
+Homepage: https://github.com/ianmarmour/qdp
+Description: Quick Desktop Protocol: stream desktops over the network
+ QDP streams a computer's desktop to other devices, and shows other
+ computers' desktops, over QUIC with AV1 video. The qdp command is both the
+ host, qdp serve, and a client, qdp connect.
+ .
+ The package lets the user at the machine create the virtual input devices
+ the host plays a client's keyboard, mouse, touch, pens and passed-through
+ devices through, and loads the kernel modules for them at boot. Its qdp
+ service, off until turned on with systemctl enable --now qdp, serves from
+ boot what the graphics card shows, the login screen included, so that
+ devices can log in.
