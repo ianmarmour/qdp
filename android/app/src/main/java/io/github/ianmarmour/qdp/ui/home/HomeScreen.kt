@@ -123,7 +123,7 @@ fun HomeScreen(
                 viewModel.rememberAddress(card)
                 card.target?.let(onStream)
             }
-            HostStatus.NEW -> card.target?.let(onStream)
+            HostStatus.NEW, HostStatus.GATEWAY -> card.target?.let(onStream)
             HostStatus.PAIRING_OFF -> viewModel.show(HomeDialog.PairingOff(card))
             HostStatus.KEY_MISMATCH -> viewModel.show(HomeDialog.KeyMismatch(card))
         }
@@ -203,6 +203,10 @@ fun HomeScreen(
             onConnectWithToken = { address, pin, token ->
                 viewModel.show(null)
                 onConnectWithToken(address, pin, token)
+            },
+            onAddThroughGateway = { target ->
+                viewModel.show(null)
+                onStream(viewModel.addGatewayHost(target))
             },
         )
     }

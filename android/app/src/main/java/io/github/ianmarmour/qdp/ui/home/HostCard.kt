@@ -71,6 +71,12 @@ private fun lookOf(status: HostStatus): StatusLook = when (status) {
         R.string.action_connect,
         R.drawable.ic_circle_fill1,
     )
+    HostStatus.GATEWAY -> StatusLook(
+        R.string.status_gateway,
+        R.string.status_gateway_spoken,
+        R.string.action_connect,
+        R.drawable.ic_circle_fill1,
+    )
     HostStatus.NEW -> StatusLook(R.string.status_new, R.string.status_new_spoken, R.string.action_pair, R.drawable.ic_key)
     HostStatus.KEY_MISMATCH -> StatusLook(
         R.string.status_key_mismatch,
@@ -133,7 +139,7 @@ fun HostCardView(
     val forgetLabel = stringResource(R.string.action_forget)
     val detailsLabel = stringResource(R.string.action_details)
     val optionsLabel = stringResource(R.string.action_options)
-    val canForget = card.paired != null
+    val canForget = card.paired != null || card.gateway != null
     Box(
         modifier = modifier
             .focusRing(interaction, shape)

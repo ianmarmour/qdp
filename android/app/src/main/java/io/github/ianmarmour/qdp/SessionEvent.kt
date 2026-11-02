@@ -59,6 +59,27 @@ sealed interface SessionEvent {
     /** Pairing succeeded with the host whose key pin is [pin]. */
     data class Paired(val pin: String) : SessionEvent
 
+    /**
+     * The gateway named [gateway] needs the user's name and password, which
+     * [Native.signIn] answers; [retry] after an attempt that failed.
+     */
+    data class GatewaySignIn(val retry: Boolean, val gateway: String) : SessionEvent
+
+    /**
+     * The gateway named [gateway] needs a code from the user's authenticator
+     * app, which [Native.signInCode] answers; [enrollment] is an
+     * `otpauth://` URI to add to the app first, if it has no secret for the
+     * gateway yet; [retry] after a code that did not work.
+     */
+    data class GatewayCode(val retry: Boolean, val enrollment: String?, val gateway: String) : SessionEvent
+
+    /**
+     * The gateway gave a session [token], in hexadecimal, valid for
+     * [lifetimeSeconds], with which the next sessions sign in without
+     * asking the user.
+     */
+    data class GatewaySession(val token: String, val lifetimeSeconds: Long) : SessionEvent
+
     /** The session ended normally. */
     data object Ended : SessionEvent
 
@@ -98,6 +119,13 @@ sealed interface SessionEvent {
                 "stats" -> Stats(values[0].toInt(), values[1].toFloatOrNull(), values[2].toFloat(), slowest(values.drop(3)))
                 "pair" -> PairingCode(values[0] == "retry")
                 "paired" -> Paired(values[0])
+                "signin" -> GatewaySignIn(values[0] == "retry", rest.substringAfter(' ', ""))
+                "totp" -> GatewayCode(
+                    values[0] == "retry",
+                    values.getOrNull(1)?.takeIf { it != "-" },
+                    values.drop(2).joinToString(" "),
+                )
+                "gatewaysession" -> GatewaySession(values[0], values.getOrNull(1)?.toLongOrNull() ?: 0)
                 "ended" -> Ended
                 "failed" -> Failed(rest)
                 else -> null

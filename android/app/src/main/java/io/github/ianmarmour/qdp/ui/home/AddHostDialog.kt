@@ -46,6 +46,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import io.github.ianmarmour.qdp.Gateway
 import io.github.ianmarmour.qdp.Native
 import io.github.ianmarmour.qdp.R
 import io.github.ianmarmour.qdp.Settings
@@ -53,6 +54,7 @@ import io.github.ianmarmour.qdp.ui.components.Emphasis
 import io.github.ianmarmour.qdp.ui.components.QdpButton
 import io.github.ianmarmour.qdp.ui.components.focusRing
 import io.github.ianmarmour.qdp.ui.components.gamepadButtons
+import io.github.ianmarmour.qdp.ui.settings.SwitchRow
 
 /** The turn of the Advanced section's chevron while it is open. */
 private const val CHEVRON_OPEN_DEGREES = 180f
@@ -76,7 +78,10 @@ private enum class FieldError {
  * Adds a computer by its address, filled in from the last one used or a
  * connection link: Pair answers [onPair] with the address; the collapsed
  * Advanced section connects with the host's key pin and a token through
- * [onConnectWithToken], and starts open when [advancedOpen].
+ * [onConnectWithToken], and starts open when [advancedOpen]. With the
+ * organization's gateway set, the computer is reached through it by
+ * default, by its ID there or its name inside the network, answering
+ * [onAddThroughGateway].
  */
 @Composable
 fun AddHostDialog(
@@ -84,9 +89,12 @@ fun AddHostDialog(
     onDismiss: () -> Unit,
     onPair: (address: String) -> Unit,
     onConnectWithToken: (address: String, pin: String, token: String) -> Unit,
+    onAddThroughGateway: (target: String) -> Unit,
 ) {
     val context = LocalContext.current
     val stored = remember { Settings.load(context) }
+    val gateway = remember { Gateway.load(context) }
+    var throughGateway by rememberSaveable { mutableStateOf(gateway != null) }
     var address by rememberSaveable { mutableStateOf(stored.host) }
     var pin by rememberSaveable { mutableStateOf(stored.pin) }
     var token by rememberSaveable { mutableStateOf(stored.token) }
@@ -100,7 +108,7 @@ fun AddHostDialog(
             error = FieldError.ADDRESS
             return
         }
-        onPair(trimmed)
+        if (throughGateway) onAddThroughGateway(trimmed) else onPair(trimmed)
     }
 
     fun connectWithToken() {
@@ -128,7 +136,7 @@ fun AddHostDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(stringResource(R.string.add_body))
+                Text(stringResource(if (throughGateway) R.string.add_gateway_body else R.string.add_body))
                 OutlinedTextField(
                     value = address,
                     onValueChange = {
@@ -144,8 +152,18 @@ fun AddHostDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { pair() }),
                 )
-                AdvancedHeader(advanced) { advanced = !advanced }
-                AnimatedVisibility(visible = advanced) {
+                if (gateway != null) {
+                    SwitchRow(
+                        title = stringResource(R.string.add_through_gateway, gateway.address),
+                        supporting = stringResource(R.string.add_through_gateway_supporting),
+                        checked = throughGateway,
+                        onCheckedChange = { throughGateway = it },
+                    )
+                }
+                if (!throughGateway) {
+                    AdvancedHeader(advanced) { advanced = !advanced }
+                }
+                AnimatedVisibility(visible = advanced && !throughGateway) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
                             text = stringResource(R.string.add_advanced_body),
@@ -192,7 +210,9 @@ fun AddHostDialog(
             }
         },
         confirmButton = {
-            QdpButton(onClick = ::pair, emphasis = Emphasis.HIGH) { Text(stringResource(R.string.action_pair)) }
+            QdpButton(onClick = ::pair, emphasis = Emphasis.HIGH) {
+                Text(stringResource(if (throughGateway) R.string.action_connect else R.string.action_pair))
+            }
         },
         dismissButton = {
             QdpButton(onClick = onDismiss, emphasis = Emphasis.LOWEST) { Text(stringResource(R.string.action_cancel)) }

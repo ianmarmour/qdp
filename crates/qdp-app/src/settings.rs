@@ -112,6 +112,18 @@ pub fn parse_pin(text: &str) -> Result<KeyPin, String> {
     Ok(KeyPin(pin))
 }
 
+/// Reads bytes written in hexadecimal, as a `gatewaysession` event's token,
+/// or `None` if `text` is not.
+pub fn parse_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
 /// Returns `pin` as 64 lower-case hexadecimal digits, as `qdp pin` prints it.
 pub fn format_pin(pin: KeyPin) -> String {
     pin.0.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -217,6 +229,14 @@ mod tests {
         assert_eq!(format_pin(pin), digits);
         assert!(parse_pin("c867").is_err());
         assert!(parse_pin(&"zz".repeat(32)).is_err());
+    }
+
+    /// Tokens are read back from their hexadecimal.
+    #[test]
+    fn reads_hexadecimal() {
+        assert_eq!(parse_hex("01abFF"), Some(vec![0x01, 0xab, 0xff]));
+        assert_eq!(parse_hex("abc"), None);
+        assert_eq!(parse_hex("zz"), None);
     }
 
     /// Display sides are kept to what hosts accept.

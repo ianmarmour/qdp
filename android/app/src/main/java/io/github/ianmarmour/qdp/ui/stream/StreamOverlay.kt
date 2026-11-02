@@ -25,6 +25,8 @@ import androidx.compose.ui.unit.dp
 import androidx.window.core.layout.WindowSizeClass
 import io.github.ianmarmour.qdp.R
 import io.github.ianmarmour.qdp.ui.components.rememberGamepadConnected
+import io.github.ianmarmour.qdp.ui.gateway.GatewayCodeDialog
+import io.github.ianmarmour.qdp.ui.gateway.GatewaySignInDialog
 import io.github.ianmarmour.qdp.ui.pairing.PairingDialog
 import io.github.ianmarmour.qdp.ui.pairing.PairingLayout
 import kotlinx.coroutines.delay
@@ -36,10 +38,10 @@ private const val COACHMARK_MILLIS = 8_000L
  * Everything drawn over the stream's video, always in dark theme: the
  * connecting screen, the reconnecting banner, the statistics pill inside
  * the display cutout, the first stream's menu tip, the menu, messages, and
- * the pairing and error dialogs.
+ * the pairing, gateway sign-in and error dialogs.
  */
 @Composable
-fun StreamOverlay(ui: StreamUiState, actions: StreamActions) {
+fun StreamOverlay(ui: StreamUiState, actions: StreamActions, gatewayUser: String = "") {
     val gamepad = rememberGamepadConnected()
     val snackbar = remember { SnackbarHostState() }
     val compactHeight = !currentWindowAdaptiveInfo().windowSizeClass
@@ -110,6 +112,25 @@ fun StreamOverlay(ui: StreamUiState, actions: StreamActions) {
             onTryAgain = actions.tryAgain,
             onClose = actions.leave,
         )
+    }
+    ui.gatewaySignIn?.let { signIn ->
+        if (signIn.code) {
+            GatewayCodeDialog(
+                gateway = signIn.gateway,
+                retry = signIn.retry,
+                enrollment = signIn.enrollment,
+                onSubmit = actions.submitSignInCode,
+                onCancel = actions.cancelSignIn,
+            )
+        } else {
+            GatewaySignInDialog(
+                gateway = signIn.gateway,
+                retry = signIn.retry,
+                user = gatewayUser,
+                onSubmit = actions.submitSignIn,
+                onCancel = actions.cancelSignIn,
+            )
+        }
     }
     ui.error?.let { error -> ErrorDialog(error, ui.hostName, actions.tryAgain, actions.leave) }
 }

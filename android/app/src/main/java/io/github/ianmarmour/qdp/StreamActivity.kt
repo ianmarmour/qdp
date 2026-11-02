@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.github.ianmarmour.qdp.ui.stream.ConnectingStep
+import io.github.ianmarmour.qdp.ui.stream.GatewaySignInUi
 import io.github.ianmarmour.qdp.ui.stream.PairingStep
 import io.github.ianmarmour.qdp.ui.stream.PairingUi
 import io.github.ianmarmour.qdp.ui.stream.StatsLevel
@@ -83,6 +84,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
 
     /** Whether the core waits for a pairing code, which it is answered exactly once. */
     private var codeRequested = false
+
+    /** Whether the core waits for the gateway's sign-in, which it is answered exactly once. */
+    private var signInRequested = false
     private var refreshMillihertz = DEFAULT_REFRESH_MILLIHERTZ
     private var relative = false
 
@@ -100,6 +104,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         disconnect = ::leave,
         submitCode = ::answerCode,
         cancelPairing = ::cancelPairing,
+        submitSignIn = ::answerSignIn,
+        submitSignInCode = ::answerSignInCode,
+        cancelSignIn = ::cancelSignIn,
         tryAgain = ::tryAgain,
         leave = ::leave,
     )
@@ -172,7 +179,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         overlayView = ComposeView(this).apply {
             setContent {
                 QdpTheme(settings.colorSource, dark = true) {
-                    StreamOverlay(ui, actions)
+                    StreamOverlay(ui, actions, gatewayUser = Gateway.load(this@StreamActivity)?.user.orEmpty())
                 }
             }
         }
@@ -235,11 +242,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         }
         ui.error = null
         ui.pairing = null
+        ui.gatewaySignIn = null
         ui.menu = Visibility.HIDDEN
         ui.connectingStep = ConnectingStep.REACHING
         setPhase(StreamPhase.CONNECTING)
         val microphone = settings.microphone &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        // A computer reached through the gateway goes through the one set
+        // now, with the session its last sign-in left.
+        val gateway = Gateway.load(this).takeIf { target.authentication == Native.AUTH_GATEWAY }
         val error = Native.connect(
             surface,
             target.address,
@@ -247,6 +258,9 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
             target.pin,
             target.token,
             ui.deviceName,
+            gateway?.address.orEmpty(),
+            gateway?.pin.orEmpty(),
+            if (gateway != null) Gateway.sessionToken(this) else "",
             size.width,
             size.height,
             refreshMillihertz,
@@ -272,6 +286,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
         streaming = false
         listening = false
         codeRequested = false
+        signInRequested = false
         events?.join()
         events = null
         touch.cancel()
@@ -345,6 +360,15 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
             is SessionEvent.Rumble -> gamepads.rumble(event.slot, event.low, event.high)
             is SessionEvent.Stats -> ui.stats = event
             is SessionEvent.PairingCode -> askForCode(event.retry)
+            is SessionEvent.GatewaySignIn -> {
+                signInRequested = true
+                ui.gatewaySignIn = GatewaySignInUi(event.gateway, event.retry, code = false)
+            }
+            is SessionEvent.GatewayCode -> {
+                signInRequested = true
+                ui.gatewaySignIn = GatewaySignInUi(event.gateway, event.retry, code = true, enrollment = event.enrollment)
+            }
+            is SessionEvent.GatewaySession -> Gateway.keepSession(this, event.token, event.lifetimeSeconds)
             is SessionEvent.Paired -> {
                 // From now on the host is reached with the device's key,
                 // also when the stream connects again.
@@ -356,6 +380,7 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
             SessionEvent.Ended -> leave()
             is SessionEvent.Failed -> {
                 stop()
+                ui.gatewaySignIn = null
                 val error = StreamError.of(event.error)
                 // Pairing's own dialog explains a failure while pairing.
                 if (ui.pairing != null) {
@@ -402,6 +427,38 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback, VideoArea {
             codeRequested = false
             // The core ends the session, whose end leaves the stream.
             Native.pairingCode(null)
+        } else {
+            leave()
+        }
+    }
+
+    /** Answers the gateway's request for the user's name and password. */
+    private fun answerSignIn(user: String, password: String) {
+        if (!signInRequested) {
+            return
+        }
+        signInRequested = false
+        ui.gatewaySignIn = null
+        Native.signIn(user, password)
+    }
+
+    /** Answers the gateway's request for a code from the user's authenticator app. */
+    private fun answerSignInCode(code: String) {
+        if (!signInRequested) {
+            return
+        }
+        signInRequested = false
+        ui.gatewaySignIn = null
+        Native.signInCode(code)
+    }
+
+    /** Declines to sign in, which ends the session, or leaves if nothing is asked. */
+    private fun cancelSignIn() {
+        ui.gatewaySignIn = null
+        if (signInRequested) {
+            signInRequested = false
+            // The core ends the session, whose end leaves the stream.
+            Native.signIn(null, "")
         } else {
             leave()
         }

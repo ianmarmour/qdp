@@ -54,11 +54,12 @@ fun HomeDialogs(
     onPair: (HostCard) -> Unit,
     onAddByAddressPair: (String) -> Unit,
     onConnectWithToken: (String, String, String) -> Unit,
+    onAddThroughGateway: (String) -> Unit,
 ) {
     when (dialog) {
         // Each opening starts from the settings kept, as a link fills them in.
         is HomeDialog.AddHost -> key(dialog.request) {
-            AddHostDialog(dialog.advanced, onDismiss, onAddByAddressPair, onConnectWithToken)
+            AddHostDialog(dialog.advanced, onDismiss, onAddByAddressPair, onConnectWithToken, onAddThroughGateway)
         }
         is HomeDialog.Forget -> ForgetDialog(dialog.card, onDismiss) { onForget(dialog.card) }
         is HomeDialog.Details -> DetailsDialog(dialog.card, onDismiss)

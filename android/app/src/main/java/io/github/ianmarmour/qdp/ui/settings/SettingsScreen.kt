@@ -136,6 +136,7 @@ fun SettingsScreen(
                     onSelect = { onChange(settings.copy(decoder = it)) },
                     description = { stringResource(it.description) },
                 )
+                GatewaySection()
                 AboutSection(about, snackbar)
             }
         }
