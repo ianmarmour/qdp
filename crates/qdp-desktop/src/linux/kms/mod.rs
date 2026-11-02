@@ -8,9 +8,14 @@
 //! someone logs into. The kernel shows another program's framebuffers only
 //! to root, so this is for a host that runs as a system service.
 //!
-//! Frames stay in GPU memory, for a hardware encoder that reads them there,
-//! and the pointer, which the card shows on a plane of its own, is read
-//! apart from them (Section 9.1). When asked to, the display takes the
+//! The picture is the topmost plane that covers the whole display: the
+//! primary plane, as a rule, or an overlay that a desktop shows itself or a
+//! window on, over a window it moved to the primary plane. Frames have the
+//! display's size whatever the plane's buffer has: the part of it the
+//! display shows is scaled to where it shows, the rest black, if it covers
+//! only part. Frames stay in GPU memory, for a hardware encoder that reads them there, and the
+//! pointer, which the card shows on a plane of its own, is read apart from
+//! them (Section 9.1). When asked to, the display takes the
 //! client's mode and scale, through the desktop session's helper, which
 //! asks the compositor, and gets its own back when the session ends.
 
@@ -26,7 +31,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use qdp_codec::{
-    DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout, DmaBufPlane, PixelDepth, Rgb32Order,
+    DRM_FORMAT_MOD_LINEAR, DmaBufFrame, DmaBufLayout, DmaBufPlane, DmaBufRect, PixelDepth,
+    Rgb32Order,
 };
 use qdp_runtime::{
     CapturedFrame, CursorShape, CursorState, DesktopScale, FrameArrivals, FrameSource,
@@ -35,7 +41,8 @@ use qdp_runtime::{
 use tracing::{debug, info, warn};
 
 use self::device::{
-    Card, ConnectorName, ExportedFramebuffer, MODIFIER_IMPLICIT, PlaneAccess, PlaneKind,
+    Card, ConnectorName, ExportedFramebuffer, GeometryProperties, MODIFIER_IMPLICIT, PlaneAccess,
+    PlaneGeometry, PlaneKind,
 };
 use super::dma_buf_map::{MappedDmaBuf, PIXEL_BYTES, read_linear};
 #[cfg(feature = "notifications")]
@@ -94,13 +101,17 @@ const POINTER_REFRESH: Duration = Duration::from_secs(1);
 /// The largest value of a byte.
 const BYTE_MAX: u32 = 255;
 
+/// The bits after the point of a plane's 16.16 fixed-point source
+/// rectangle.
+const FIXED_POINT_BITS: u32 = 16;
+
 /// Why frames in memory cannot be had from the console.
 const NEEDS_GPU_ENCODER: &str = "the display's picture is in a tiled GPU buffer, which only a \
 hardware encoder can read; console capture needs one (VA-API)";
 
 /// The display being captured: its connector, the CRTC driving it, and the
 /// planes it shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Target {
     /// The connector the display is on.
     connector: u32,
@@ -111,13 +122,58 @@ struct Target {
     /// The CRTC's index among the card's, which names it to vertical blank
     /// requests and in planes' possible CRTCs.
     crtc_index: u32,
-    /// Where the CRTC's picture starts in its framebuffer.
-    origin: (u32, u32),
-    /// Its primary plane, or `None` if the card shows only the CRTC's
+    /// The planes its picture may be on: its primary plane and the
+    /// overlays it can show, or none if the card shows only the CRTC's
     /// framebuffer.
-    primary: Option<u32>,
+    planes: Vec<PicturePlane>,
     /// Its cursor plane, if the card shows it.
     cursor: Option<CursorPlane>,
+}
+
+/// A plane a display's picture may be on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PicturePlane {
+    /// The plane.
+    id: u32,
+    /// Whether it is the primary plane or an overlay.
+    kind: PlaneKind,
+    /// The properties that say where it is, if the card shows them.
+    geometry: Option<GeometryProperties>,
+}
+
+/// The picture a display shows: the framebuffer it is in, the part of it
+/// shown, and where on the display that part is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Picture {
+    /// The framebuffer.
+    framebuffer: u32,
+    /// The part of it shown, in its pixels.
+    source: Rect,
+    /// Where that part is on the display, in the display's pixels.
+    on_screen: Rect,
+    /// The display's width and height.
+    screen: (u32, u32),
+}
+
+impl Picture {
+    /// Returns whether `other` shows the same part of a buffer at the same
+    /// place, whatever framebuffer stands for it.
+    fn same_place(&self, other: &Self) -> bool {
+        (self.source, self.on_screen, self.screen) == (other.source, other.on_screen, other.screen)
+    }
+}
+
+/// A rectangle of pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Rect {
+    /// Its first column.
+    x: u32,
+    /// Its first row.
+    y: u32,
+    /// Its width.
+    width: u32,
+    /// Its height.
+    height: u32,
 }
 
 /// A CRTC's cursor plane.
@@ -134,8 +190,8 @@ struct CursorPlane {
 /// refreshes to tell whether anything changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Shown {
-    /// The framebuffer of its picture, or 0.
-    picture: u32,
+    /// Its picture, if it shows one.
+    picture: Option<Picture>,
     /// The pointer's framebuffer and position, if it shows.
     pointer: Option<(u32, (i64, i64))>,
 }
@@ -163,8 +219,8 @@ pub struct ConsoleCapture {
     target: Arc<Mutex<Target>>,
     /// Where frames are delivered.
     frames: FrameMemory,
-    /// The last frame, and the buffer it came from.
-    last: Option<((u64, u64), CapturedFrame)>,
+    /// The last frame, the buffer it came from, and the picture it is.
+    last: Option<((u64, u64), Picture, CapturedFrame)>,
     /// The size of the last frame.
     size: (usize, usize),
     /// The pointer's image.
@@ -238,7 +294,7 @@ impl ConsoleCapture {
 
     /// Returns the display captured now.
     fn target(&self) -> Target {
-        *lock(&self.target)
+        lock(&self.target).clone()
     }
 
     /// Asks the desktop session's helper where the display is among the
@@ -275,18 +331,33 @@ impl ConsoleCapture {
     #[cfg(not(feature = "notifications"))]
     fn refresh_placement(&mut self) {}
 
-    /// Reads framebuffer `id` as a frame, or returns the last frame again if
-    /// it is the same buffer.
-    fn read(&mut self, id: u32) -> Result<CapturedFrame, RuntimeError> {
+    /// Reads `picture` as a frame, or returns the last frame again if it is
+    /// the same part of the same buffer.
+    fn read(&mut self, picture: Picture) -> Result<CapturedFrame, RuntimeError> {
         let exported = self
             .card
-            .export_framebuffer(id)
+            .export_framebuffer(picture.framebuffer)
             .map_err(|error| RuntimeError::Capture(error.to_string()))?;
-        let ReadFrame { frame, buffer } = dma_buf_frame(exported)?;
-        if let Some((last_buffer, last)) = &self.last {
-            if *last_buffer == buffer {
-                return Ok(last.clone());
+        let buffer_size = exported.size;
+        let ReadFrame { frame, buffer } = dma_buf_frame(exported, &picture)?;
+        let moved = match &self.last {
+            Some((last_buffer, last_picture, last)) if last_picture.same_place(&picture) => {
+                if *last_buffer == buffer {
+                    return Ok(last.clone());
+                }
+                false
             }
+            Some(_) => true,
+            None => false,
+        };
+        if moved || self.last.is_none() {
+            info!(
+                buffer_width = buffer_size.0,
+                buffer_height = buffer_size.1,
+                source = ?picture.source,
+                on_screen = ?picture.on_screen,
+                "the display's picture"
+            );
         }
         let captured = match self.frames {
             FrameMemory::Gpu => CapturedFrame::DmaBuf(Arc::new(frame)),
@@ -297,7 +368,7 @@ impl ConsoleCapture {
             }
         };
         self.size = captured.size();
-        self.last = Some((buffer, captured.clone()));
+        self.last = Some((buffer, picture, captured.clone()));
         Ok(captured)
     }
 
@@ -350,14 +421,13 @@ impl FrameSource for ConsoleCapture {
         let deadline = Instant::now() + DISPLAY_WAIT;
         loop {
             let target = self.target();
-            let picture = picture(&self.card, &target).unwrap_or(0);
-            if picture != 0 {
+            if let Some(picture) = picture(&self.card, &target).ok().flatten() {
                 return self.read(picture);
             }
             if find_again(&self.card, self.access, &self.target) {
                 self.refresh_placement();
             }
-            if let Some((_, last)) = &self.last {
+            if let Some((_, _, last)) = &self.last {
                 return Ok(last.clone());
             }
             if Instant::now() >= deadline {
@@ -391,10 +461,11 @@ impl FrameSource for ConsoleCapture {
             return Some(CursorState::default());
         };
         let (shape, (offset_x, offset_y)) = self.pointer_image(framebuffer);
+        // The cursor plane is placed on the display, as the frames are.
         let position = match position {
             Some((x, y)) => {
-                let x = i64::from(target.origin.0) + x + offset_x;
-                let y = i64::from(target.origin.1) + y + offset_y;
+                let x = x + offset_x;
+                let y = y + offset_y;
                 PointerPosition::At(
                     i32::try_from(x).unwrap_or(i32::MAX),
                     i32::try_from(y).unwrap_or(i32::MAX),
@@ -556,7 +627,7 @@ impl Watching {
     fn run(self) {
         let mut last = None;
         while !self.stop.load(Ordering::Relaxed) {
-            let target = *lock(&self.target);
+            let target = lock(&self.target).clone();
             if self.card.wait_for_refresh(target.crtc_index).is_err() {
                 if find_again(&self.card, self.access, &self.target) {
                     self.arrivals.arrived();
@@ -582,7 +653,7 @@ fn lock(target: &Mutex<Target>) -> MutexGuard<'_, Target> {
 /// picture, on whatever CRTC drives it now, or another display if it is
 /// gone. Returns whether the target changed.
 fn find_again(card: &Card, access: PlaneAccess, target: &Mutex<Target>) -> bool {
-    let current = *lock(target);
+    let current = lock(target).clone();
     match find_target(card, access, Some(current.connector)) {
         Ok(Some(found)) if found != current => {
             info!(display = %found.name, "the console moved; following it");
@@ -625,18 +696,18 @@ fn find_target(
         if crtc.size.is_none() {
             continue;
         }
-        let candidate = (id, connector.name, crtc_id, index as u32, crtc.origin);
+        let candidate = (id, connector.name, crtc_id, index as u32);
         if Some(id) == preferred {
             found = Some(candidate);
             break;
         }
         found.get_or_insert(candidate);
     }
-    let Some((connector, name, crtc, crtc_index, origin)) = found else {
+    let Some((connector, name, crtc, crtc_index)) = found else {
         return Ok(None);
     };
-    let (primary, cursor) = match access {
-        PlaneAccess::Legacy => (None, None),
+    let (planes, cursor) = match access {
+        PlaneAccess::Legacy => (Vec::new(), None),
         PlaneAccess::Atomic | PlaneAccess::Universal => planes_of(card, access, crtc, crtc_index)?,
     };
     Ok(Some(Target {
@@ -644,23 +715,31 @@ fn find_target(
         name,
         crtc,
         crtc_index,
-        origin,
-        primary,
+        planes,
         cursor,
     }))
 }
 
-/// Returns the primary and cursor planes of the CRTC `crtc` at `index`:
-/// those that can be shown on it, preferring those shown on it now.
+/// Returns the planes the picture of the CRTC `crtc` at `index` may be on,
+/// its primary plane first, and its cursor plane: those that can be shown
+/// on it, preferring a primary and a cursor plane shown on it now.
 fn planes_of(
     card: &Card,
     access: PlaneAccess,
     crtc: u32,
     index: u32,
-) -> io::Result<(Option<u32>, Option<CursorPlane>)> {
+) -> io::Result<(Vec<PicturePlane>, Option<CursorPlane>)> {
     let bit = 1u32 << index;
     let mut primary = None;
+    let mut overlays = Vec::new();
     let mut cursor = None;
+    let picture_plane = |id, kind| -> io::Result<PicturePlane> {
+        let geometry = match access {
+            PlaneAccess::Atomic => card.geometry_properties(id)?,
+            PlaneAccess::Universal | PlaneAccess::Legacy => None,
+        };
+        Ok(PicturePlane { id, kind, geometry })
+    };
     for id in card.planes()? {
         let Ok(plane) = card.plane(id) else {
             continue;
@@ -670,7 +749,10 @@ fn planes_of(
         }
         let shown_here = plane.crtc == crtc;
         match card.plane_kind(id)? {
-            Some(PlaneKind::Primary) if primary.is_none() || shown_here => primary = Some(id),
+            Some(PlaneKind::Primary) if primary.is_none() || shown_here => {
+                primary = Some(picture_plane(id, PlaneKind::Primary)?);
+            }
+            Some(PlaneKind::Overlay) => overlays.push(picture_plane(id, PlaneKind::Overlay)?),
             Some(PlaneKind::Cursor) if cursor.is_none() || shown_here => {
                 let position = if access == PlaneAccess::Atomic {
                     card.find_property(id, "CRTC_X")?
@@ -683,23 +765,164 @@ fn planes_of(
             _ => {}
         }
     }
-    Ok((primary, cursor))
+    Ok((primary.into_iter().chain(overlays).collect(), cursor))
 }
 
-/// Returns the framebuffer of the display's picture, or 0 if it shows none
-/// on the CRTC captured.
-fn picture(card: &Card, target: &Target) -> io::Result<u32> {
-    match target.primary {
-        Some(id) => {
-            let plane = card.plane(id)?;
-            Ok(if plane.crtc == target.crtc {
-                plane.framebuffer
-            } else {
-                0
-            })
-        }
-        None => Ok(card.crtc(target.crtc)?.framebuffer),
+/// A plane showing on the display captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShownPlane {
+    /// Whether it is the primary plane or an overlay.
+    kind: PlaneKind,
+    /// Its place among the planes, higher over lower.
+    stack: u64,
+    /// What it shows.
+    picture: Picture,
+}
+
+/// Returns the display's picture, or `None` if it shows none on the CRTC
+/// captured.
+fn picture(card: &Card, target: &Target) -> io::Result<Option<Picture>> {
+    let crtc = card.crtc(target.crtc)?;
+    let Some(screen) = crtc.size else {
+        return Ok(None);
+    };
+    // As the oldest interface tells it: the mode's size of the framebuffer,
+    // from the CRTC's origin.
+    let whole = |framebuffer| Picture {
+        framebuffer,
+        source: Rect {
+            x: crtc.origin.0,
+            y: crtc.origin.1,
+            width: screen.0,
+            height: screen.1,
+        },
+        on_screen: Rect {
+            x: 0,
+            y: 0,
+            width: screen.0,
+            height: screen.1,
+        },
+        screen,
+    };
+    if target.planes.is_empty() {
+        return Ok((crtc.framebuffer != 0).then(|| whole(crtc.framebuffer)));
     }
+    let mut shown = Vec::with_capacity(target.planes.len());
+    for plane in &target.planes {
+        let state = card.plane(plane.id)?;
+        if state.crtc != target.crtc || state.framebuffer == 0 {
+            continue;
+        }
+        // Planes without a place among the others have the usual one: the
+        // primary plane under the overlays.
+        let usual = u64::from(plane.kind != PlaneKind::Primary);
+        let placed = match &plane.geometry {
+            Some(properties) => card
+                .plane_geometry(plane.id, properties)?
+                .and_then(|geometry| {
+                    let (source, on_screen) = visible_part(&geometry, screen)?;
+                    Some((geometry.zpos.unwrap_or(usual), source, on_screen))
+                }),
+            // Without its atomic properties, only the primary plane is shown,
+            // where the oldest interface tells.
+            None if plane.kind == PlaneKind::Primary => {
+                let picture = whole(state.framebuffer);
+                Some((usual, picture.source, picture.on_screen))
+            }
+            None => None,
+        };
+        if let Some((stack, source, on_screen)) = placed {
+            shown.push(ShownPlane {
+                kind: plane.kind,
+                stack,
+                picture: Picture {
+                    framebuffer: state.framebuffer,
+                    source,
+                    on_screen,
+                    screen,
+                },
+            });
+        }
+    }
+    Ok(choose_picture(&shown, screen))
+}
+
+/// Chooses the display's picture among the planes it shows: the topmost
+/// that covers all of a `screen`-sized display, as an overlay a desktop
+/// shows itself or a full-screen window on does, over the primary plane;
+/// otherwise the primary plane, or the topmost plane if it is off.
+fn choose_picture(shown: &[ShownPlane], screen: (u32, u32)) -> Option<Picture> {
+    let covers = |plane: &&ShownPlane| {
+        plane.picture.on_screen
+            == Rect {
+                x: 0,
+                y: 0,
+                width: screen.0,
+                height: screen.1,
+            }
+    };
+    let topmost = |planes: &mut dyn Iterator<Item = &ShownPlane>| {
+        planes
+            .max_by_key(|plane| plane.stack)
+            .map(|plane| plane.picture)
+    };
+    topmost(&mut shown.iter().filter(covers))
+        .or_else(|| {
+            shown
+                .iter()
+                .find(|plane| plane.kind == PlaneKind::Primary)
+                .map(|plane| plane.picture)
+        })
+        .or_else(|| topmost(&mut shown.iter()))
+}
+
+/// Returns the part of a plane at `geometry` that a `screen`-sized display
+/// shows: the part of its framebuffer, in whole pixels, and where that is
+/// on the display; or `None` if none of it shows.
+fn visible_part(geometry: &PlaneGeometry, screen: (u32, u32)) -> Option<(Rect, Rect)> {
+    let (x, y, width, height) = geometry.on_crtc;
+    let [source_x, source_y, source_width, source_height] = geometry.source;
+    // One axis: the shown span of the plane, from `start` for `length`
+    // display pixels, and the span of its source, from `source` for
+    // `source_length` fixed-point pixels.
+    let axis = |start: i64, length: u64, limit: u32, source: u64, source_length: u64| {
+        let (start, length, limit) = (i128::from(start), i128::from(length), i128::from(limit));
+        let shown_start = start.max(0);
+        let shown_end = (start + length).min(limit);
+        if length == 0 || shown_end <= shown_start {
+            return None;
+        }
+        let (source, source_length) = (i128::from(source), i128::from(source_length));
+        let first = source + (shown_start - start) * source_length / length;
+        let span = (shown_end - shown_start) * source_length / length;
+        let pixel = |fixed: i128| u32::try_from(fixed >> FIXED_POINT_BITS).ok();
+        // Rounded to whole pixels, at least one.
+        let source_span = pixel(span + (1 << (FIXED_POINT_BITS - 1)))?.max(1);
+        Some((
+            (pixel(first)?, source_span),
+            (
+                u32::try_from(shown_start).ok()?,
+                u32::try_from(shown_end - shown_start).ok()?,
+            ),
+        ))
+    };
+    let ((column, columns), (left, shown_width)) =
+        axis(x, width, screen.0, source_x, source_width)?;
+    let ((row, rows), (top, shown_height)) = axis(y, height, screen.1, source_y, source_height)?;
+    Some((
+        Rect {
+            x: column,
+            y: row,
+            width: columns,
+            height: rows,
+        },
+        Rect {
+            x: left,
+            y: top,
+            width: shown_width,
+            height: shown_height,
+        },
+    ))
 }
 
 /// Returns the pointer's framebuffer and, if the card tells it, where the
@@ -748,9 +971,12 @@ struct ReadFrame {
     buffer: (u64, u64),
 }
 
-/// Makes a frame of an exported framebuffer, if its pixels are a kind the
-/// encoders take.
-fn dma_buf_frame(exported: ExportedFramebuffer) -> Result<ReadFrame, RuntimeError> {
+/// Makes a frame of `picture` in its exported framebuffer, if its pixels are
+/// a kind the encoders take.
+fn dma_buf_frame(
+    exported: ExportedFramebuffer,
+    picture: &Picture,
+) -> Result<ReadFrame, RuntimeError> {
     let (order, depth) = pixel_format(exported.format).ok_or_else(|| {
         RuntimeError::Capture(format!(
             "the display's pixel format {} cannot be streamed yet",
@@ -775,7 +1001,41 @@ fn dma_buf_frame(exported: ExportedFramebuffer) -> Result<ReadFrame, RuntimeErro
         .map_err(|error| RuntimeError::Capture(error.to_string()))?
         .with_extra_planes(&extra_planes)
         .with_depth(depth);
+    let (source, size, placed) = picture_layout(picture, exported.size);
+    let frame = frame
+        .with_picture(source, size, placed)
+        .map_err(|error| RuntimeError::Capture(error.to_string()))?;
     Ok(ReadFrame { frame, buffer })
+}
+
+/// Returns the part of a `buffer`-sized framebuffer that `picture` shows,
+/// kept within the buffer, the size of the display's frames, and where in
+/// them the picture is, kept within them.
+fn picture_layout(
+    picture: &Picture,
+    buffer: (u32, u32),
+) -> (DmaBufRect, (usize, usize), DmaBufRect) {
+    let span = |start: u32, length: u32, limit: u32| {
+        let limit = limit.max(1);
+        let start = start.min(limit - 1);
+        (start as usize, length.clamp(1, limit - start) as usize)
+    };
+    let rect = |area: Rect, limit: (u32, u32)| {
+        let (x, width) = span(area.x, area.width, limit.0);
+        let (y, height) = span(area.y, area.height, limit.1);
+        DmaBufRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    };
+    let screen = (picture.screen.0.max(1), picture.screen.1.max(1));
+    (
+        rect(picture.source, buffer),
+        (screen.0 as usize, screen.1 as usize),
+        rect(picture.on_screen, screen),
+    )
 }
 
 /// Returns the device and inode of an exported framebuffer's buffer: the
@@ -937,6 +1197,152 @@ mod tests {
         );
         assert_eq!(pixel_order(FORMAT_ABGR2101010), None);
         assert_eq!(pixel_format(fourcc(*b"NV12")), None);
+    }
+
+    /// A plane's geometry, from its source in whole pixels and where it is
+    /// on its CRTC.
+    fn geometry(source: (u64, u64, u64, u64), on_crtc: (i64, i64, u64, u64)) -> PlaneGeometry {
+        let fixed = |pixels: u64| pixels << FIXED_POINT_BITS;
+        PlaneGeometry {
+            source: [
+                fixed(source.0),
+                fixed(source.1),
+                fixed(source.2),
+                fixed(source.3),
+            ],
+            on_crtc,
+            zpos: None,
+        }
+    }
+
+    /// A rectangle.
+    fn rect(x: u32, y: u32, width: u32, height: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The part of a plane that shows is the part on the display, from the
+    /// matching part of its buffer, however the plane is scaled.
+    #[test]
+    fn finds_the_part_of_a_plane_that_shows() {
+        let screen = (3840, 2160);
+        let full = rect(0, 0, 3840, 2160);
+        assert_eq!(
+            visible_part(&geometry((0, 0, 3840, 2160), (0, 0, 3840, 2160)), screen),
+            Some((full, full))
+        );
+        // A small buffer scaled to the whole display.
+        assert_eq!(
+            visible_part(&geometry((0, 0, 73, 73), (0, 0, 3840, 2160)), screen),
+            Some((rect(0, 0, 73, 73), full))
+        );
+        // A window of its own size, somewhere on the display.
+        assert_eq!(
+            visible_part(&geometry((0, 0, 73, 73), (100, 50, 73, 73)), screen),
+            Some((rect(0, 0, 73, 73), rect(100, 50, 73, 73)))
+        );
+        // Half past the left edge, and twice as large as its source.
+        assert_eq!(
+            visible_part(&geometry((0, 0, 100, 50), (-100, 0, 200, 100)), screen),
+            Some((rect(50, 0, 50, 50), rect(0, 0, 100, 100)))
+        );
+        assert_eq!(
+            visible_part(&geometry((0, 0, 64, 64), (3840, 0, 64, 64)), screen),
+            None
+        );
+        assert_eq!(
+            visible_part(&geometry((0, 0, 64, 64), (0, 0, 0, 64)), screen),
+            None
+        );
+    }
+
+    /// A plane showing `on_screen` of a 3840 by 2160 display.
+    fn shown(kind: PlaneKind, stack: u64, framebuffer: u32, on_screen: Rect) -> ShownPlane {
+        ShownPlane {
+            kind,
+            stack,
+            picture: Picture {
+                framebuffer,
+                source: rect(0, 0, on_screen.width, on_screen.height),
+                on_screen,
+                screen: (3840, 2160),
+            },
+        }
+    }
+
+    /// The picture is the topmost plane covering the display, such as the
+    /// desktop on an overlay over a window on the primary plane; otherwise
+    /// the primary plane, wherever it is.
+    #[test]
+    fn chooses_the_plane_covering_the_display() {
+        let screen = (3840, 2160);
+        let full = rect(0, 0, 3840, 2160);
+        let window = rect(100, 50, 73, 73);
+        let underlay = [
+            shown(PlaneKind::Primary, 0, 1, window),
+            shown(PlaneKind::Overlay, 1, 2, full),
+        ];
+        assert_eq!(choose_picture(&underlay, screen).unwrap().framebuffer, 2);
+        let lone_window = [shown(PlaneKind::Primary, 0, 1, window)];
+        let picture = choose_picture(&lone_window, screen).unwrap();
+        assert_eq!((picture.framebuffer, picture.on_screen), (1, window));
+        // A full-screen window on an overlay, over the desktop.
+        let both = [
+            shown(PlaneKind::Primary, 0, 1, full),
+            shown(PlaneKind::Overlay, 3, 2, full),
+        ];
+        assert_eq!(choose_picture(&both, screen).unwrap().framebuffer, 2);
+        // An overlay put under the primary plane.
+        let under = [
+            shown(PlaneKind::Primary, 2, 1, full),
+            shown(PlaneKind::Overlay, 1, 2, full),
+        ];
+        assert_eq!(choose_picture(&under, screen).unwrap().framebuffer, 1);
+        let overlays = [
+            shown(PlaneKind::Overlay, 1, 2, window),
+            shown(PlaneKind::Overlay, 2, 3, rect(0, 0, 640, 480)),
+        ];
+        assert_eq!(choose_picture(&overlays, screen).unwrap().framebuffer, 3);
+        assert_eq!(choose_picture(&[], screen), None);
+    }
+
+    /// Frames have the display's size, with the picture's source kept in
+    /// its buffer and its place kept on the display.
+    #[test]
+    fn lays_the_picture_out_on_the_display() {
+        let picture = Picture {
+            framebuffer: 1,
+            source: rect(0, 0, 73, 73),
+            on_screen: rect(100, 50, 73, 73),
+            screen: (3840, 2160),
+        };
+        let (source, size, placed) = picture_layout(&picture, (73, 73));
+        assert_eq!(source, DmaBufRect::whole(73, 73));
+        assert_eq!(size, (3840, 2160));
+        assert_eq!(
+            placed,
+            DmaBufRect {
+                x: 100,
+                y: 50,
+                width: 73,
+                height: 73,
+            }
+        );
+        // The oldest interface's mode-sized picture of a smaller buffer.
+        let legacy = Picture {
+            source: rect(0, 0, 1920, 1080),
+            on_screen: rect(0, 0, 1920, 1080),
+            screen: (1920, 1080),
+            ..picture
+        };
+        let (source, size, placed) = picture_layout(&legacy, (1920, 1000));
+        assert_eq!(source, DmaBufRect::whole(1920, 1000));
+        assert_eq!(size, (1920, 1080));
+        assert_eq!(placed, DmaBufRect::whole(1920, 1080));
     }
 
     /// A pointer's image is cut down to the pixels that show, with where

@@ -45,6 +45,40 @@ pub struct DmaBufPlane {
     pub pitch: u32,
 }
 
+/// A rectangle of pixels in a frame or its buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DmaBufRect {
+    /// Its first column.
+    pub x: usize,
+    /// Its first row.
+    pub y: usize,
+    /// Its width.
+    pub width: usize,
+    /// Its height.
+    pub height: usize,
+}
+
+impl DmaBufRect {
+    /// Returns the rectangle of all of a `width × height` area.
+    pub fn whole(width: usize, height: usize) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// Returns whether the rectangle is not empty and all inside a
+    /// `width × height` area.
+    fn is_inside(&self, width: usize, height: usize) -> bool {
+        let fits = |start: usize, length: usize, limit: usize| {
+            length > 0 && start.checked_add(length).is_some_and(|end| end <= limit)
+        };
+        fits(self.x, self.width, width) && fits(self.y, self.height, height)
+    }
+}
+
 /// The most planes a modifier adds to the pixels': DRM buffers have four
 /// planes at most.
 pub const MAX_EXTRA_PLANES: usize = 3;
@@ -92,6 +126,13 @@ pub struct DmaBufFrame {
     extra_planes: Vec<DmaBufPlane>,
     /// The bits each colour has.
     depth: PixelDepth,
+    /// The part of the buffer that the picture is.
+    source: DmaBufRect,
+    /// The frame's width and height.
+    frame_size: (usize, usize),
+    /// Where in the frame the picture is, scaled from its source; the rest
+    /// is black.
+    placed: DmaBufRect,
 }
 
 impl DmaBufFrame {
@@ -131,7 +172,48 @@ impl DmaBufFrame {
             },
             extra_planes: Vec::new(),
             depth: PixelDepth::Eight,
+            source: DmaBufRect::whole(layout.width, layout.height),
+            frame_size: (layout.width, layout.height),
+            placed: DmaBufRect::whole(layout.width, layout.height),
         })
+    }
+
+    /// Returns a `size` frame showing the `source` part of the buffer at
+    /// `placed` in it, scaled to fit, and black elsewhere: as a display
+    /// shows a plane whose buffer is larger or smaller than the screen, or
+    /// that covers only part of it. Fails if `source` is not all in the
+    /// buffer, `placed` not all in the frame, or either is empty.
+    pub fn with_picture(
+        mut self,
+        source: DmaBufRect,
+        size: (usize, usize),
+        placed: DmaBufRect,
+    ) -> Result<Self, CodecError> {
+        if !source.is_inside(self.layout.width, self.layout.height)
+            || !placed.is_inside(size.0, size.1)
+        {
+            return Err(CodecError::FrameSize);
+        }
+        self.source = source;
+        self.frame_size = size;
+        self.placed = placed;
+        Ok(self)
+    }
+
+    /// Returns the part of the buffer that the picture is.
+    pub fn source(&self) -> DmaBufRect {
+        self.source
+    }
+
+    /// Returns where in the frame the picture is.
+    pub fn placed(&self) -> DmaBufRect {
+        self.placed
+    }
+
+    /// Returns whether the frame is all of its buffer, as it is.
+    pub fn is_whole_buffer(&self) -> bool {
+        let whole = DmaBufRect::whole(self.layout.width, self.layout.height);
+        self.source == whole && self.placed == whole
     }
 
     /// Returns the frame with colours of `depth` bits.
@@ -158,17 +240,19 @@ impl DmaBufFrame {
         &self.extra_planes
     }
 
-    /// Returns the width in pixels.
+    /// Returns the frame's width in pixels: the buffer's, unless
+    /// [`DmaBufFrame::with_picture`] says otherwise.
     pub fn width(&self) -> usize {
-        self.layout.width
+        self.frame_size.0
     }
 
-    /// Returns the height in pixels.
+    /// Returns the frame's height in pixels.
     pub fn height(&self) -> usize {
-        self.layout.height
+        self.frame_size.1
     }
 
-    /// Returns where the frame is in its buffer.
+    /// Returns where the frame is in its buffer: the whole buffer's layout,
+    /// of which the picture is [`DmaBufFrame::source`].
     pub fn layout(&self) -> DmaBufLayout {
         self.layout
     }
@@ -244,6 +328,40 @@ mod tests {
         assert_eq!(frame.identity(), same.identity());
         let other = DmaBufFrame::new(buffer(512), layout(64, 2, 256)).unwrap();
         assert_ne!(frame.identity(), other.identity());
+    }
+
+    /// A frame is all of its buffer until given a picture, whose source
+    /// must be in the buffer and place in the frame; its size is then the
+    /// frame's.
+    #[test]
+    fn shows_part_of_its_buffer() {
+        let frame = || DmaBufFrame::new(buffer(64 * 4 * 8), layout(64, 8, 256)).unwrap();
+        assert!(frame().is_whole_buffer());
+        let source = DmaBufRect {
+            x: 8,
+            y: 2,
+            width: 32,
+            height: 4,
+        };
+        let placed = DmaBufRect {
+            x: 100,
+            y: 10,
+            width: 320,
+            height: 40,
+        };
+        let shown = frame().with_picture(source, (640, 80), placed).unwrap();
+        assert!(!shown.is_whole_buffer());
+        assert_eq!((shown.source(), shown.placed()), (source, placed));
+        assert_eq!((shown.width(), shown.height()), (640, 80));
+        assert_eq!(shown.layout().width, 64);
+        let outside = DmaBufRect { x: 40, ..source };
+        assert!(frame().with_picture(outside, (640, 80), placed).is_err());
+        let empty = DmaBufRect {
+            height: 0,
+            ..source
+        };
+        assert!(frame().with_picture(empty, (640, 80), placed).is_err());
+        assert!(frame().with_picture(source, (400, 80), placed).is_err());
     }
 
     /// Empty frames, and linear rows longer than their pitch, are refused.

@@ -96,27 +96,35 @@ impl Drop for MappedDmaBuf<'_> {
     }
 }
 
-/// Reads a frame of 8-bit colours in a linear DMA-BUF into memory, or
-/// returns `None` if it is not linear, has deeper colours, or cannot be
-/// mapped.
+/// Reads a frame of 8-bit colours in a linear DMA-BUF into memory, its
+/// picture scaled to its place in it, or returns `None` if it is not
+/// linear, has deeper colours, or cannot be mapped.
 pub(super) fn read_linear(frame: &DmaBufFrame) -> Option<Yuv420Frame> {
     let layout = frame.layout();
     if layout.modifier != DRM_FORMAT_MOD_LINEAR || frame.depth() != PixelDepth::Eight {
         return None;
     }
     let size = usize::try_from(frame.size()).ok()?;
-    let start = layout.offset as usize;
+    let region = frame.source();
     let pitch = layout.pitch as usize;
-    let end = start + pitch * (layout.height - 1) + layout.width * PIXEL_BYTES;
+    let start = layout.offset as usize + region.y * pitch + region.x * PIXEL_BYTES;
+    let end = start + pitch * (region.height - 1) + region.width * PIXEL_BYTES;
     if end > size {
         return None;
     }
     let mapped = MappedDmaBuf::map(frame.descriptor(), size)?;
-    Yuv420Frame::from_rgb32(
-        layout.width,
-        layout.height,
+    let picture = Yuv420Frame::from_rgb32(
+        region.width,
+        region.height,
         pitch,
         layout.order,
         &mapped.bytes()[start..],
-    )
+    )?;
+    let placed = frame.placed();
+    Some(picture.scaled(placed.width, placed.height).placed_on_black(
+        frame.width(),
+        frame.height(),
+        placed.x,
+        placed.y,
+    ))
 }
