@@ -18,7 +18,9 @@ use super::ffi::{
     ProcPipelineParameters, SurfaceAttrib, VaId, Zeroed,
 };
 use super::{Display, PictureBuffers};
-use crate::{BufferIdentity, CodecError, DmaBufFrame, DmaBufLayout, PixelDepth, Rgb32Order};
+use crate::{
+    BufferIdentity, CodecError, DmaBufFrame, DmaBufLayout, DmaBufRect, PixelDepth, Rgb32Order,
+};
 
 /// The most imported buffers kept. Compositors share a screen through a
 /// few buffers they reuse, so this keeps all of them, and bounds the
@@ -113,6 +115,8 @@ pub(super) struct GpuConversion {
     context: VaId,
     /// The output: the encoder's input surface.
     output: VaId,
+    /// The output's width and height.
+    output_size: (u32, u32),
     /// The buffers imported lately, the most recently used last.
     imports: Vec<Import>,
     /// Whether a frame has been converted yet, which is logged once.
@@ -156,6 +160,7 @@ impl GpuConversion {
             config,
             context: ffi::VA_INVALID_ID,
             output,
+            output_size: (width, height),
             imports: Vec::new(),
             converted: false,
         };
@@ -215,16 +220,26 @@ impl GpuConversion {
         Ok(())
     }
 
-    /// Converts `frame` into the output surface, scaling it to the
-    /// output's size, and waits until the output holds it.
+    /// Converts `frame`'s picture into the output surface, scaling it to
+    /// the output's size, and waits until the output holds it.
     pub(super) fn convert(
         &mut self,
         display: &Display,
         frame: &DmaBufFrame,
     ) -> Result<(), CodecError> {
         let surface = self.import(display, frame).map_err(unsupported)?;
+        // The picture's part of the surface and its place in the output,
+        // which must outlive the rendering; none is all of either.
+        let (source, placed) = picture_regions(frame, self.output_size)?;
+        let region = |rectangle: &Option<ffi::Rectangle>| {
+            rectangle
+                .as_ref()
+                .map_or(std::ptr::null(), std::ptr::from_ref)
+        };
         let parameters = ProcPipelineParameters {
             surface,
+            surface_region: region(&source),
+            output_region: region(&placed),
             surface_color_standard: ffi::COLOR_STANDARD_BT709,
             output_background_color: BACKGROUND_COLOR,
             output_color_standard: ffi::COLOR_STANDARD_BT709,
@@ -344,6 +359,54 @@ fn bt709() -> ProcColorProperties {
     }
 }
 
+/// Returns the part of `frame`'s buffer that its picture is, and where it
+/// goes in an `output`-sized surface, the frame scaled to it; `None` for
+/// all of the buffer or the output.
+fn picture_regions(
+    frame: &DmaBufFrame,
+    output: (u32, u32),
+) -> Result<(Option<ffi::Rectangle>, Option<ffi::Rectangle>), CodecError> {
+    let layout = frame.layout();
+    let source = frame.source();
+    let source = (source != DmaBufRect::whole(layout.width, layout.height))
+        .then(|| rectangle(source))
+        .transpose()?;
+    let placed = frame.placed();
+    let placed = if placed == DmaBufRect::whole(frame.width(), frame.height()) {
+        None
+    } else {
+        // From the frame's pixels to the output's.
+        let scale = |value: usize, to: u32, from: usize| {
+            (value as u64 * u64::from(to) / from.max(1) as u64) as usize
+        };
+        let (x, y) = (
+            scale(placed.x, output.0, frame.width()),
+            scale(placed.y, output.1, frame.height()),
+        );
+        let right = scale(placed.x + placed.width, output.0, frame.width());
+        let bottom = scale(placed.y + placed.height, output.1, frame.height());
+        Some(rectangle(DmaBufRect {
+            x,
+            y,
+            width: (right - x).max(1),
+            height: (bottom - y).max(1),
+        })?)
+    };
+    Ok((source, placed))
+}
+
+/// Returns `rect` as libva's rectangle, if it fits one.
+fn rectangle(rect: DmaBufRect) -> Result<ffi::Rectangle, CodecError> {
+    let position = |value: usize| i16::try_from(value).map_err(|_| CodecError::FrameSize);
+    let length = |value: usize| u16::try_from(value).map_err(|_| CodecError::FrameSize);
+    Ok(ffi::Rectangle {
+        x: position(rect.x)?,
+        y: position(rect.y)?,
+        width: length(rect.width)?,
+        height: length(rect.height)?,
+    })
+}
+
 /// Returns the descriptor importing `frame`'s buffer.
 fn descriptor(frame: &DmaBufFrame) -> DrmPrimeSurfaceDescriptor {
     let layout = frame.layout();
@@ -381,8 +444,9 @@ fn descriptor(frame: &DmaBufFrame) -> DrmPrimeSurfaceDescriptor {
 
 /// Imports `frame`'s buffer as a surface.
 fn import_surface(display: &Display, frame: &DmaBufFrame) -> Result<VaId, CodecError> {
-    let width = u32::try_from(frame.width()).map_err(|_| CodecError::FrameSize)?;
-    let height = u32::try_from(frame.height()).map_err(|_| CodecError::FrameSize)?;
+    let layout = frame.layout();
+    let width = u32::try_from(layout.width).map_err(|_| CodecError::FrameSize)?;
+    let height = u32::try_from(layout.height).map_err(|_| CodecError::FrameSize)?;
     let mut descriptor = descriptor(frame);
     // The memory type comes first: drivers read the descriptor as the
     // memory type already given says.
@@ -495,6 +559,80 @@ mod tests {
             formats(Rgb32Order::Bgr, PixelDepth::Ten).rt_format,
             ffi::RT_FORMAT_RGB32_10
         );
+    }
+
+    /// A picture that is part of its buffer is converted from that part,
+    /// and one placed in part of its frame into that part of the output,
+    /// scaled to it; one that is all of both, from and into all of them.
+    #[test]
+    fn converts_the_pictures_region() {
+        let layout = DmaBufLayout {
+            width: 3840,
+            height: 2160,
+            order: Rgb32Order::Bgr,
+            modifier: DRM_FORMAT_MOD_LINEAR,
+            offset: 0,
+            pitch: 15_360,
+        };
+        let frame = || DmaBufFrame::new(OwnedFd::from(File::open("/dev/null").unwrap()), layout);
+        let output = (1920, 1080);
+        assert_eq!(
+            picture_regions(&frame().unwrap(), output).unwrap(),
+            (None, None)
+        );
+        let right_half = DmaBufRect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let size = (1920, 1080);
+        let part = frame()
+            .unwrap()
+            .with_picture(right_half, size, DmaBufRect::whole(1920, 1080))
+            .unwrap();
+        assert_eq!(
+            picture_regions(&part, output).unwrap(),
+            (
+                Some(ffi::Rectangle {
+                    x: 1920,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                }),
+                None
+            )
+        );
+        // A window of 73 by 73 pixels at (100, 50) on a 3840 by 2160
+        // display, streamed at half its size.
+        let window = DmaBufRect {
+            x: 0,
+            y: 0,
+            width: 73,
+            height: 73,
+        };
+        let placed = DmaBufRect {
+            x: 100,
+            y: 50,
+            width: 73,
+            height: 73,
+        };
+        let small = frame()
+            .unwrap()
+            .with_picture(window, (3840, 2160), placed)
+            .unwrap();
+        assert_eq!(
+            picture_regions(&small, output).unwrap().1,
+            Some(ffi::Rectangle {
+                x: 50,
+                y: 25,
+                width: 36,
+                height: 36,
+            })
+        );
+        // The import is of the whole buffer still.
+        let described = descriptor(&part);
+        assert_eq!((described.width, described.height), (3840, 2160));
     }
 
     /// The planes a modifier adds, such as a display's compression

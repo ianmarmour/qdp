@@ -472,12 +472,45 @@ pub(super) struct Plane {
 /// What a plane is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PlaneKind {
-    /// The picture under everything.
+    /// The picture under everything, as a rule.
     Primary,
     /// The pointer.
     Cursor,
-    /// Anything else, which desktops seldom use.
+    /// Anything else: a window a desktop shows straight from its buffer, or
+    /// the desktop itself, over a window on the primary plane.
     Overlay,
+}
+
+/// The atomic properties that say where a plane is: the part of its
+/// framebuffer it shows, where on its CRTC, and its place among the planes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GeometryProperties {
+    /// `SRC_X`, `SRC_Y`, `SRC_W` and `SRC_H`.
+    source: [u32; 4],
+    /// `CRTC_X`, `CRTC_Y`, `CRTC_W` and `CRTC_H`.
+    on_crtc: [u32; 4],
+    /// `zpos`, if the card has it.
+    zpos: Option<u32>,
+}
+
+/// The names of [`GeometryProperties`]' properties, in their order, `zpos`
+/// last.
+const GEOMETRY_PROPERTIES: [&str; 9] = [
+    "SRC_X", "SRC_Y", "SRC_W", "SRC_H", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H", "zpos",
+];
+
+/// Where a plane is, as its atomic properties say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct PlaneGeometry {
+    /// The part of its framebuffer it shows: x, y, width and height, in
+    /// 16.16 fixed-point pixels.
+    pub source: [u64; 4],
+    /// Where it shows on its CRTC: x and y, which may be before the
+    /// display's edges, and width and height, in pixels.
+    pub on_crtc: (i64, i64, u64, u64),
+    /// Its place among the CRTC's planes, higher over lower, if the card
+    /// tells it.
+    pub zpos: Option<u64>,
 }
 
 /// A framebuffer exported as a DMA-BUF.
@@ -702,6 +735,71 @@ impl Card {
             PLANE_TYPE_PRIMARY => PlaneKind::Primary,
             PLANE_TYPE_CURSOR => PlaneKind::Cursor,
             _ => PlaneKind::Overlay,
+        }))
+    }
+
+    /// Returns the properties that say where a plane is, or `None` if this
+    /// program does not see them, as it sees them only through the atomic
+    /// interface.
+    pub(super) fn geometry_properties(&self, plane: u32) -> io::Result<Option<GeometryProperties>> {
+        let mut found = [None; GEOMETRY_PROPERTIES.len()];
+        for (property, _) in self.plane_properties(plane)? {
+            let name = self.property_name(property)?;
+            if let Some(index) = GEOMETRY_PROPERTIES
+                .iter()
+                .position(|&wanted| wanted == name)
+            {
+                found[index] = Some(property);
+            }
+        }
+        let required = |range: std::ops::Range<usize>| -> Option<[u32; 4]> {
+            let mut properties = [0; 4];
+            for (slot, index) in properties.iter_mut().zip(range) {
+                *slot = found[index]?;
+            }
+            Some(properties)
+        };
+        Ok(required(0..4)
+            .zip(required(4..8))
+            .map(|(source, on_crtc)| GeometryProperties {
+                source,
+                on_crtc,
+                zpos: found[8],
+            }))
+    }
+
+    /// Returns where a plane is now, from its `properties`, or `None` if
+    /// they are gone.
+    pub(super) fn plane_geometry(
+        &self,
+        plane: u32,
+        properties: &GeometryProperties,
+    ) -> io::Result<Option<PlaneGeometry>> {
+        let values = self.plane_properties(plane)?;
+        let value = |wanted: u32| {
+            values
+                .iter()
+                .find(|(property, _)| *property == wanted)
+                .map(|&(_, value)| value)
+        };
+        let four = |properties: [u32; 4]| -> Option<[u64; 4]> {
+            Some([
+                value(properties[0])?,
+                value(properties[1])?,
+                value(properties[2])?,
+                value(properties[3])?,
+            ])
+        };
+        let (Some(source), Some(on_crtc)) = (four(properties.source), four(properties.on_crtc))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PlaneGeometry {
+            source,
+            // The position is signed: a plane may start before the
+            // display's edges.
+            on_crtc: (on_crtc[0] as i64, on_crtc[1] as i64, on_crtc[2], on_crtc[3]),
+            zpos: properties.zpos.and_then(value),
         }))
     }
 

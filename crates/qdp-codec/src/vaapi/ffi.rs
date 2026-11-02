@@ -637,6 +637,20 @@ pub(super) struct ProcColorProperties {
     pub(super) reserved: [u8; 3],
 }
 
+/// `VARectangle`: a part of a surface.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Rectangle {
+    /// `x`.
+    pub(super) x: i16,
+    /// `y`.
+    pub(super) y: i16,
+    /// `width`.
+    pub(super) width: u16,
+    /// `height`.
+    pub(super) height: u16,
+}
+
 /// `VAProcPipelineParameterBuffer`, on 64-bit targets.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -644,11 +658,11 @@ pub(super) struct ProcPipelineParameters {
     /// `surface`.
     pub(super) surface: VaId,
     /// `surface_region`: null for the whole surface.
-    pub(super) surface_region: *const c_void,
+    pub(super) surface_region: *const Rectangle,
     /// `surface_color_standard`.
     pub(super) surface_color_standard: c_int,
     /// `output_region`: null for the whole output.
-    pub(super) output_region: *const c_void,
+    pub(super) output_region: *const Rectangle,
     /// `output_background_color`.
     pub(super) output_background_color: u32,
     /// `output_color_standard`.
@@ -1002,6 +1016,7 @@ mod tests {
         assert_eq!(offset_of!(DrmPrimeLayer, pitch), 40);
         assert_eq!(size_of::<DrmPrimeLayer>(), 56);
         assert_eq!(size_of::<ProcColorProperties>(), 8);
+        assert_eq!(size_of::<Rectangle>(), 8);
         assert_eq!(size_of::<ProcPipelineParameters>(), 224);
         assert_eq!(offset_of!(ProcPipelineParameters, surface_region), 8);
         assert_eq!(

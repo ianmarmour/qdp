@@ -437,6 +437,51 @@ impl Yuv420Frame {
         }
     }
 
+    /// Returns a black `width × height` frame with this one in it at
+    /// `(x, y)`, moved to even columns and rows so that its chroma lines up,
+    /// and cut where it goes past the edges; or the frame itself if it is
+    /// all of such a frame.
+    pub fn placed_on_black(self, width: usize, height: usize, x: usize, y: usize) -> Self {
+        let (x, y) = (x & !1, y & !1);
+        if (x, y, self.width, self.height) == (0, 0, width, height) {
+            return self;
+        }
+        let mut placed = Self::black(width, height);
+        let paste =
+            |to: &mut [u8], to_width: usize, from: &[u8], from_width: usize, at: (usize, usize)| {
+                let (column, row) = at;
+                if column >= to_width || from_width == 0 {
+                    return;
+                }
+                let length = from_width.min(to_width - column);
+                for (to_row, from_row) in to
+                    .chunks_exact_mut(to_width)
+                    .skip(row)
+                    .zip(from.chunks_exact(from_width))
+                {
+                    to_row[column..column + length].copy_from_slice(&from_row[..length]);
+                }
+            };
+        let chroma_width = placed.chroma_width();
+        let source_chroma_width = self.chroma_width();
+        paste(&mut placed.y, width, &self.y, self.width, (x, y));
+        paste(
+            &mut placed.u,
+            chroma_width,
+            &self.u,
+            source_chroma_width,
+            (x / 2, y / 2),
+        );
+        paste(
+            &mut placed.v,
+            chroma_width,
+            &self.v,
+            source_chroma_width,
+            (x / 2, y / 2),
+        );
+        placed
+    }
+
     /// Returns the frame scaled to `width × height` pixels, each sample the
     /// average of the samples it covers, as suits making a frame smaller, or
     /// the frame itself if it has that size.
@@ -487,6 +532,58 @@ fn chroma_size(width: usize, height: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame placed on black keeps its samples where it is put, moved to
+    /// an even place and cut at the edges, and leaves the rest black.
+    #[test]
+    fn places_a_frame_on_black() {
+        let white =
+            Yuv420Frame::from_planes(4, 2, vec![235; 8], vec![100; 2], vec![200; 2]).unwrap();
+        let placed = white.clone().placed_on_black(8, 4, 5, 1);
+        assert_eq!((placed.width(), placed.height()), (8, 4));
+        // At (4, 0): luma rows 0 and 1, columns 4 to 7.
+        assert_eq!(
+            &placed.y()[0..8],
+            &[
+                LIMITED_BLACK,
+                LIMITED_BLACK,
+                LIMITED_BLACK,
+                LIMITED_BLACK,
+                235,
+                235,
+                235,
+                235
+            ]
+        );
+        assert_eq!(&placed.y()[16..24], &[LIMITED_BLACK; 8]);
+        assert_eq!(
+            placed.u(),
+            &[
+                NEUTRAL_CHROMA,
+                NEUTRAL_CHROMA,
+                100,
+                100,
+                NEUTRAL_CHROMA,
+                NEUTRAL_CHROMA,
+                NEUTRAL_CHROMA,
+                NEUTRAL_CHROMA
+            ]
+        );
+        let cut = white.clone().placed_on_black(6, 2, 4, 0);
+        assert_eq!(
+            &cut.y()[0..6],
+            &[
+                LIMITED_BLACK,
+                LIMITED_BLACK,
+                LIMITED_BLACK,
+                LIMITED_BLACK,
+                235,
+                235
+            ]
+        );
+        let same = white.clone().placed_on_black(4, 2, 0, 0);
+        assert_eq!(same.y(), white.y());
+    }
 
     /// An NV12 picture is copied plane by plane, padding left out and
     /// chroma split, for an odd size.
