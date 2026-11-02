@@ -1,8 +1,11 @@
 //! The on-screen gamepad the phone and tablet apps can show over the
-//! stream, for games on a device without a controller: two sticks, a
-//! directional pad, the face buttons, the shoulder buttons and triggers, the
-//! stick buttons, and Select and Start, laid out as on a typical controller,
-//! within reach of the thumbs.
+//! stream, for games on a device without a controller, laid out as phone
+//! games lay theirs out, within reach of the thumbs: the left stick in the
+//! bottom left corner, the directional pad beside it and the left stick's
+//! button above it; A, the largest, in the bottom right corner, B, X and Y on
+//! an arc around it, and the right stick beside them, its button above it;
+//! the shoulder buttons and triggers in the top corners; and Select and
+//! Start between them.
 //!
 //! The apps draw the controls [`VirtualGamepad::controls`] returns and pass
 //! every touch on them to [`VirtualGamepad::touch`], which works out the
@@ -15,6 +18,8 @@
 //! UIKit's points, and [`Screen::density`] says how many make a
 //! density-independent pixel, in which the layout is designed. On a screen
 //! smaller than the layout is designed for, it scales down to fit.
+
+use std::f32::consts::FRAC_1_SQRT_2;
 
 use qdp_runtime::TouchPhase;
 
@@ -48,18 +53,22 @@ pub const RIGHT: u32 = 1 << 3;
 /// The space between the controls and the screen's safe area, in dp.
 const MARGIN: f32 = 24.0;
 
-/// The radius of a stick's base, and of the face buttons' cluster, in dp.
+/// The radius of a stick's base, in dp.
 const STICK_RADIUS: f32 = 60.0;
 
 /// The directional pad's width and height, in dp.
-const DPAD_SIZE: f32 = 120.0;
+const DPAD_SIZE: f32 = 112.0;
 
-/// A face button's radius, in dp: 48 dp across, the least a touch target
-/// should be.
-const FACE_BUTTON_RADIUS: f32 = 24.0;
+/// The radius of A, the main button, in the bottom right corner, in dp.
+const MAIN_BUTTON_RADIUS: f32 = 38.0;
 
-/// How far each face button's centre is from the cluster's, in dp.
-const FACE_SPREAD: f32 = STICK_RADIUS - FACE_BUTTON_RADIUS;
+/// The radius of B, X and Y, on an arc around A, in dp: 52 dp across,
+/// more than the 48 a touch target should be.
+const ARC_BUTTON_RADIUS: f32 = 26.0;
+
+/// How far the arc's buttons' centres are from A's, in dp: far enough that
+/// neighbours, 45° apart on the arc, keep [`CLEARANCE`] between them.
+const ARC_SPREAD: f32 = 84.0;
 
 /// The radius of a stick button and of Select and Start, in dp.
 const SMALL_BUTTON_RADIUS: f32 = 20.0;
@@ -76,54 +85,64 @@ const SHOULDER_GAP: f32 = 8.0;
 /// The least space between neighbouring controls, in dp.
 const CLEARANCE: f32 = 12.0;
 
-/// From the safe area's side to the centres of the outer controls, the left
-/// stick and the face buttons, in dp.
-const OUTER_COLUMN: f32 = MARGIN + STICK_RADIUS;
+/// From the safe area's left edge to the left stick's centre, in the
+/// corner, in dp.
+const LEFT_STICK_COLUMN: f32 = MARGIN + STICK_RADIUS;
 
-/// From the safe area's side to the centres of the inner controls, the
-/// directional pad and the right stick, in dp: below the outer ones and
-/// beside them, as on a typical controller.
-const INNER_COLUMN: f32 = OUTER_COLUMN + 130.0;
+/// From the safe area's left edge to the directional pad's centre, beside
+/// the left stick, in dp.
+const DPAD_COLUMN: f32 = LEFT_STICK_COLUMN + STICK_RADIUS + CLEARANCE + DPAD_SIZE / 2.0;
 
-/// From the safe area's side to a stick button's centre, in dp: beside the
-/// outer control.
-const STICK_BUTTON_COLUMN: f32 = OUTER_COLUMN + STICK_RADIUS + CLEARANCE + SMALL_BUTTON_RADIUS;
+/// From the safe area's right edge to A's centre, in the corner, in dp.
+const MAIN_BUTTON_COLUMN: f32 = MARGIN + MAIN_BUTTON_RADIUS;
 
-/// From the safe area's bottom to the centres of the lower controls, the
-/// directional pad and the right stick, in dp.
-const LOWER_ROW: f32 = MARGIN + DPAD_SIZE / 2.0;
+/// From the safe area's right edge to the right stick's centre, beside the
+/// arc, in dp.
+const RIGHT_STICK_COLUMN: f32 =
+    MAIN_BUTTON_COLUMN + ARC_SPREAD + ARC_BUTTON_RADIUS + CLEARANCE + STICK_RADIUS;
 
-/// From the safe area's bottom to the centres of the upper controls, the
-/// left stick and the face buttons, in dp.
-const UPPER_ROW: f32 = LOWER_ROW + 80.0;
+/// From the safe area's bottom edge to the sticks' centres, in dp.
+const STICK_ROW: f32 = MARGIN + STICK_RADIUS;
 
-/// From the safe area's bottom to a stick button's centre, in dp: above the
-/// inner control.
-const STICK_BUTTON_ROW: f32 = UPPER_ROW + SMALL_BUTTON_RADIUS;
+/// From the safe area's bottom edge to the directional pad's centre, in dp.
+const DPAD_ROW: f32 = MARGIN + DPAD_SIZE / 2.0;
 
-/// From the safe area's bottom to Select's and Start's centres, in dp.
+/// From the safe area's bottom edge to A's centre, in dp.
+const MAIN_BUTTON_ROW: f32 = MARGIN + MAIN_BUTTON_RADIUS;
+
+/// From the safe area's bottom edge to the stick buttons' centres, above
+/// the sticks, in dp.
+const STICK_BUTTON_ROW: f32 = STICK_ROW + STICK_RADIUS + CLEARANCE + SMALL_BUTTON_RADIUS;
+
+/// From the safe area's top edge to Select's and Start's centres, between
+/// the shoulder buttons, in dp.
 const MIDDLE_ROW: f32 = MARGIN + SMALL_BUTTON_RADIUS;
 
-/// The space between Select and Start, in dp.
-const MIDDLE_GAP: f32 = 16.0;
+/// The space between Select and Start, in dp, which leaves room between
+/// them for the app's own button that opens the stream's menu.
+const MIDDLE_GAP: f32 = 80.0;
 
-/// The width the layout is designed for, in dp: narrower safe areas scale
-/// it down.
-const DESIGN_WIDTH: f32 = 2.0
-    * (INNER_COLUMN + DPAD_SIZE / 2.0 + CLEARANCE + 2.0 * SMALL_BUTTON_RADIUS + MIDDLE_GAP / 2.0);
+/// The width the layout is designed for, in dp, the bottom row's: narrower
+/// safe areas scale it down.
+const DESIGN_WIDTH: f32 =
+    DPAD_COLUMN + DPAD_SIZE / 2.0 + CLEARANCE + RIGHT_STICK_COLUMN + STICK_RADIUS;
 
 /// The height the layout is designed for, in dp: shorter safe areas scale
 /// it down.
-const DESIGN_HEIGHT: f32 =
-    MARGIN + 2.0 * SHOULDER_HEIGHT + SHOULDER_GAP + CLEARANCE + UPPER_ROW + STICK_RADIUS;
+const DESIGN_HEIGHT: f32 = STICK_BUTTON_ROW
+    + SMALL_BUTTON_RADIUS
+    + CLEARANCE
+    + MARGIN
+    + 2.0 * SHOULDER_HEIGHT
+    + SHOULDER_GAP;
 
 /// How far beyond a button or the directional pad a touch still takes it,
 /// in dp.
 const HIT_SLOP: f32 = 8.0;
 
 /// How far from a stick's centre a touch still takes it, as a share of its
-/// radius.
-const STICK_REACH: f32 = 1.25;
+/// radius: wider than the stick, as thumbs land on it without looking.
+const STICK_REACH: f32 = 1.4;
 
 /// How far from the directional pad's centre a touch presses a direction,
 /// as a share of half its size.
@@ -394,9 +413,15 @@ impl VirtualGamepad {
             },
         };
         let lower_shoulder = MARGIN + SHOULDER_HEIGHT + SHOULDER_GAP;
-        let upper = from_bottom(UPPER_ROW);
-        let face = from_right(OUTER_COLUMN);
-        let spread = FACE_SPREAD * unit;
+        let middle_offset = (MIDDLE_GAP / 2.0 + SMALL_BUTTON_RADIUS) * unit;
+        // A, in the corner, and B, X and Y on an arc around it, from its top
+        // to its left.
+        let main = Point {
+            x: from_right(MAIN_BUTTON_COLUMN),
+            y: from_bottom(MAIN_BUTTON_ROW),
+        };
+        let spread = ARC_SPREAD * unit;
+        let diagonal = spread * FRAC_1_SQRT_2;
         self.controls = vec![
             shoulder(Control::LeftTrigger, from_left(MARGIN), from_top(MARGIN)),
             shoulder(
@@ -415,49 +440,54 @@ impl VirtualGamepad {
                 from_top(lower_shoulder),
             ),
             circle(
-                Control::LeftStick,
-                from_left(OUTER_COLUMN),
-                upper,
-                STICK_RADIUS,
-            ),
-            circle(
-                Control::DPad,
-                from_left(INNER_COLUMN),
-                from_bottom(LOWER_ROW),
-                DPAD_SIZE / 2.0,
-            ),
-            circle(Control::Y, face, upper - spread, FACE_BUTTON_RADIUS),
-            circle(Control::X, face - spread, upper, FACE_BUTTON_RADIUS),
-            circle(Control::B, face + spread, upper, FACE_BUTTON_RADIUS),
-            circle(Control::A, face, upper + spread, FACE_BUTTON_RADIUS),
-            circle(
-                Control::RightStick,
-                from_right(INNER_COLUMN),
-                from_bottom(LOWER_ROW),
-                STICK_RADIUS,
-            ),
-            circle(
-                Control::LeftStickButton,
-                from_left(STICK_BUTTON_COLUMN),
-                from_bottom(STICK_BUTTON_ROW),
-                SMALL_BUTTON_RADIUS,
-            ),
-            circle(
-                Control::RightStickButton,
-                from_right(STICK_BUTTON_COLUMN),
-                from_bottom(STICK_BUTTON_ROW),
-                SMALL_BUTTON_RADIUS,
-            ),
-            circle(
                 Control::Select,
-                middle - (MIDDLE_GAP / 2.0 + SMALL_BUTTON_RADIUS) * unit,
-                from_bottom(MIDDLE_ROW),
+                middle - middle_offset,
+                from_top(MIDDLE_ROW),
                 SMALL_BUTTON_RADIUS,
             ),
             circle(
                 Control::Start,
-                middle + (MIDDLE_GAP / 2.0 + SMALL_BUTTON_RADIUS) * unit,
-                from_bottom(MIDDLE_ROW),
+                middle + middle_offset,
+                from_top(MIDDLE_ROW),
+                SMALL_BUTTON_RADIUS,
+            ),
+            circle(
+                Control::LeftStick,
+                from_left(LEFT_STICK_COLUMN),
+                from_bottom(STICK_ROW),
+                STICK_RADIUS,
+            ),
+            circle(
+                Control::LeftStickButton,
+                from_left(LEFT_STICK_COLUMN),
+                from_bottom(STICK_BUTTON_ROW),
+                SMALL_BUTTON_RADIUS,
+            ),
+            circle(
+                Control::DPad,
+                from_left(DPAD_COLUMN),
+                from_bottom(DPAD_ROW),
+                DPAD_SIZE / 2.0,
+            ),
+            circle(Control::A, main.x, main.y, MAIN_BUTTON_RADIUS),
+            circle(Control::B, main.x, main.y - spread, ARC_BUTTON_RADIUS),
+            circle(Control::X, main.x - spread, main.y, ARC_BUTTON_RADIUS),
+            circle(
+                Control::Y,
+                main.x - diagonal,
+                main.y - diagonal,
+                ARC_BUTTON_RADIUS,
+            ),
+            circle(
+                Control::RightStick,
+                from_right(RIGHT_STICK_COLUMN),
+                from_bottom(STICK_ROW),
+                STICK_RADIUS,
+            ),
+            circle(
+                Control::RightStickButton,
+                from_right(RIGHT_STICK_COLUMN),
+                from_bottom(STICK_BUTTON_ROW),
                 SMALL_BUTTON_RADIUS,
             ),
         ];
@@ -769,20 +799,27 @@ mod tests {
                     "{screen:?}: {view:?}"
                 );
             }
+            // Round controls keep clear of each other as circles; the
+            // directional pad, shoulder buttons and triggers as rectangles.
+            let round = |view: &ControlView| {
+                !matches!(
+                    view.control,
+                    Control::DPad
+                        | Control::LeftShoulder
+                        | Control::RightShoulder
+                        | Control::LeftTrigger
+                        | Control::RightTrigger
+                )
+            };
             for (index, a) in views.iter().enumerate() {
                 for b in &views[index + 1..] {
-                    // The face buttons' and sticks' squares are wider than
-                    // their circles, and the directional pad's corners are
-                    // empty: those may share corners.
-                    let round = |view: &ControlView| !matches!(view.control, Control::DPad);
-                    if round(a) && round(b) && distance(a.frame.center(), b.frame.center()) > 0.0 {
-                        let apart = distance(a.frame.center(), b.frame.center());
-                        assert!(
-                            apart >= (a.frame.width + b.frame.width) / 2.0
-                                || !a.frame.overlaps(&b.frame),
-                            "{screen:?}: {a:?} and {b:?}"
-                        );
-                    }
+                    let clear = if round(a) && round(b) {
+                        distance(a.frame.center(), b.frame.center())
+                            >= (a.frame.width + b.frame.width) / 2.0
+                    } else {
+                        !a.frame.overlaps(&b.frame)
+                    };
+                    assert!(clear, "{screen:?}: {a:?} and {b:?}");
                 }
             }
         }

@@ -24,23 +24,23 @@ import androidx.compose.ui.unit.dp
 import io.github.ianmarmour.qdp.R
 import io.github.ianmarmour.qdp.VirtualControl
 
-/** A control's fill at rest: faint, so that the picture shows through. */
-private val FILL = Color.White.copy(alpha = 0.14f)
+/** A control's fill at rest: dark and translucent, so that the picture shows through, and bright scenes too. */
+private val FILL = Color.Black.copy(alpha = 0.28f)
 
 /** A control's fill while held. */
-private val FILL_HELD = Color.White.copy(alpha = 0.42f)
+private val FILL_HELD = Color.White.copy(alpha = 0.35f)
 
-/** A control's outline. */
-private val OUTLINE = Color.White.copy(alpha = 0.55f)
+/** A control's ring. */
+private val OUTLINE = Color.White.copy(alpha = 0.6f)
 
 /** Labels, arrows and glyphs. */
 private val INK = Color.White.copy(alpha = 0.9f)
 
 /** A stick's knob at rest. */
-private val KNOB = Color.White.copy(alpha = 0.35f)
+private val KNOB = Color.White.copy(alpha = 0.4f)
 
 /** A stick's knob while held. */
-private val KNOB_HELD = Color.White.copy(alpha = 0.7f)
+private val KNOB_HELD = Color.White.copy(alpha = 0.75f)
 
 /** The face buttons' letters, in the colors controllers print them in. */
 private val FACE_COLORS = mapOf(
@@ -80,16 +80,16 @@ private const val SHOULDER_CORNER_SHARE = 0.35f
 private const val ARROW_SHARE = 0.3f
 
 /**
- * The on-screen gamepad, drawn over the stream as the core lays it out:
- * faint controls the picture shows through, brighter where a thumb holds
- * them, the sticks' knobs following their tilt.
+ * The on-screen gamepad, drawn over the stream as the core lays it out, as
+ * phone games draw theirs: translucent rings the picture shows through,
+ * lit where a thumb holds them, the sticks' knobs following their tilt.
  */
 @Composable
 fun OnScreenController(controls: List<VirtualControl>) {
     val measurer = rememberTextMeasurer()
     val description = stringResource(R.string.controller_description)
     Canvas(modifier = Modifier.fillMaxSize().semantics { contentDescription = description }) {
-        val outline = Stroke(width = 1.5.dp.toPx())
+        val outline = Stroke(width = 2.dp.toPx())
         for (control in controls) {
             val frame = Rect(control.left, control.top, control.left + control.width, control.top + control.height)
             when (control.code) {
