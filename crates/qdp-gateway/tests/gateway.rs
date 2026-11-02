@@ -113,12 +113,14 @@ async fn start_with(directory: &Path, learning: KeyLearning, extra: &str) -> Run
         }
     });
     let config_path = directory.join("gateway.toml");
+    // The state directory goes in a TOML literal string, in which Windows'
+    // backslashes are not escapes.
     std::fs::write(
         &config_path,
         format!(
             r#"
         name = "Example Corp"
-        state_directory = "{state}"
+        state_directory = '{state}'
 
         [directory]
         url = "ldaps://directory.invalid"
@@ -867,7 +869,7 @@ fn assertion_key(directory: &Path) -> [u8; 32] {
     std::fs::write(
         &path,
         format!(
-            "name = \"Example Corp\"\nstate_directory = \"{}\"\n\n[directory]\nurl = \"ldaps://directory.invalid\"\nbind_dn = \"cn=gateway\"\nbind_password_file = \"/dev/null\"\nbase_dn = \"dc=corp\"\n",
+            "name = \"Example Corp\"\nstate_directory = '{}'\n\n[directory]\nurl = \"ldaps://directory.invalid\"\nbind_dn = \"cn=gateway\"\nbind_password_file = \"/dev/null\"\nbase_dn = \"dc=corp\"\n",
             directory.display()
         ),
     )
