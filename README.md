@@ -749,12 +749,12 @@ certificate authority the system trusts.
 ## Builds and releases
 
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) checks
-every change merged into `main` on Linux, Windows and macOS: formatting, clippy
-and the tests. Pull requests are not checked, so that merging never waits for
-it, and a run can be started on any branch from the Actions tab. It builds the
+QDP on Linux, Windows and macOS: formatting, clippy and the tests. It runs only
+when started by hand on a branch from the Actions tab, or when a version tag is
+pushed; neither pull requests nor merges into `main` start it. It builds the
 `qdp` command for each system and the Android, Apple and Windows apps, and once
-every build passed it publishes them together as a GitHub release, numbered by
-the run (the ten newest are kept). The newest build's files are always at
+every build of a tag's run passed it publishes them together as a GitHub
+release. The newest release's files are always at
 `https://github.com/ianmarmour/qdp/releases/latest/download/FILE`, such as
 `qdp-android-arm64.apk`. On Linux, `qdp-linux-x86_64.rpm` packages the `qdp`
 command for Fedora 40 or later and openSUSE Tumbleweed, with the udev rule and
@@ -773,8 +773,8 @@ sudo apt install ./qdp-linux-x86_64.deb
 [`packaging/linux/build-rpm.sh`](packaging/linux/build-rpm.sh) builds the RPM
 from a built `qdp`, with `rpmbuild`, and
 [`packaging/linux/build-deb.sh`](packaging/linux/build-deb.sh) the Debian
-packages of `qdp` and `qdp-gateway`, with `dpkg-deb`. Pushing a version tag publishes a release of that
-version, which is kept:
+packages of `qdp` and `qdp-gateway`, with `dpkg-deb`. Pushing a version tag
+publishes a release of that version:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
