@@ -10,20 +10,29 @@ struct HostListView: View {
     var addByAddress: () -> Void
 
     @State private var forgetting: PairedHost?
+    @State private var forgettingGatewayHost: GatewayHost?
     @State private var explanation: HostRow?
+    @AppStorage(SettingsKey.gatewayAddress) private var gatewayAddress = ""
 
     var body: some View {
         let rows = store.rows
         let yours = rows.filter { $0.paired != nil }
         let nearby = rows.filter { $0.paired == nil }
+        // The computers reached through the gateway, while one is set.
+        let throughGateway = gatewayAddress.trimmingCharacters(in: .whitespaces).isEmpty ? [] : store.gatewayHosts
         Group {
-            if rows.isEmpty {
+            if rows.isEmpty && throughGateway.isEmpty {
                 emptyState
             } else {
                 List {
                     if !yours.isEmpty {
                         Section("Your Computers") {
                             ForEach(yours) { row in rowButton(row) }
+                        }
+                    }
+                    if !throughGateway.isEmpty {
+                        Section("Through \(gatewayAddress)") {
+                            ForEach(throughGateway) { host in gatewayButton(host) }
                         }
                     }
                     if !nearby.isEmpty {
@@ -43,6 +52,19 @@ struct HostListView: View {
             Button("Forget", role: .destructive) { store.forget(pin: host.pin) }
         } message: { _ in
             Text("Connecting to it again needs pairing with a new code.")
+        }
+        .confirmationDialog(
+            "Forget \(forgettingGatewayHost?.name ?? "this computer")?",
+            isPresented: Binding(
+                get: { forgettingGatewayHost != nil },
+                set: { if !$0 { forgettingGatewayHost = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: forgettingGatewayHost
+        ) { host in
+            Button("Forget", role: .destructive) { store.forgetGatewayHost(target: host.target) }
+        } message: { _ in
+            Text("You can add it again by its ID or name.")
         }
         .alert(
             explanation?.name ?? "",
@@ -122,6 +144,38 @@ struct HostListView: View {
             if let paired = row.paired {
                 Button("Forget", systemImage: "trash", role: .destructive) { forgetting = paired }
             }
+        }
+        #endif
+    }
+
+    private func gatewayButton(_ host: GatewayHost) -> some View {
+        Button {
+            open(host.stream)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "desktopcomputer")
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+                    .frame(width: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(host.name)
+                        .font(.headline)
+                    Text(host.target)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Streams from this computer through your organization's gateway")
+        .contextMenu {
+            Button("Forget", systemImage: "trash", role: .destructive) { forgettingGatewayHost = host }
+        }
+        #if os(iOS)
+        .swipeActions {
+            Button("Forget", systemImage: "trash", role: .destructive) { forgettingGatewayHost = host }
         }
         #endif
     }

@@ -75,7 +75,7 @@ struct HostBrowserView: View {
         }
         .frame(minWidth: 420, minHeight: 360)
         .sheet(isPresented: $adding) {
-            AddHostView(open: { openWindow(id: WindowID.stream, value: $0) })
+            AddHostView(keepGatewayHost: store.keepGatewayHost, open: { openWindow(id: WindowID.stream, value: $0) })
         }
         .onAppear { store.windowAppeared() }
         .onDisappear { store.windowDisappeared() }

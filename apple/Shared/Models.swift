@@ -9,6 +9,8 @@ enum Authentication: String, Codable, Hashable {
     case pair
     /// The host's pin and a token it accepts.
     case token
+    /// Through the organization's gateway, which vouches for the user.
+    case gateway
 
     /// The core's value.
     var core: QdpAuthentication {
@@ -16,6 +18,7 @@ enum Authentication: String, Codable, Hashable {
         case .paired: QDP_AUTH_PAIRED
         case .pair: QDP_AUTH_PAIR
         case .token: QDP_AUTH_TOKEN
+        case .gateway: QDP_AUTH_GATEWAY
         }
     }
 }
@@ -144,6 +147,9 @@ enum SettingsKey {
     static let touchMode = "touchMode"
     static let showStats = "showStats"
     static let microphone = "microphone"
+    static let gatewayAddress = "gatewayAddress"
+    static let gatewayPin = "gatewayPin"
+    static let gatewayUser = "gatewayUser"
 }
 
 /// Returns the size and interface scale to ask the host for, for a view of

@@ -62,6 +62,10 @@ struct StreamScreen: View {
             .presentationDetents([.medium])
             .interactiveDismissDisabled()
         }
+        .sheet(isPresented: signingIn) {
+            GatewaySignInView(prompt: signInPrompt, signIn: model.answerSignIn, enterCode: model.answerSignInCode)
+                .interactiveDismissDisabled()
+        }
         .onAppear {
             store.streamStarted()
             UIApplication.shared.isIdleTimerDisabled = true
@@ -119,7 +123,7 @@ struct StreamScreen: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.black)
             .environment(\.colorScheme, .dark)
-        case .pairing, .streaming, .ended:
+        case .pairing, .signingIn, .streaming, .ended:
             EmptyView()
         }
     }
@@ -141,6 +145,17 @@ struct StreamScreen: View {
 
     private var retry: Bool {
         if case let .pairing(retry) = model.phase { retry } else { false }
+    }
+
+    private var signingIn: Binding<Bool> {
+        Binding(
+            get: { if case .signingIn = model.phase { true } else { false } },
+            set: { _ in }
+        )
+    }
+
+    private var signInPrompt: GatewayPrompt {
+        if case let .signingIn(prompt) = model.phase { prompt } else { GatewayPrompt(gateway: "", retry: false, code: false) }
     }
 
     /// The shortest audio buffer asked for, in seconds: the system's usual

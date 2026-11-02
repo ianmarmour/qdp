@@ -20,6 +20,7 @@ final class StreamModel {
         case connecting
         case starting
         case pairing(retry: Bool)
+        case signingIn(GatewayPrompt)
         case streaming
         case reconnecting(String)
         case ended
@@ -86,11 +87,20 @@ final class StreamModel {
         let host = strdup(target.address)
         let pin = strdup(target.pin)
         let token = strdup(target.token)
+        // A computer reached through the gateway goes through the one set
+        // now, with the session its last sign-in left.
+        let throughGateway = target.authentication == .gateway
+        let gatewayAddress = strdup(throughGateway ? Gateway.address ?? "" : "")
+        let gatewayPin = strdup(throughGateway ? Gateway.pin : "")
+        let gatewayToken = strdup(throughGateway ? Gateway.sessionToken : "")
         let name = strdup(Self.deviceName)
         defer {
             free(host)
             free(pin)
             free(token)
+            free(gatewayAddress)
+            free(gatewayPin)
+            free(gatewayToken)
             free(name)
         }
         var config = QdpConfig(
@@ -104,7 +114,10 @@ final class StreamModel {
             refresh_millihertz: refreshMillihertz,
             scale_percent: display.scalePercent,
             decoder: decoder.core,
-            microphone: defaults.bool(forKey: SettingsKey.microphone)
+            microphone: defaults.bool(forKey: SettingsKey.microphone),
+            gateway_address: UnsafePointer(gatewayAddress),
+            gateway_pin: UnsafePointer(gatewayPin),
+            gateway_token: UnsafePointer(gatewayToken)
         )
         var error: UnsafeMutablePointer<CChar>?
         let layerPointer = Unmanaged.passUnretained(layer).toOpaque()
@@ -157,6 +170,32 @@ final class StreamModel {
         }
     }
 
+    /// Answers the gateway's request for the user's name and password, or
+    /// declines with `nil`, which ends the stream.
+    func answerSignIn(_ credentials: (user: String, password: String)?) {
+        guard let session else { return }
+        phase = .connecting
+        if let credentials {
+            credentials.user.withCString { user in
+                credentials.password.withCString { password in qdp_session_sign_in(session, user, password) }
+            }
+        } else {
+            qdp_session_sign_in(session, nil, nil)
+        }
+    }
+
+    /// Answers the gateway's request for a code from the user's
+    /// authenticator app, or declines with `nil`, which ends the stream.
+    func answerSignInCode(_ code: String?) {
+        guard let session else { return }
+        phase = .connecting
+        if let code {
+            code.withCString { qdp_session_sign_in_code(session, $0) }
+        } else {
+            qdp_session_sign_in_code(session, nil)
+        }
+    }
+
     /// Waits for the session's events on a queue of their own and handles
     /// them on the main actor.
     ///
@@ -189,6 +228,7 @@ final class StreamModel {
         switch event {
         case .connecting:
             if case .pairing = phase { return }
+            if case .signingIn = phase { return }
             phase = .connecting
         case .connected:
             phase = .starting
@@ -210,6 +250,12 @@ final class StreamModel {
             self.stats = stats
         case let .pairingCode(retry):
             phase = .pairing(retry: retry)
+        case let .gatewaySignIn(retry, gateway):
+            phase = .signingIn(GatewayPrompt(gateway: gateway, retry: retry, code: false))
+        case let .gatewayCode(retry, enrollment, gateway):
+            phase = .signingIn(GatewayPrompt(gateway: gateway, retry: retry, code: true, enrollment: enrollment))
+        case let .gatewaySession(token, lifetimeSeconds):
+            Gateway.keepSession(token: token, lifetimeSeconds: lifetimeSeconds)
         case let .paired(pin):
             // From now on the host is reached with the device's key, also
             // when the stream connects again.
