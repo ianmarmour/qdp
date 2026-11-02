@@ -13,6 +13,7 @@ struct HostListView: View {
     @State private var forgettingGatewayHost: GatewayHost?
     @State private var explanation: HostRow?
     @AppStorage(SettingsKey.gatewayAddress) private var gatewayAddress = ""
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let rows = store.rows
@@ -25,22 +26,31 @@ struct HostListView: View {
                 emptyState
             } else {
                 List {
-                    if !yours.isEmpty {
+                    // The computers reached through the gateway are among
+                    // yours, as any other.
+                    if !yours.isEmpty || !throughGateway.isEmpty {
                         Section("Your Computers") {
                             ForEach(yours) { row in rowButton(row) }
-                        }
-                    }
-                    if !throughGateway.isEmpty {
-                        Section("Through \(gatewayAddress)") {
                             ForEach(throughGateway) { host in gatewayButton(host) }
                         }
+                        .brandRows()
                     }
-                    if !nearby.isEmpty {
-                        Section("Nearby") {
+                    // The network is searched while the list shows.
+                    if store.networkAllowed {
+                        Section {
                             ForEach(nearby) { row in rowButton(row) }
+                        } header: {
+                            HStack(spacing: 6) {
+                                Text("Nearby")
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .accessibilityLabel("Searching")
+                            }
                         }
+                        .brandRows()
                     }
                 }
+                .brandBackground()
             }
         }
         .confirmationDialog(
@@ -82,13 +92,27 @@ struct HostListView: View {
     @ViewBuilder private var emptyState: some View {
         if store.networkAllowed {
             ContentUnavailableView {
-                Label("Looking for Computers", systemImage: "desktopcomputer")
+                Label {
+                    Text("Looking for Computers")
+                } icon: {
+                    // The waves the system shows as it searches for Wi-Fi
+                    // and AirDrop.
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .symbolEffect(.variableColor.iterative.reversing)
+                        .foregroundStyle(.tint)
+                }
             } description: {
                 Text("Run qdp serve on a computer on this network, and it appears here.")
             } actions: {
-                Button("Add by Address", action: addByAddress)
-                    .buttonStyle(.borderedProminent)
+                Button(action: addByAddress) {
+                    Text("Add by Address")
+                        #if os(iOS)
+                        .foregroundStyle(Brand.onAccent(scheme))
+                        #endif
+                }
+                .buttonStyle(.borderedProminent)
             }
+            .brandBackground()
         } else {
             ContentUnavailableView {
                 Label("Local Network Access Is Off", systemImage: "wifi.exclamationmark")
@@ -97,6 +121,7 @@ struct HostListView: View {
             } actions: {
                 Button("Add by Address", action: addByAddress)
             }
+            .brandBackground()
         }
     }
 
@@ -108,27 +133,19 @@ struct HostListView: View {
                 explanation = row
             }
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: Self.symbol(for: row.status))
-                    .font(.title2)
-                    .foregroundStyle(Self.tint(for: row.status))
-                    .frame(width: 32)
+            HStack(spacing: 14) {
+                HostIcon(look: Self.look(for: row.status), symbol: Self.symbol(for: row.status))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.name)
-                        .font(.headline)
-                    Text(row.detail)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(.body.weight(.medium))
+                    if !row.detail.isEmpty {
+                        Text(row.detail)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
-                if row.status == .new {
-                    Text("Pair")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.tint)
-                } else if row.status == .resolving {
-                    ProgressView()
-                        .controlSize(.small)
-                }
+                Self.trailing(for: row.status)
             }
             .contentShape(Rectangle())
         }
@@ -152,19 +169,12 @@ struct HostListView: View {
         Button {
             open(host.stream)
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "desktopcomputer")
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                    .frame(width: 32)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(host.name)
-                        .font(.headline)
-                    Text(host.target)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+            HStack(spacing: 14) {
+                HostIcon(look: .online, symbol: "desktopcomputer")
+                Text(host.name)
+                    .font(.body.weight(.medium))
                 Spacer()
+                Self.chevron
             }
             .contentShape(Rectangle())
         }
@@ -182,21 +192,46 @@ struct HostListView: View {
 
     private static func symbol(for status: HostRow.Status) -> String {
         switch status {
-        case .ready: "desktopcomputer"
-        case .notSeen: "desktopcomputer.trianglebadge.exclamationmark"
-        case .new: "plus.circle"
-        case .pairingOff: "lock"
-        case .differentKey: "exclamationmark.shield"
-        case .resolving: "desktopcomputer"
+        case .ready, .notSeen, .resolving: "desktopcomputer"
+        case .new: "plus"
+        case .pairingOff: "lock.fill"
+        case .differentKey: "exclamationmark.shield.fill"
         }
     }
 
-    private static func tint(for status: HostRow.Status) -> Color {
+    /// How a host's icon looks.
+    private static func look(for status: HostRow.Status) -> HostIcon.Look {
         switch status {
-        case .ready: .accentColor
-        case .differentKey: .orange
-        default: .secondary
+        case .ready, .resolving: .online
+        case .notSeen, .pairingOff: .offline
+        case .new: .pairable
+        case .differentKey: .warning
         }
+    }
+
+    /// What a row shows at its end: Pair for a computer to pair with, a
+    /// chevron for one paired, and progress while one is found.
+    @ViewBuilder private static func trailing(for status: HostRow.Status) -> some View {
+        switch status {
+        case .new:
+            Text("Pair")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.tint)
+        case .resolving:
+            ProgressView()
+                .controlSize(.small)
+        case .ready, .notSeen:
+            chevron
+        case .pairingOff, .differentKey:
+            EmptyView()
+        }
+    }
+
+    /// The chevron at the end of a row that streams.
+    private static var chevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.tertiary)
     }
 
     private static func hint(for status: HostRow.Status) -> String {

@@ -22,6 +22,7 @@ struct SettingsView: View {
                 Toggle("Send the Microphone", isOn: $microphone)
                 Toggle("Show Statistics", isOn: $showStats)
             }
+            .brandRows()
             #if os(iOS)
             // A Mac running the iPhone and iPad app has no touchscreen.
             if TouchSource.current == .touchscreen {
@@ -35,6 +36,7 @@ struct SettingsView: View {
                 } footer: {
                     Text(touchMode.explanation)
                 }
+                .brandRows()
             }
             #endif
             Section {
@@ -46,6 +48,7 @@ struct SettingsView: View {
             } footer: {
                 Text("Automatic decodes on the graphics hardware where this device can, and in software otherwise.")
             }
+            .brandRows()
             Section {
                 TextField("Address", text: $gatewayAddress, prompt: Text("gateway.example.com"))
                     .autocorrectionDisabled()
@@ -71,6 +74,7 @@ struct SettingsView: View {
                     Text("Your organization's gateway, to reach its computers from outside its network. You sign in with your organization's account and a code from an authenticator app. Ask its administrator for its address, and its key pin if they give one.")
                 }
             }
+            .brandRows()
             Section {
                 if let clientPin {
                     LabeledContent("Key pin") {
@@ -85,8 +89,11 @@ struct SettingsView: View {
             } footer: {
                 Text("A computer accepts this device without pairing when started with qdp serve --client-key and this pin.")
             }
+            .brandRows()
         }
         .formStyle(.grouped)
+        .brandBackground()
+        .brandSwitches()
         .task { clientPin = Core.clientPin }
         #if os(macOS)
         .frame(width: 520)

@@ -32,7 +32,7 @@ struct HostsScreen: View {
     var body: some View {
         NavigationStack {
             HostListView(store: store, open: { streaming = $0 }, addByAddress: { adding = true })
-                .navigationTitle("QDP")
+                .navigationTitle("Quick Desktop")
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Settings", systemImage: "gearshape") { showingSettings = true }

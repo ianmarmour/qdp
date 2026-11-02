@@ -146,12 +146,12 @@ final class HostStore {
                 found.insert(pairing.pin)
             }
             guard let address = host.address else {
-                return HostRow(name: host.name, detail: "Finding its address…", status: .resolving, paired: match ?? namesake)
+                return HostRow(name: host.name, detail: "Connecting…", status: .resolving, paired: match ?? namesake)
             }
             if let match {
                 return HostRow(
                     name: host.name,
-                    detail: "Ready · \(address)",
+                    detail: "Online",
                     status: .ready,
                     target: StreamTarget(name: host.name, address: address, authentication: .paired, pin: match.pin),
                     paired: match
@@ -160,7 +160,7 @@ final class HostStore {
             if let namesake {
                 return HostRow(
                     name: host.name,
-                    detail: "This isn't the \(host.name) you paired with",
+                    detail: "Different key — pair again",
                     status: .differentKey,
                     target: host.pairing ? StreamTarget(name: host.name, address: address, authentication: .pair) : nil,
                     paired: namesake
@@ -169,17 +169,17 @@ final class HostStore {
             if host.pairing {
                 return HostRow(
                     name: host.name,
-                    detail: "New · \(address)",
+                    detail: "",
                     status: .new,
                     target: StreamTarget(name: host.name, address: address, authentication: .pair)
                 )
             }
-            return HostRow(name: host.name, detail: "Pairing is off on this computer", status: .pairingOff)
+            return HostRow(name: host.name, detail: "Pairing off", status: .pairingOff)
         }
         rows += paired.filter { !found.contains($0.pin) }.map { host in
             HostRow(
                 name: host.name,
-                detail: "Not on this network · \(host.address)",
+                detail: "Offline",
                 status: .notSeen,
                 target: StreamTarget(name: host.name, address: host.address, authentication: .paired, pin: host.pin),
                 paired: host
