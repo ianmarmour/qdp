@@ -649,8 +649,10 @@ final class KeyboardField: UIView, UIKeyInput {
 
 /// The keys the on-screen keyboard lacks, in one row over it as wide as the
 /// screen allows: Escape, Tab, the arrows, and a key that hides the
-/// keyboard. Each key has the same width, so that all of them fit.
-final class ExtraKeysBar: UIInputView {
+/// keyboard. Each is a capsule of Liquid Glass, as the app's other controls
+/// over the stream are, floating on a clear row, and has the same width, so
+/// that all of them fit.
+final class ExtraKeysBar: UIView {
     /// What a key shows.
     private enum Label {
         /// Text.
@@ -688,8 +690,9 @@ final class ExtraKeysBar: UIInputView {
     /// Makes the row, which calls `tap` with a key's usage when it is
     /// tapped, and `hide` when the key that hides the keyboard is.
     init(tap: @escaping (UInt16) -> Void, hide: @escaping () -> Void) {
-        super.init(frame: CGRect(x: 0, y: 0, width: 320, height: Self.height), inputViewStyle: .keyboard)
+        super.init(frame: CGRect(x: 0, y: 0, width: 320, height: Self.height))
         autoresizingMask = .flexibleWidth
+        backgroundColor = .clear
         var buttons = Self.keys.map { key in
             Self.button(key.label, name: key.name) { tap(key.usage) }
         }
@@ -716,11 +719,11 @@ final class ExtraKeysBar: UIInputView {
         fatalError("not used")
     }
 
-    /// Returns a key showing `label`, called `name`, that does `action`.
+    /// Returns a glass key showing `label`, called `name`, that does
+    /// `action`.
     private static func button(_ label: Label, name: String, action: @escaping () -> Void) -> UIButton {
-        var configuration = UIButton.Configuration.gray()
-        configuration.cornerStyle = .medium
-        configuration.baseForegroundColor = .label
+        var configuration = UIButton.Configuration.glass()
+        configuration.cornerStyle = .capsule
         switch label {
         case let .text(text):
             configuration.title = text
