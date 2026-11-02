@@ -1,83 +1,47 @@
+import Observation
 import QDPCore
+import SwiftUI
 import UIKit
 
 /// The on-screen gamepad over the stream on iPhone and iPad, which the
 /// stream's menu shows and hides. While it shows it takes every touch on
 /// the screen, and the core lays its controls out, works out the gamepad's
 /// state from the touches and sends it as a gamepad of its own. The controls
-/// are drawn as phone games draw theirs, translucent rings the picture shows
-/// through, lit where a thumb holds them; a press taps the haptics, as a real
-/// button would click.
+/// are Liquid Glass, as the app's other controls over the stream are, drawn
+/// by SwiftUI over this view, which takes the touches itself; a press taps
+/// the haptics, as a real button would click.
 final class OnScreenControllerView: UIView {
-    /// A control's number, as the core gives it: a Standard Gamepad button
-    /// index, the directional pad's first, or a stick's.
-    private enum Control: UInt32 {
-        case a = 0, b, x, y, leftShoulder, rightShoulder, leftTrigger, rightTrigger
-        case select, start, leftStickButton, rightStickButton
-        case dpad = 12
-        case leftStick = 17, rightStick = 18
-    }
-
-    /// The directional pad's direction bits, as the core gives them.
-    private enum Direction: UInt32, CaseIterable {
-        case up = 1, down = 2, left = 4, right = 8
-    }
-
     private let model: StreamModel
     private let gamepad: OpaquePointer? = qdp_virtual_gamepad_new()
-    private var controls: [QdpVirtualControl] = []
     /// The touches on the controls, by touch.
     private var fingers: [ObjectIdentifier: UInt32] = [:]
     private let haptics = UIImpactFeedbackGenerator(style: .light)
-
-    /// A control's fill at rest: dark and translucent, so that the
-    /// picture shows through, and bright scenes too.
-    private static let fill = UIColor(white: 0, alpha: 0.28)
-    /// A control's fill while held.
-    private static let heldFill = UIColor(white: 1, alpha: 0.35)
-    /// A control's ring.
-    private static let outline = UIColor(white: 1, alpha: 0.6)
-    /// Labels, arrows and glyphs.
-    private static let ink = UIColor(white: 1, alpha: 0.9)
-    /// A stick's knob at rest, and while held.
-    private static let knob = UIColor(white: 1, alpha: 0.4)
-    private static let heldKnob = UIColor(white: 1, alpha: 0.75)
-    /// The ring's width, in points.
-    private static let outlineWidth: CGFloat = 2
-    /// A stick's knob's radius, as a share of its base's.
-    private static let knobShare: CGFloat = 0.45
-    /// A label's size, as a share of its control's height.
-    private static let labelShare: CGFloat = 0.42
-    /// A glyph's or arrow's size, as a share of its control's.
-    private static let glyphShare: CGFloat = 0.45
-    /// A shoulder button's corners, as a share of its height.
-    private static let shoulderCornerShare: CGFloat = 0.35
-
-    /// The face buttons' letters, in the colors controllers print them in.
-    private static let faceColors: [Control: UIColor] = [
-        .a: UIColor(red: 0.48, green: 0.83, blue: 0.37, alpha: 1),
-        .b: UIColor(red: 1, green: 0.42, blue: 0.38, alpha: 1),
-        .x: UIColor(red: 0.37, green: 0.66, blue: 1, alpha: 1),
-        .y: UIColor(red: 1, green: 0.82, blue: 0.37, alpha: 1),
-    ]
-
-    /// The labels of the controls drawn with text.
-    private static let labels: [Control: String] = [
-        .a: "A", .b: "B", .x: "X", .y: "Y",
-        .leftShoulder: "LB", .rightShoulder: "RB", .leftTrigger: "LT", .rightTrigger: "RT",
-        .leftStickButton: "L3", .rightStickButton: "R3",
-    ]
+    /// The controls as the core last gave them, which the glass shows.
+    private let glass: GamepadGlassModel
+    /// The SwiftUI view drawing the controls.
+    private let glassHost: UIHostingController<GamepadGlass>
 
     init(model: StreamModel) {
         self.model = model
+        let glass = GamepadGlassModel()
+        self.glass = glass
+        glassHost = UIHostingController(rootView: GamepadGlass(model: glass))
         super.init(frame: .zero)
         isMultipleTouchEnabled = true
         isOpaque = false
         backgroundColor = .clear
-        contentMode = .redraw
         isHidden = true
         isAccessibilityElement = true
         accessibilityLabel = "On-screen controller"
+        // The controls are placed in this view's own coordinates, safe area
+        // and all, and this view, not the glass, takes the touches.
+        glassHost.safeAreaRegions = []
+        let host: UIView = glassHost.view
+        host.backgroundColor = .clear
+        host.isUserInteractionEnabled = false
+        host.frame = bounds
+        host.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(host)
     }
 
     @available(*, unavailable)
@@ -144,7 +108,7 @@ final class OnScreenControllerView: UIView {
     }
 
     /// Passes `touches` to the core, tapping the haptics if they pressed a
-    /// button and drawing the controls again if they look different.
+    /// button and showing the controls again if they look different.
     private func take(_ touches: Set<UITouch>, phase: QdpTouchPhase) {
         var outcome: UInt32 = 0
         for touch in touches {
@@ -162,144 +126,308 @@ final class OnScreenControllerView: UIView {
         }
     }
 
-    /// Takes the controls as they now are from the core, and draws them.
+    /// Takes the controls as they now are from the core, for the glass to
+    /// show.
     private func refresh() {
         let count = qdp_virtual_gamepad_controls(gamepad, nil, 0)
         var buffer = [QdpVirtualControl](repeating: QdpVirtualControl(), count: count)
         let written = buffer.withUnsafeMutableBufferPointer { pointer in
             qdp_virtual_gamepad_controls(gamepad, pointer.baseAddress, count)
         }
-        controls = Array(buffer.prefix(min(written, count)))
-        setNeedsDisplay()
+        glass.controls = Array(buffer.prefix(min(written, count)))
     }
+}
 
-    // MARK: Drawing
+/// A control's number, as the core gives it: a Standard Gamepad button
+/// index, the directional pad's first, or a stick's.
+private enum Control: UInt32 {
+    case a = 0, b, x, y, leftShoulder, rightShoulder, leftTrigger, rightTrigger
+    case select, start, leftStickButton, rightStickButton
+    case dpad = 12
+    case leftStick = 17, rightStick = 18
 
-    override func draw(_ rect: CGRect) {
-        for control in controls {
-            guard let kind = Control(rawValue: control.control) else { continue }
-            let frame = CGRect(
-                x: CGFloat(control.x), y: CGFloat(control.y),
-                width: CGFloat(control.width), height: CGFloat(control.height)
-            )
-            switch kind {
-            case .leftStick, .rightStick:
-                drawStick(in: frame, control: control)
-            case .dpad:
-                drawDPad(in: frame, directions: control.directions)
-            case .leftShoulder, .rightShoulder, .leftTrigger, .rightTrigger:
-                drawShoulder(in: frame, kind: kind, held: control.held)
-            default:
-                drawRoundButton(in: frame, kind: kind, held: control.held)
-            }
+    /// The label of a control shown with text.
+    var label: String {
+        switch self {
+        case .a: "A"
+        case .b: "B"
+        case .x: "X"
+        case .y: "Y"
+        case .leftShoulder: "LB"
+        case .rightShoulder: "RB"
+        case .leftTrigger: "LT"
+        case .rightTrigger: "RT"
+        case .leftStickButton: "L3"
+        case .rightStickButton: "R3"
+        case .select, .start, .dpad, .leftStick, .rightStick: ""
         }
     }
 
-    /// Draws a stick: its base, and its knob where its tilt has it.
-    private func drawStick(in frame: CGRect, control: QdpVirtualControl) {
-        drawCircle(in: frame, held: false)
-        let radius = frame.width / 2
-        let knob = radius * Self.knobShare
-        let travel = radius - knob
-        let center = CGPoint(
-            x: frame.midX + CGFloat(control.tilt_x) * travel,
-            y: frame.midY + CGFloat(control.tilt_y) * travel
-        )
-        (control.held ? Self.heldKnob : Self.knob).setFill()
-        UIBezierPath(ovalIn: CGRect(x: center.x - knob, y: center.y - knob, width: 2 * knob, height: 2 * knob)).fill()
+    /// The colour of a face button's letter, as controllers print them, or
+    /// white.
+    var tint: Color {
+        switch self {
+        case .a: Color(red: 0.56, green: 0.88, blue: 0.48)
+        case .b: Color(red: 1, green: 0.54, blue: 0.5)
+        case .x: Color(red: 0.49, green: 0.72, blue: 1)
+        case .y: Color(red: 1, green: 0.84, blue: 0.42)
+        default: .white
+        }
     }
+}
 
-    /// Draws the directional pad: a cross whose arms light as their
-    /// directions are held.
-    private func drawDPad(in frame: CGRect, directions: UInt32) {
-        let arm = frame.width / 3
-        let corner = arm / 4
-        Self.fill.setFill()
-        UIBezierPath(rect: CGRect(x: frame.midX - arm / 2, y: frame.midY - arm / 2, width: arm, height: arm)).fill()
-        for direction in Direction.allCases {
-            let rect: CGRect
-            let symbol: String
-            switch direction {
-            case .up:
-                rect = CGRect(x: frame.midX - arm / 2, y: frame.minY, width: arm, height: arm)
-                symbol = "arrowtriangle.up.fill"
-            case .down:
-                rect = CGRect(x: frame.midX - arm / 2, y: frame.maxY - arm, width: arm, height: arm)
-                symbol = "arrowtriangle.down.fill"
-            case .left:
-                rect = CGRect(x: frame.minX, y: frame.midY - arm / 2, width: arm, height: arm)
-                symbol = "arrowtriangle.left.fill"
-            case .right:
-                rect = CGRect(x: frame.maxX - arm, y: frame.midY - arm / 2, width: arm, height: arm)
-                symbol = "arrowtriangle.right.fill"
-            }
-            let path = UIBezierPath(roundedRect: rect, cornerRadius: corner)
-            (directions & direction.rawValue != 0 ? Self.heldFill : Self.fill).setFill()
-            path.fill()
-            stroke(path)
-            drawSymbol(symbol, in: rect)
+/// The directional pad's direction bits, as the core gives them, with the
+/// symbol of each.
+private enum Direction: UInt32, CaseIterable {
+    case up = 1, down = 2, left = 4, right = 8
+
+    /// The chevron pointing its way.
+    var symbol: String {
+        switch self {
+        case .up: "chevron.up"
+        case .down: "chevron.down"
+        case .left: "chevron.left"
+        case .right: "chevron.right"
         }
     }
 
-    /// Draws a shoulder button or trigger: a rounded rectangle and its label.
-    private func drawShoulder(in frame: CGRect, kind: Control, held: Bool) {
-        let path = UIBezierPath(roundedRect: frame, cornerRadius: frame.height * Self.shoulderCornerShare)
-        (held ? Self.heldFill : Self.fill).setFill()
-        path.fill()
-        stroke(path)
-        drawLabel(Self.labels[kind] ?? "", in: frame, color: Self.ink)
+    /// Where its chevron sits in the pad.
+    var alignment: Alignment {
+        switch self {
+        case .up: .top
+        case .down: .bottom
+        case .left: .leading
+        case .right: .trailing
+        }
+    }
+}
+
+/// The controls the glass shows, as the core last gave them.
+@Observable
+final class GamepadGlassModel {
+    var controls: [QdpVirtualControl] = []
+}
+
+private extension QdpVirtualControl {
+    /// Its frame in the view.
+    var rect: CGRect {
+        CGRect(x: CGFloat(x), y: CGFloat(y), width: CGFloat(width), height: CGFloat(height))
+    }
+}
+
+/// A trigger and its shoulder button, side by side as the core places them,
+/// which share one pill of glass.
+private struct Pill: Identifiable {
+    /// Its halves, left to right.
+    let halves: [QdpVirtualControl]
+
+    var id: UInt32 { halves.first?.control ?? 0 }
+
+    /// The frame around its halves.
+    var rect: CGRect {
+        halves.map(\.rect).reduce(CGRect.null) { $0.union($1) }
     }
 
-    /// Draws a round button: the face buttons, the stick buttons, Select and
-    /// Start.
-    private func drawRoundButton(in frame: CGRect, kind: Control, held: Bool) {
-        drawCircle(in: frame, held: held)
+    /// Each side's trigger and shoulder button.
+    static let pairs: [[Control]] = [[.leftTrigger, .leftShoulder], [.rightShoulder, .rightTrigger]]
+
+    /// Returns the pills the shoulder buttons and triggers among `controls`
+    /// make.
+    static func of(_ controls: [QdpVirtualControl]) -> [Pill] {
+        pairs.compactMap { pair in
+            let halves = controls
+                .filter { control in pair.contains { $0.rawValue == control.control } }
+                .sorted { $0.x < $1.x }
+            return halves.isEmpty ? nil : Pill(halves: halves)
+        }
+    }
+
+    /// Returns whether `control` is half of a pill.
+    static func contains(_ control: QdpVirtualControl) -> Bool {
+        pairs.contains { pair in pair.contains { $0.rawValue == control.control } }
+    }
+}
+
+/// The on-screen gamepad's controls in Liquid Glass, each where the core
+/// placed it, as held or tilted as the touches have it. It takes no touches.
+struct GamepadGlass: View {
+    let model: GamepadGlassModel
+
+    var body: some View {
+        let controls = model.controls
+        ZStack(alignment: .topLeading) {
+            ForEach(Pill.of(controls)) { pill in
+                PillGlass(pill: pill)
+            }
+            ForEach(controls.filter { !Pill.contains($0) }, id: \.control) { control in
+                ControlGlass(control: control)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .ignoresSafeArea()
+        .accessibilityHidden(true)
+    }
+}
+
+/// How a held control's glass is tinted.
+private let heldTint = Color.white.opacity(0.32)
+
+/// Returns the glass of a control, lit while held.
+private func controlGlass(held: Bool) -> Glass {
+    held ? Glass.regular.tint(heldTint) : Glass.regular
+}
+
+/// A control that is not half of a pill, in its frame.
+private struct ControlGlass: View {
+    let control: QdpVirtualControl
+
+    var body: some View {
+        let rect = control.rect
+        Group {
+            if let kind = Control(rawValue: control.control) {
+                switch kind {
+                case .leftStick, .rightStick:
+                    StickGlass(control: control, side: rect.width)
+                case .dpad:
+                    PadGlass(directions: control.directions, side: rect.width)
+                default:
+                    ButtonGlass(kind: kind, held: control.held, side: rect.height)
+                }
+            }
+        }
+        .frame(width: rect.width, height: rect.height)
+        .position(x: rect.midX, y: rect.midY)
+    }
+}
+
+/// A stick: clear glass for its base, and a knob of glass where its tilt
+/// has it.
+private struct StickGlass: View {
+    let control: QdpVirtualControl
+    let side: CGFloat
+
+    /// The knob's width, as a share of the base's.
+    private static let knobShare: CGFloat = 0.46
+
+    var body: some View {
+        let knob = side * Self.knobShare
+        let travel = (side - knob) / 2
+        ZStack {
+            Color.clear
+                .glassEffect(Glass.clear, in: .circle)
+            Color.clear
+                .frame(width: knob, height: knob)
+                .glassEffect(controlGlass(held: control.held), in: .circle)
+                .offset(x: CGFloat(control.tilt_x) * travel, y: CGFloat(control.tilt_y) * travel)
+        }
+    }
+}
+
+/// A round button: A, B, X and Y in their colours, Select and Start with
+/// their symbols, and any other with its label. It sinks a little while
+/// held.
+private struct ButtonGlass: View {
+    let kind: Control
+    let held: Bool
+    let side: CGFloat
+
+    /// A label's size, as a share of the button's.
+    private static let labelShare: CGFloat = 0.4
+    /// A symbol's size, as a share of the button's.
+    private static let symbolShare: CGFloat = 0.38
+    /// How far a held button sinks.
+    private static let heldScale: CGFloat = 0.92
+    /// How long a button takes to sink or rise, in seconds.
+    private static let pressDuration = 0.12
+
+    var body: some View {
+        label
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .glassEffect(controlGlass(held: held), in: .circle)
+            .scaleEffect(held ? Self.heldScale : 1)
+            .animation(.snappy(duration: Self.pressDuration), value: held)
+    }
+
+    @ViewBuilder private var label: some View {
         switch kind {
         case .select:
-            drawSymbol("rectangle.on.rectangle", in: frame)
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: side * Self.symbolShare, weight: .semibold))
+                .foregroundStyle(.white)
         case .start:
-            drawSymbol("line.3.horizontal", in: frame)
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: side * Self.symbolShare, weight: .semibold))
+                .foregroundStyle(.white)
         default:
-            drawLabel(Self.labels[kind] ?? "", in: frame, color: Self.faceColors[kind] ?? Self.ink)
+            Text(kind.label)
+                .font(.system(size: side * Self.labelShare, weight: .semibold, design: .rounded))
+                .foregroundStyle(kind.tint)
         }
     }
+}
 
-    /// Draws a filled, outlined circle in `frame`.
-    private func drawCircle(in frame: CGRect, held: Bool) {
-        let inset = Self.outlineWidth / 2
-        let path = UIBezierPath(ovalIn: frame.insetBy(dx: inset, dy: inset))
-        (held ? Self.heldFill : Self.fill).setFill()
-        path.fill()
-        stroke(path)
+/// The directional pad, which the default layout leaves out: a round pad of
+/// glass with a chevron each way, bright while its direction is held.
+private struct PadGlass: View {
+    let directions: UInt32
+    let side: CGFloat
+
+    /// A chevron's size, as a share of the pad's.
+    private static let chevronShare: CGFloat = 0.2
+    /// The space between a chevron and the pad's edge, as a share of the
+    /// pad's size.
+    private static let edgeShare: CGFloat = 0.1
+    /// A chevron's opacity while its direction is not held.
+    private static let restingOpacity = 0.6
+
+    var body: some View {
+        ZStack {
+            ForEach(Direction.allCases, id: \.rawValue) { direction in
+                let held = directions & direction.rawValue != 0
+                Image(systemName: direction.symbol)
+                    .font(.system(size: side * Self.chevronShare, weight: .bold))
+                    .foregroundStyle(.white.opacity(held ? 1 : Self.restingOpacity))
+                    .padding(side * Self.edgeShare)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: direction.alignment)
+            }
+        }
+        .glassEffect(controlGlass(held: directions != 0), in: .circle)
     }
+}
 
-    /// Outlines `path`.
-    private func stroke(_ path: UIBezierPath) {
-        Self.outline.setStroke()
-        path.lineWidth = Self.outlineWidth
-        path.stroke()
-    }
+/// A trigger and its shoulder button as one pill of glass, a line between
+/// them, each half lit while held.
+private struct PillGlass: View {
+    let pill: Pill
 
-    /// Draws `text` in `color`, centred in `frame`, sized to it.
-    private func drawLabel(_ text: String, in frame: CGRect, color: UIColor) {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: frame.height * Self.labelShare, weight: .semibold),
-            .foregroundColor: color,
-        ]
-        let size = (text as NSString).size(withAttributes: attributes)
-        (text as NSString).draw(
-            at: CGPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2),
-            withAttributes: attributes
-        )
-    }
+    /// A label's size, as a share of the pill's height.
+    private static let labelShare: CGFloat = 0.34
+    /// The line between the halves: its opacity, width, and the space it
+    /// leaves above and below, as a share of the pill's height.
+    private static let lineOpacity = 0.35
+    private static let lineWidth: CGFloat = 1
+    private static let lineInsetShare: CGFloat = 0.24
 
-    /// Draws the SF Symbol `name`, centred in `frame`, sized to it.
-    private func drawSymbol(_ name: String, in frame: CGRect) {
-        let side = min(frame.width, frame.height) * Self.glyphShare
-        let configuration = UIImage.SymbolConfiguration(pointSize: side, weight: .semibold)
-        guard let image = UIImage(systemName: name, withConfiguration: configuration)?
-            .withTintColor(Self.ink, renderingMode: .alwaysOriginal) else { return }
-        let size = image.size
-        image.draw(in: CGRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2, width: size.width, height: size.height))
+    var body: some View {
+        let rect = pill.rect
+        HStack(spacing: 0) {
+            ForEach(Array(pill.halves.enumerated()), id: \.element.control) { index, half in
+                if index > 0 {
+                    Rectangle()
+                        .fill(.white.opacity(Self.lineOpacity))
+                        .frame(width: Self.lineWidth)
+                        .padding(.vertical, rect.height * Self.lineInsetShare)
+                }
+                Text(Control(rawValue: half.control)?.label ?? "")
+                    .font(.system(size: rect.height * Self.labelShare, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(half.held ? heldTint : Color.clear)
+            }
+        }
+        .clipShape(.capsule)
+        .glassEffect(Glass.regular, in: .capsule)
+        .frame(width: rect.width, height: rect.height)
+        .position(x: rect.midX, y: rect.midY)
     }
 }
