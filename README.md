@@ -6,51 +6,204 @@ Quick Desktop Protocol (QDP): a fast and modern alternative to RDP and VNC
 The protocol is specified in [`doc/spec`](doc/spec), with the reasoning behind
 its design in [`doc/design-rationale.md`](doc/design-rationale.md).
 
-## Trying it
+## Building
 
-Building needs a Rust toolchain and a C compiler, which the codecs use for
-their hand-written assembly. On x86-64 it also needs NASM:
-
-```bash
-sudo dnf install nasm
-```
-
-On Debian and Ubuntu that is `sudo apt install nasm`, on Arch
-`sudo pacman -S nasm`, and on macOS with Homebrew `brew install nasm` (only
-needed on Intel Macs). Apple Silicon Macs need only the Xcode command line
-tools. On Windows, install NASM, for example with `winget install NASM.NASM`,
-alongside the Visual Studio C++ build tools that Rust uses there.
-
-On Linux, screen capture uses PipeWire, whose development files and libclang
-are needed to build it, and gamepads use libudev:
+Every build needs Rust 1.87 or later, which [rustup](https://rustup.rs)
+installs (CI builds with 1.97), and a C compiler, which the codecs use for
+their hand-written assembly. Start from a clone of the repository:
 
 ```bash
-sudo dnf install pipewire-devel clang-devel systemd-devel
+git clone https://github.com/ianmarmour/qdp.git && cd qdp
 ```
 
-On Debian and Ubuntu that is
-`sudo apt install libpipewire-0.3-dev libclang-dev libudev-dev`, and on Arch
-`sudo pacman -S pipewire clang systemd-libs`. Audio uses PipeWire on Linux too.
-To build without screen capture, audio and gamepads instead, pass
-`--no-default-features --features window`.
+`cargo build --release` builds the `qdp` command, which is both the host and
+the client, and the gateway, `qdp-gateway`, into `target/release`. The apps
+build with their platforms' tools, as below.
 
-Build the `qdp` command, which is both the host and the client:
+### On Linux
+
+Install the compiler, NASM (for x86-64), PipeWire's and libudev's development
+files and libclang for screen capture, audio and gamepads, and GTK 4's and
+libadwaita's for the Linux app. On Fedora:
+
+```bash
+sudo dnf install gcc nasm pkgconf-pkg-config clang-devel pipewire-devel systemd-devel gtk4-devel libadwaita-devel
+```
+
+On Debian and Ubuntu:
+
+```bash
+sudo apt install build-essential nasm pkg-config clang libclang-dev libpipewire-0.3-dev libudev-dev libgtk-4-dev libadwaita-1-dev
+```
+
+On Arch:
+
+```bash
+sudo pacman -S base-devel nasm clang pipewire systemd-libs gtk4 libadwaita
+```
+
+Build `qdp` and `qdp-gateway`:
 
 ```bash
 cargo build --release
 ```
 
-This builds every crate but the Linux app, which needs GTK 4's and
-libadwaita's development files and pkg-config besides, and builds with
-`cargo build --release -p qdp-gtk` (see [Linux app](#linux-app)):
+Build the Linux app, which runs the `qdp` built beside it:
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel
+cargo build --release -p qdp-gtk
 ```
 
-On Debian and Ubuntu that is
-`sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config`, and on Arch
-`sudo pacman -S gtk4 libadwaita`.
+To build `qdp` without screen capture, audio and gamepads, and so without
+PipeWire and libudev, pass `--no-default-features --features window`.
+
+The packages build from those programs: the RPMs with `rpmbuild` (`rpm-build`
+on Fedora, `rpm` on Debian and Ubuntu), and the Debian packages with
+`dpkg-deb`, which Debian and Ubuntu have:
+
+```bash
+packaging/linux/build-rpm.sh target/release/qdp 1 qdp.rpm
+```
+
+```bash
+packaging/linux/build-deb.sh qdp target/release/qdp 1 qdp.deb
+```
+
+```bash
+packaging/linux/build-deb.sh qdp-gateway target/release/qdp-gateway 1 qdp-gateway.deb
+```
+
+The Android app builds on Linux or a Mac. It needs JDK 17 or later, the
+Android SDK with its NDK (Android Studio's SDK Manager installs both, the NDK
+under SDK Tools as NDK (Side by side)), and Rust's Android target:
+
+```bash
+rustup target add aarch64-linux-android
+```
+
+Build it, which builds its Rust core first, into
+`android/app/build/outputs/apk/release/app-release.apk`, or replace
+`assembleRelease` with `installRelease` to install it on a device connected
+with USB debugging. On a Mac the SDK is in `~/Library/Android/sdk`:
+
+```bash
+cd android && ANDROID_HOME=~/Android/Sdk ./gradlew assembleRelease
+```
+
+### On macOS
+
+Install Xcode 26 from the App Store, which brings the compiler, open it once
+to accept its license, and install XcodeGen, which writes the apps' Xcode
+project, with [Homebrew](https://brew.sh). Macs with Apple silicon need
+nothing else; Intel Macs also need NASM (`brew install nasm`) for `qdp`, and
+the apps run only on Apple silicon.
+
+```bash
+brew install xcodegen
+```
+
+Build `qdp` and `qdp-gateway`:
+
+```bash
+cargo build --release
+```
+
+For the Mac, iPhone and iPad apps, add Rust's Apple targets:
+
+```bash
+rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+```
+
+Then build their Rust core and generate the Xcode project, from the `apple`
+folder:
+
+```bash
+cd apple && ./build-core.sh && xcodegen generate
+```
+
+Build the Mac app, signed ad hoc, into `apple/build/Build/Products/Release/QDP.app`:
+
+```bash
+xcodebuild -project QDP.xcodeproj -scheme QDP-macOS -configuration Release -destination 'generic/platform=macOS' -derivedDataPath build CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+```
+
+```bash
+open build/Build/Products/Release/QDP.app
+```
+
+For the iPhone or iPad app, open the project in Xcode, choose the `QDP-iOS`
+scheme and your device, choose your team under Signing & Capabilities, and
+run it:
+
+```bash
+open QDP.xcodeproj
+```
+
+Rebuild the core with `./build-core.sh` after changing its Rust code; Xcode
+picks it up on its next build. The Android app builds on a Mac as on
+[Linux](#on-linux).
+
+### On Windows
+
+Install, from a terminal, the Visual Studio C++ build tools, which Rust uses
+to compile and link; Rust; NASM; Git; and, for the Windows app, the .NET 8
+SDK:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+```powershell
+foreach ($id in 'Rustlang.Rustup', 'NASM.NASM', 'Git.Git', 'Microsoft.DotNet.SDK.8') { winget install --exact --id $id }
+```
+
+NASM's installer does not add itself to the `PATH`: add
+`C:\Program Files\NASM` to your user's, then open a new terminal, which has
+it and the other installs' changes:
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';C:\Program Files\NASM', 'User')
+```
+
+Build `qdp.exe` and `qdp-gateway.exe`:
+
+```powershell
+cargo build --release
+```
+
+Build the Windows app, which builds its Rust core first, into
+`windows\publish\QDP.exe`, and zips it into `qdp-windows-app-x64.zip`:
+
+```powershell
+.\windows\build.ps1
+```
+
+The installers need the [WiX Toolset](https://wixtoolset.org) 5, a .NET
+tool, and the gateway's installer its firewall and utility extensions:
+
+```powershell
+dotnet tool install --global wix --version 5.0.2
+```
+
+```powershell
+wix extension add --global WixToolset.Firewall.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+```
+
+Build the app's installer, with `qdp.exe`, after `windows\build.ps1`, and the
+gateway's; the last number is the installer's build, which each upgrade
+raises:
+
+```powershell
+.\packaging\windows\build-msi.ps1 app qdp-windows-x64.msi 1
+```
+
+```powershell
+.\packaging\windows\build-msi.ps1 gateway qdp-gateway-windows-x64.msi 1
+```
+
+## Trying it
+
+Build the `qdp` command as [Building](#building) says.
 
 On the host, serve. The host creates its key in `./qdp-identity` the first
 time, listens on UDP port 4433 unless given `--listen`, and advertises itself
@@ -394,19 +547,8 @@ app, which QDP does not have yet.
 The Android app in [`android`](android) streams from a host to phones,
 tablets and gaming handhelds running Android 10 or later on 64-bit ARM. It
 decodes AV1 with the device's hardware decoder, straight into the screen, and
-in software on devices without one. Building it needs the Android SDK and NDK,
-JDK 17 or later, and Rust's Android target:
-
-```bash
-rustup target add aarch64-linux-android
-```
-
-Build the app, which builds its Rust core first, and install it on a device
-connected with USB debugging:
-
-```bash
-cd android && ANDROID_HOME=~/Android/Sdk ./gradlew installRelease
-```
+in software on devices without one. [Building](#on-linux) says how to build
+it and install it on a device.
 
 The app lists the hosts on the local network, as `qdp serve` advertises them,
 and the hosts it paired with, as cards. Tapping a new host pairs with it: the
@@ -439,16 +581,7 @@ around the same Rust core as the Android app, [`qdp-apple`](crates/qdp-apple),
 which decodes AV1 with VideoToolbox where the device has an AV1 decoder (M3
 and later Macs, iPhone 15 Pro and later, iPads with an M4 or A17 Pro) and in
 software otherwise, and draws with Metal on a thread of its own, as `qdp
-connect` does on a Mac. Building them needs Xcode 26, XcodeGen and Rust's Apple
-targets:
-
-```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
-```
-
-```bash
-cd apple && ./build-core.sh && xcodegen generate && open QDP.xcodeproj
-```
+connect` does on a Mac. [Building](#on-macos) says how to build them.
 
 Both apps list the hosts on the local network and those they paired with;
 choosing a new host pairs with it by the code the host shows, and choosing a
@@ -478,14 +611,8 @@ programs their own C runtime. It installs the app in `C:\Program Files\QDP`
 with a Start menu shortcut, and the `qdp` command, for hosting a PC, on the
 PATH; installing a later build upgrades it in place, and Settings, Apps
 removes it. The app also runs without installing from its folder, the
-release's `qdp-windows-app-x64.zip`. Building it needs Rust, NASM and the
-.NET 8 SDK, and the installer the [WiX Toolset](https://wixtoolset.org) 5:
-
-```powershell
-.\windows\build.ps1
-cargo build --release -p qdp-cli
-.\packaging\windows\build-msi.ps1 app qdp-windows-x64.msi 1
-```
+release's `qdp-windows-app-x64.zip`. [Building](#on-windows) says how to
+build it and its installer.
 
 The app lists the hosts on the local network and those it connected to
 before; choosing a new host pairs with it by the code the host shows, and
@@ -531,16 +658,9 @@ the one on the `PATH`. The release's `qdp-gtk-linux-x86_64.rpm`, with `qdp`'s RP
 installs it with its desktop entry, icons and AppStream metadata, so that it
 shows in the desktop's menus and software center; its
 `qdp-gtk-linux-x86_64.tar.gz`, extracted into `~/.local`, installs it for one
-user. Building it needs GTK's and libadwaita's development files, as
-`libgtk-4-dev`, `libadwaita-1-dev` and `pkg-config` on Debian and Ubuntu,
-`gtk4-devel` and `libadwaita-devel` on Fedora, or `gtk4` and `libadwaita` on
-Arch:
-
-```bash
-cargo build --release -p qdp-cli -p qdp-gtk && ./target/release/qdp-gtk
-```
-
-To install a build for yourself, with its menu entry and icons:
+user. [Building](#on-linux) says how to build it; run the build with
+`./target/release/qdp-gtk`, or install it for yourself, with its menu entry
+and icons:
 
 ```bash
 packaging/linux/stage-gtk.sh target/release/qdp-gtk ~/.local && cp target/release/qdp ~/.local/bin/
