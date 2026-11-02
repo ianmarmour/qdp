@@ -10,7 +10,7 @@
 //! [directory]
 //! url = "ldaps://dc1.corp.example.com"
 //! bind_dn = "CN=qdp-gateway,OU=Service Accounts,DC=corp,DC=example,DC=com"
-//! bind_password_file = "/etc/qdp-gateway/directory-password"
+//! bind_password_file = "directory-password"
 //! base_dn = "DC=corp,DC=example,DC=com"
 //!
 //! [totp]
@@ -28,6 +28,9 @@
 //! networks = ["10.20.0.0/16"]
 //! groups = ["QDP Users"]
 //! ```
+//!
+//! A relative path is of a file beside the configuration, which lets one
+//! example serve Linux and Windows.
 //!
 //! Hosts are listed to users and opened by their IDs. Routes let users open
 //! hosts by their names inside the network, as a client configured with the
@@ -398,12 +401,35 @@ impl Config {
             path: path.to_owned(),
             source,
         })?;
-        let config: Self = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+        let mut config: Self = toml::from_str(&text).map_err(|source| ConfigError::Parse {
             path: path.to_owned(),
             source: Box::new(source),
         })?;
         config.check()?;
+        if let Some(folder) = path.parent() {
+            config.resolve_paths(folder);
+        }
         Ok(config)
+    }
+
+    /// Makes the relative paths of files paths beside the configuration,
+    /// in `folder`, rather than in whatever folder the gateway runs in: a
+    /// Windows service's is the system's own.
+    fn resolve_paths(&mut self, folder: &Path) {
+        let resolve = |path: &mut PathBuf| {
+            if path.is_relative() {
+                *path = folder.join(&*path);
+            }
+        };
+        resolve(&mut self.state_directory);
+        if let Some(tls) = &mut self.tls {
+            resolve(&mut tls.certificate);
+            resolve(&mut tls.private_key);
+        }
+        if let Some(certificate) = &mut self.directory.ca_certificate {
+            resolve(certificate);
+        }
+        resolve(&mut self.directory.bind_password_file);
     }
 
     /// Returns the issuer authenticator apps show.
@@ -711,6 +737,23 @@ mod tests {
             parse(&strict).unwrap().totp.enrollment,
             Enrollment::AdminOnly
         );
+    }
+
+    #[test]
+    fn reads_the_packaged_example_with_files_beside_it() {
+        let folder =
+            std::env::temp_dir().join(format!("qdp-gateway-config-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("gateway.toml");
+        fs::write(&path, include_str!("../../../packaging/gateway.toml")).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.directory.bind_password_file,
+            folder.join("directory-password")
+        );
+        // Absolute paths are kept as they are.
+        assert!(config.state_directory.is_absolute());
+        fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

@@ -1,0 +1,5 @@
+# Windows programs link the C runtime statically, so that qdp.exe, the
+# gateway and the Windows app's core run without the Visual C++
+# Redistributable installed first.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
