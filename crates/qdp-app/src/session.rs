@@ -5,6 +5,12 @@
 //! (Section 4.4.7). A session that pairs (Section 4.4.9) asks the app for the
 //! code the host shows, and again, on a new connection, when a code did not
 //! work; once paired it authenticates with the device's key.
+//!
+//! A session through a gateway (Section 13) opens a tunnel to the host for
+//! each connection, signing in with the session token the app kept from an
+//! earlier sign-in, or else asking the app for the user's password and a
+//! code from their authenticator app; the gateway's new token goes to the
+//! app to keep.
 
 use std::fmt;
 use std::future::Future;
@@ -20,17 +26,18 @@ use qdp::message::KeyboardInfo;
 use qdp_codec::CodecPreference;
 use qdp_quic::{ClientEndpoint, HostVerification, IdentityFiles, KeyPin, TlsIdentity};
 use qdp_runtime::{
-    ClientAudio, ClientCredentials, ClientOptions, DisplaySize, InputHandle, InputQueue,
-    Microphone, PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard, UserInput,
-    input_channel,
+    ClientAudio, ClientCredentials, ClientOptions, DisplaySize, GatewayFailure, GatewayRoute,
+    InputHandle, InputQueue, Microphone, PairingPrompt, ResumptionSlot, RuntimeError,
+    SharedClipboard, SignInAnswer, SignInPrompt, UserInput, gateway_verification, input_channel,
+    open_tunnel,
 };
 use tokio::sync::{Notify, oneshot};
 use tracing::{info, warn};
 
 use qdp::message::CursorImage;
 
-use crate::events::{CodeRequest, Ending, Event};
-use crate::settings::{SERVER_NAME, resolve_address};
+use crate::events::{CodeRequest, Ending, Event, GatewayToken};
+use crate::settings::{SERVER_NAME, gateway_server_name, resolve_address, resolve_address_on};
 use crate::sink::{AppSink, Presenter, SharedCursor};
 
 /// The wait before reconnecting the first time after a connection is lost.
@@ -48,6 +55,16 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How often a wait for the app's next event looks for gamepad rumble.
 const FEEDBACK_POLL: Duration = Duration::from_millis(10);
+
+/// Why a session through a gateway failed when the gateway gave no
+/// assertion for the host.
+const NOT_VOUCHED: &str = "the gateway does not vouch for you to this computer, as it does not \
+    know its key; ask its administrator to list it on the gateway";
+
+/// Why a session failed when neither the app nor the gateway knew the
+/// host's key.
+const UNKNOWN_HOST_KEY: &str = "the gateway does not know this computer's key, so it cannot be \
+    verified; add it with its key pin, or ask the gateway's administrator to list it";
 
 /// Why a session that pairs failed when the host refused before showing a
 /// code.
@@ -76,6 +93,9 @@ pub enum Authentication {
         /// The device's name, which the host shows with the code.
         device_name: String,
     },
+    /// Through a gateway, which vouches for the user to the host with an
+    /// identity assertion and knows the host's key (Section 13.7).
+    Gateway,
 }
 
 /// Hides the token.
@@ -91,7 +111,32 @@ impl fmt::Debug for Authentication {
                 .debug_struct("Pair")
                 .field("device_name", device_name)
                 .finish(),
+            Self::Gateway => formatter.write_str("Gateway"),
         }
+    }
+}
+
+/// A gateway a session reaches its host through (Section 13).
+#[derive(Clone, PartialEq, Eq)]
+pub struct GatewayConfig {
+    /// Its address: a name or IP address, with an optional port (443 by
+    /// default).
+    pub address: String,
+    /// Its key pin, if the user set one; otherwise the system's certificate
+    /// authorities verify it.
+    pub pin: Option<KeyPin>,
+    /// The session token the app kept from an earlier sign-in, if any.
+    pub session_token: Option<Vec<u8>>,
+}
+
+/// Hides the session token.
+impl fmt::Debug for GatewayConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GatewayConfig")
+            .field("address", &self.address)
+            .field("pin", &self.pin)
+            .finish_non_exhaustive()
     }
 }
 
@@ -101,8 +146,11 @@ pub struct Config {
     /// The product name the client sends in `CLIENT_HELLO`, such as
     /// `qdp-android/0.1.0`.
     pub client_name: String,
-    /// The host's address or name, with or without a port.
+    /// The host's address or name, with or without a port; through a
+    /// gateway, its ID there or its name inside the network.
     pub host: String,
+    /// The gateway the host is reached through, if any.
+    pub gateway: Option<GatewayConfig>,
     /// How the session authenticates.
     pub authentication: Authentication,
     /// The directory the device's key is kept in.
@@ -137,6 +185,8 @@ pub struct Session {
     stop: Arc<Notify>,
     /// Where the code the app is asked for goes, while it is asked for.
     code: CodeSlot,
+    /// Where the answer to a gateway's sign-in goes, while it is asked for.
+    sign_in: SignInSlot,
     /// The session's thread, until it has been joined.
     thread: Option<JoinHandle<()>>,
 }
@@ -144,6 +194,10 @@ pub struct Session {
 /// Where the user's answer to a request for a pairing code goes: the code,
 /// or `None` if they declined.
 type CodeSlot = Arc<Mutex<Option<oneshot::Sender<Option<String>>>>>;
+
+/// Where the user's answer to a gateway's sign-in goes: their credentials or
+/// code, or `None` if they declined.
+type SignInSlot = Arc<Mutex<Option<oneshot::Sender<Option<SignInAnswer>>>>>;
 
 impl Session {
     /// Starts a session with `config` on a new thread, showing its video
@@ -158,13 +212,17 @@ impl Session {
         let cursor = SharedCursor::default();
         let stop = Arc::new(Notify::new());
         let code = CodeSlot::default();
+        let sign_in = SignInSlot::default();
         let thread = std::thread::Builder::new()
             .name("qdp-session".to_owned())
             .spawn({
                 let cursor = Arc::clone(&cursor);
                 let stop = Arc::clone(&stop);
-                let code = Arc::clone(&code);
-                move || run_thread(&config, presenter, queue, sender, cursor, &stop, code)
+                let prompts = Prompts {
+                    code: Arc::clone(&code),
+                    sign_in: Arc::clone(&sign_in),
+                };
+                move || run_thread(&config, presenter, queue, sender, cursor, &stop, prompts)
             })?;
         Ok(Self {
             events: EventReader {
@@ -175,8 +233,23 @@ impl Session {
             cursor,
             stop,
             code,
+            sign_in,
             thread: Some(thread),
         })
+    }
+
+    /// Answers the gateway's request for the user's credentials or code
+    /// with `answer`, or declines with `None`. Does nothing while nothing
+    /// is asked for.
+    pub fn answer_sign_in(&self, answer: Option<SignInAnswer>) {
+        let sender = self
+            .sign_in
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(answer);
+        }
     }
 
     /// Returns a handle that sends the user's input to the session from any
@@ -286,6 +359,15 @@ impl EventReader {
     }
 }
 
+/// Where the app's answers to what a session asks go.
+#[derive(Debug, Clone)]
+struct Prompts {
+    /// A pairing code.
+    code: CodeSlot,
+    /// A gateway's sign-in.
+    sign_in: SignInSlot,
+}
+
 /// Runs a session with `config` on the session's thread, telling the app
 /// through `events` how it went, until it ends or `stop` is notified.
 fn run_thread<P: Presenter>(
@@ -295,7 +377,7 @@ fn run_thread<P: Presenter>(
     events: Sender<Event>,
     cursor: SharedCursor,
     stop: &Notify,
-    code: CodeSlot,
+    prompts: Prompts,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -310,7 +392,7 @@ fn run_thread<P: Presenter>(
                 stop.notified(),
                 input,
                 &events,
-                code,
+                prompts,
             ))
         }
         Err(error) => Ending::Failed(format!("cannot start the session's runtime: {error}")),
@@ -322,106 +404,186 @@ fn run_thread<P: Presenter>(
     let _ = events.send(Event::Ended(ending));
 }
 
-/// Connects to the host and shows its stream in `sink`, sending the user's
-/// input from `input`, until the host closes, the session fails, or `stop`
-/// completes. A pairing code the app is asked for comes through `code`.
+/// Connects to the host, directly or through a gateway, and shows its stream
+/// in `sink`, sending the user's input from `input`, until the host closes,
+/// the session fails, or `stop` completes. The app's answers to what the
+/// session asks come through `prompts`.
 async fn receive<P: Presenter>(
     config: &Config,
     sink: &mut AppSink<P>,
     stop: impl Future<Output = ()>,
     mut input: InputQueue,
     events: &Sender<Event>,
-    code: CodeSlot,
+    prompts: Prompts,
 ) -> Ending {
-    let host = config.host.clone();
-    let address = match tokio::task::spawn_blocking(move || resolve_address(&host)).await {
-        Ok(Ok(address)) => address,
-        Ok(Err(error)) => return Ending::Failed(error),
-        Err(error) => return Ending::Failed(format!("cannot resolve the host: {error}")),
-    };
-    let local = if address.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0u16; 8], 0))
-    };
-    let mut endpoint = match ClientEndpoint::bind(local) {
-        Ok(endpoint) => endpoint,
-        Err(error) => return Ending::Failed(format!("cannot open a socket: {error}")),
-    };
     // The device presents its key to every host, so that one that paired
-    // with it, or was given its pin, recognizes it.
+    // with it, or was given its pin, recognizes it, and to the gateway,
+    // which binds its assertions to it.
     let directory = config.identity_directory.clone();
     let identity = tokio::task::spawn_blocking(move || {
         TlsIdentity::load_or_generate(&directory, IdentityFiles::CLIENT)
     })
     .await;
-    let client_key = match identity {
-        Ok(Ok((identity, _))) => match identity.key_pin() {
-            Ok(pin) => {
-                endpoint.set_identity(identity);
-                pin
-            }
-            Err(error) => return Ending::Failed(format!("the device's key is unusable: {error}")),
-        },
+    let identity = match identity {
+        Ok(Ok((identity, _))) => identity,
         Ok(Err(error)) => return Ending::Failed(format!("cannot keep the device's key: {error}")),
         Err(error) => return Ending::Failed(format!("cannot load the device's key: {error}")),
     };
+    let client_key = match identity.key_pin() {
+        Ok(pin) => pin,
+        Err(error) => return Ending::Failed(format!("the device's key is unusable: {error}")),
+    };
+    let route = match &config.gateway {
+        Some(gateway) => match gateway_route(gateway, &config.host).await {
+            Ok(route) => Route::Gateway(route),
+            Err(error) => return Ending::Failed(error),
+        },
+        None => match direct_route(&config.host, &identity).await {
+            Ok(route) => route,
+            Err(error) => return Ending::Failed(error),
+        },
+    };
+    // The endpoint of the connection under way, which closes when the user
+    // ends the session.
+    let current = Mutex::new(match &route {
+        Route::Direct { endpoint, .. } => Some(Arc::clone(endpoint)),
+        Route::Gateway(_) => None,
+    });
+    let sign_in = sign_in_prompt(&prompts.sign_in, events);
     let resumption = ResumptionSlot::default();
     let pairing = Pairing::default();
     let sessions = async {
         let (mut credentials, mut verification) = match &config.authentication {
             Authentication::Token { pin, token } => (
                 ClientCredentials::Token(token.as_bytes().to_vec()),
-                HostVerification::PinnedKeys(vec![*pin]),
+                Some(HostVerification::PinnedKeys(vec![*pin])),
             ),
             Authentication::Paired { pin } => (
                 ClientCredentials::Certificate,
-                HostVerification::PinnedKeys(vec![*pin]),
+                Some(HostVerification::PinnedKeys(vec![*pin])),
             ),
             Authentication::Pair { device_name } => (
                 ClientCredentials::Pairing {
                     device_name: device_name.clone(),
                     client_key,
                 },
-                HostVerification::Pairing,
+                Some(HostVerification::Pairing),
             ),
+            // The gateway's assertion and the host's pin it knows take
+            // their places for each connection.
+            Authentication::Gateway => (ClientCredentials::Certificate, None),
         };
+        let mut session_token = config
+            .gateway
+            .as_ref()
+            .and_then(|gateway| gateway.session_token.clone());
         // While resuming: when the token in hand expires.
         let mut deadline = None;
         let mut delay = FIRST_RECONNECT_DELAY;
         loop {
             let pairs = matches!(credentials, ClientCredentials::Pairing { .. });
             pairing.asked.store(false, Ordering::Relaxed);
-            let options = ClientOptions {
-                client_name: config.client_name.clone(),
-                credentials: credentials.clone(),
-                display: config.display,
-                decoder_threads: 0,
-                decoder: config.decoder,
-                decoder_process: None,
-                keyboard_info: config
-                    .keyboard_info
-                    .and_then(|keyboard_info| keyboard_info()),
-                resumption: resumption.clone(),
-                pairing_prompt: pairs.then(|| pairing.prompt(&code, events)),
+            let attempt = match &route {
+                Route::Direct { endpoint, address } => Ok(Attempt {
+                    endpoint: Arc::clone(endpoint),
+                    address: *address,
+                    server_name: SERVER_NAME.to_owned(),
+                    verification: verification.clone(),
+                    credentials: credentials.clone(),
+                }),
+                Route::Gateway(gateway) => {
+                    let tunnel = open_tunnel(
+                        gateway,
+                        &identity,
+                        &config.client_name,
+                        session_token.as_deref(),
+                        &sign_in,
+                    )
+                    .await;
+                    match tunnel {
+                        Ok(tunnel) => {
+                            if let Some(token) = &tunnel.session_token {
+                                session_token = Some(token.token.clone());
+                                let _ = events.send(Event::GatewaySession {
+                                    token: GatewayToken(token.token.clone()),
+                                    lifetime: token.lifetime,
+                                });
+                            }
+                            let host_verification = match (&verification, tunnel.host_pin) {
+                                (Some(HostVerification::Pairing), _) => {
+                                    Some(HostVerification::Pairing)
+                                }
+                                (_, Some(pin)) => Some(HostVerification::PinnedKeys(vec![pin])),
+                                (known, None) => known.clone(),
+                            };
+                            // The assertion vouches for the user, unless
+                            // the session resumes with the host's token.
+                            let vouched = config.authentication == Authentication::Gateway
+                                && credentials == ClientCredentials::Certificate;
+                            let attempt_credentials = match tunnel.assertion {
+                                Some(assertion) if vouched => ClientCredentials::Token(assertion),
+                                None if vouched => {
+                                    return Ending::Failed(NOT_VOUCHED.to_owned());
+                                }
+                                _ => credentials.clone(),
+                            };
+                            Ok(Attempt {
+                                endpoint: Arc::new(tunnel.endpoint),
+                                address: tunnel.address,
+                                server_name: tunnel.server_name,
+                                verification: host_verification,
+                                credentials: attempt_credentials,
+                            })
+                        }
+                        Err(GatewayFailure::Cancelled) => return Ending::Normal,
+                        Err(GatewayFailure::Refused(error)) => return Ending::Failed(error),
+                        Err(GatewayFailure::Unreachable(error)) => {
+                            Err(format!("cannot reach the gateway: {error}"))
+                        }
+                    }
+                }
             };
-            let attempt = connect_once(
-                address,
-                &verification,
-                (config.client_audio)(config.microphone),
-                config.clipboard.and_then(|open| open()),
-                &endpoint,
-                &options,
-                sink,
-                &mut input,
-                events,
-            );
-            let result = attempt.await;
+            let result = match attempt {
+                Ok(attempt) => {
+                    let Some(host_verification) = attempt.verification.clone() else {
+                        return Ending::Failed(UNKNOWN_HOST_KEY.to_owned());
+                    };
+                    *current.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(Arc::clone(&attempt.endpoint));
+                    let options = ClientOptions {
+                        client_name: config.client_name.clone(),
+                        credentials: attempt.credentials.clone(),
+                        display: config.display,
+                        decoder_threads: 0,
+                        decoder: config.decoder,
+                        decoder_process: None,
+                        keyboard_info: config
+                            .keyboard_info
+                            .and_then(|keyboard_info| keyboard_info()),
+                        resumption: resumption.clone(),
+                        pairing_prompt: pairs.then(|| pairing.prompt(&prompts.code, events)),
+                    };
+                    connect_once(
+                        attempt.address,
+                        &attempt.server_name,
+                        &host_verification,
+                        (config.client_audio)(config.microphone),
+                        config.clipboard.and_then(|open| open()),
+                        &attempt.endpoint,
+                        &options,
+                        sink,
+                        &mut input,
+                        events,
+                    )
+                    .await
+                }
+                Err(error) => Err(Failure::Lost(error)),
+            };
             // Once paired, the session goes on with the device's key, which
             // the host now accepts.
             if let Some(host_key) = pairing.host() {
                 credentials = ClientCredentials::Certificate;
-                verification = HostVerification::PinnedKeys(vec![host_key]);
+                verification = Some(HostVerification::PinnedKeys(vec![host_key]));
             }
             let error = match result {
                 Ok(()) => return Ending::Normal,
@@ -471,18 +633,105 @@ async fn receive<P: Presenter>(
                 // The user ended the session: the connection closes normally
                 // first, so that the host knows the client left rather than
                 // the network dropping (Section 11.4).
-                endpoint.close(VIEWER_CLOSED);
+                if let Some(endpoint) = current.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                    endpoint.close(VIEWER_CLOSED);
+                }
                 Ending::Normal
             }
         }
     };
-    if tokio::time::timeout(CLOSE_TIMEOUT, endpoint.wait_idle())
-        .await
-        .is_err()
+    let endpoint = current
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some(endpoint) = endpoint
+        && tokio::time::timeout(CLOSE_TIMEOUT, endpoint.wait_idle())
+            .await
+            .is_err()
     {
         warn!("the connection did not close in time");
     }
     ending
+}
+
+/// How a session reaches its host.
+#[derive(Debug)]
+enum Route {
+    /// Directly, from this endpoint, at this address.
+    Direct {
+        /// The endpoint every connection is made from.
+        endpoint: Arc<ClientEndpoint>,
+        /// The host's address.
+        address: SocketAddr,
+    },
+    /// Through a gateway, a tunnel for each connection.
+    Gateway(GatewayRoute),
+}
+
+/// Where one connection is made, and how it verifies and authenticates to
+/// the host.
+#[derive(Debug)]
+struct Attempt {
+    /// The endpoint it is made from: the session's own, or a tunnel's.
+    endpoint: Arc<ClientEndpoint>,
+    /// The host's address, or the tunnel's.
+    address: SocketAddr,
+    /// The name sent in the TLS handshake.
+    server_name: String,
+    /// How the host is verified, if its key is known.
+    verification: Option<HostVerification>,
+    /// What the client authenticates with.
+    credentials: ClientCredentials,
+}
+
+/// Returns the route to `host` directly: its address, resolved, and an
+/// endpoint presenting `identity`.
+async fn direct_route(host: &str, identity: &TlsIdentity) -> Result<Route, String> {
+    let host = host.to_owned();
+    let address = tokio::task::spawn_blocking(move || resolve_address(&host))
+        .await
+        .map_err(|error| format!("cannot resolve the host: {error}"))??;
+    let local = if address.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0u16; 8], 0))
+    };
+    let mut endpoint =
+        ClientEndpoint::bind(local).map_err(|error| format!("cannot open a socket: {error}"))?;
+    endpoint.set_identity(identity.clone_key());
+    Ok(Route::Direct {
+        endpoint: Arc::new(endpoint),
+        address,
+    })
+}
+
+/// Returns the route to `target` through `gateway`: the gateway's address,
+/// resolved, its name and how it is verified.
+async fn gateway_route(gateway: &GatewayConfig, target: &str) -> Result<GatewayRoute, String> {
+    let text = gateway.address.clone();
+    let address = tokio::task::spawn_blocking(move || {
+        resolve_address_on(&text, qdp::gateway::DEFAULT_GATEWAY_PORT)
+    })
+    .await
+    .map_err(|error| format!("cannot resolve the gateway: {error}"))??;
+    Ok(GatewayRoute {
+        address,
+        server_name: gateway_server_name(&gateway.address),
+        verification: gateway_verification(gateway.pin).map_err(|error| error.to_string())?,
+        target: target.trim().to_owned(),
+    })
+}
+
+/// Returns the prompt that asks the app what a gateway's sign-in needs
+/// through `events`, the answer coming through `slot`.
+fn sign_in_prompt(slot: &SignInSlot, events: &Sender<Event>) -> SignInPrompt {
+    let (slot, events) = (Arc::clone(slot), events.clone());
+    SignInPrompt::new(move |request| {
+        let (sender, receiver) = oneshot::channel();
+        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(sender);
+        let _ = events.send(Event::sign_in(request));
+        Box::pin(async move { receiver.await.ok().flatten() })
+    })
 }
 
 /// A session's pairing: whether the app was asked for a code on the
@@ -559,6 +808,7 @@ enum Failure {
 #[allow(clippy::too_many_arguments)]
 async fn connect_once<P: Presenter>(
     address: SocketAddr,
+    server_name: &str,
     verification: &HostVerification,
     audio: ClientAudio,
     clipboard: Option<SharedClipboard>,
@@ -570,7 +820,7 @@ async fn connect_once<P: Presenter>(
 ) -> Result<(), Failure> {
     let _ = events.send(Event::Connecting);
     let connection = endpoint
-        .connect(address, SERVER_NAME, verification.clone())
+        .connect(address, server_name, verification.clone())
         .await
         .map_err(|error| Failure::Lost(format!("cannot connect to {address}: {error}")))?;
     info!(%address, "connected");

@@ -18,6 +18,7 @@
 //! | `pair first\|retry` | Pairing needs the code the host shows; `retry` after a code that did not work. |
 //! | `paired <pin>` | Pairing succeeded with the host whose key pin is `<pin>`, in hexadecimal. |
 //! | `signin first\|retry <gateway>` | The gateway named `<gateway>` needs the user's name and password; `retry` after an attempt that failed. |
+//! | `gatewaysession <token> <seconds>` | The gateway gave a session token, in hexadecimal, valid for `<seconds>`, for the app to keep and start later sessions with. |
 //! | `totp first\|retry <uri\|-> <gateway>` | The gateway needs a code from the user's authenticator app; `<uri>` is an `otpauth://` URI to show as a QR code first, for an app without the gateway's secret yet. |
 //! | `ended` | The session ended normally. |
 //! | `failed <error>` | The session failed. |
@@ -27,14 +28,15 @@
 //! decoder and decoding, each in milliseconds; or five `-` when no frame's
 //! latency is known. The app answers a `pair` line with `Native.pairingCode`,
 //! a `signin` line with the user's name and password, and a `totp` line with
-//! the code.
+//! the code. A `gatewaysession` line's token stands for the user's password
+//! and code, so the app keeps it where it keeps credentials.
 
 use std::fmt;
 use std::time::Duration;
 
 use qdp::message::{PointerKind, PointerMode};
 use qdp_quic::KeyPin;
-use qdp_runtime::{LatencyStages, WarpKind};
+use qdp_runtime::{LatencyStages, SignInRequest, WarpKind};
 
 use crate::settings::format_pin;
 
@@ -97,6 +99,14 @@ pub enum Event {
         /// The gateway's name for users.
         gateway: String,
     },
+    /// A gateway gave a session token, which the app keeps to sign in with
+    /// next time without asking the user (Section 13.4).
+    GatewaySession {
+        /// The token.
+        token: GatewayToken,
+        /// How long it remains valid.
+        lifetime: Duration,
+    },
     /// A gateway needs a TOTP code from the user's authenticator app.
     GatewayCode {
         /// Whether an earlier code did not work.
@@ -109,6 +119,16 @@ pub enum Event {
     },
     /// The session ended.
     Ended(Ending),
+}
+
+/// A gateway's session token, which never shows in logs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GatewayToken(pub Vec<u8>);
+
+impl fmt::Debug for GatewayToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GatewayToken(..)")
+    }
 }
 
 /// Whether the app is asked for something the first time, or again after
@@ -172,6 +192,32 @@ fn milliseconds(duration: Duration) -> String {
     format!("{:.1}", duration.as_secs_f64() * 1000.0)
 }
 
+impl Event {
+    /// Returns the event that asks the app what a gateway's sign-in
+    /// `request` asks for.
+    pub fn sign_in(request: SignInRequest) -> Self {
+        let attempt = |retry: &Option<String>| match retry {
+            Some(_) => CodeRequest::Retry,
+            None => CodeRequest::First,
+        };
+        match request {
+            SignInRequest::Credentials { gateway, retry } => Self::GatewaySignIn {
+                request: attempt(&retry),
+                gateway,
+            },
+            SignInRequest::Code {
+                gateway,
+                enrollment,
+                retry,
+            } => Self::GatewayCode {
+                request: attempt(&retry),
+                enrollment,
+                gateway,
+            },
+        }
+    }
+}
+
 impl fmt::Display for Event {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -220,6 +266,10 @@ impl fmt::Display for Event {
             }
             Self::PairingCode(request) => write!(formatter, "pair {}", request.word()),
             Self::Paired(pin) => write!(formatter, "paired {}", format_pin(*pin)),
+            Self::GatewaySession { token, lifetime } => {
+                let token: String = token.0.iter().map(|byte| format!("{byte:02x}")).collect();
+                write!(formatter, "gatewaysession {token} {}", lifetime.as_secs())
+            }
             Self::GatewaySignIn { request, gateway } => {
                 write!(formatter, "signin {} {gateway}", request.word())
             }
@@ -328,6 +378,13 @@ mod tests {
                     gateway: "Example Corp".to_owned(),
                 },
                 "totp first otpauth://totp/Example%20Corp:alice?secret=AB Example Corp",
+            ),
+            (
+                Event::GatewaySession {
+                    token: GatewayToken(vec![0x01, 0xab]),
+                    lifetime: Duration::from_secs(43_200),
+                },
+                "gatewaysession 01ab 43200",
             ),
             (
                 Event::GatewayCode {

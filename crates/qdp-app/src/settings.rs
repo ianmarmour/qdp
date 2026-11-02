@@ -13,6 +13,9 @@ pub const DEFAULT_PORT: u16 = 4433;
 /// identified by their key pin, so any name does.
 pub const SERVER_NAME: &str = "qdp-host";
 
+/// The name sent to a gateway given by its IP address.
+const GATEWAY_ADDRESS_NAME: &str = "qdp-gateway";
+
 /// The hexadecimal digits of a key pin, as `qdp pin` prints it.
 const PIN_HEX_LENGTH: usize = 64;
 
@@ -30,15 +33,21 @@ const MAX_DISPLAY_SIDE: u32 = 16_384;
 /// `192.168.1.44%en0`: IPv4 addresses need none, so it is dropped, and the
 /// system resolves the interfaces of IPv6 ones, such as `fe80::1%en0`.
 pub fn resolve_address(text: &str) -> Result<SocketAddr, String> {
+    resolve_address_on(text, DEFAULT_PORT)
+}
+
+/// Resolves an address as [`resolve_address`] does, on `default_port` when
+/// it names none, as a gateway's is on 443.
+pub fn resolve_address_on(text: &str, default_port: u16) -> Result<SocketAddr, String> {
     let text = text.trim();
     if let Ok(address) = text.parse::<SocketAddr>() {
         return Ok(address);
     }
     if let Ok(ip) = text.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, DEFAULT_PORT));
+        return Ok(SocketAddr::new(ip, default_port));
     }
     let (host, port) = host_and_port(text);
-    let port = port.unwrap_or(DEFAULT_PORT);
+    let port = port.unwrap_or(default_port);
     let ipv4_with_interface = host
         .split_once('%')
         .and_then(|(address, _interface)| address.parse::<Ipv4Addr>().ok());
@@ -50,6 +59,18 @@ pub fn resolve_address(text: &str) -> Result<SocketAddr, String> {
         .map_err(|error| format!("cannot resolve {text}: {error}"))?
         .next()
         .ok_or_else(|| format!("{text} has no address"))
+}
+
+/// Returns the name of the host an address names, without its port, as a
+/// gateway's certificate names it; the generic `qdp-gateway` for an IP
+/// address, which a pinned gateway's certificate need not name.
+pub fn gateway_server_name(text: &str) -> String {
+    let (host, _) = host_and_port(text.trim());
+    if host.parse::<IpAddr>().is_ok() || host.is_empty() {
+        GATEWAY_ADDRESS_NAME.to_owned()
+    } else {
+        host.to_owned()
+    }
 }
 
 /// Splits an address into its host, without the brackets around an IPv6
@@ -141,6 +162,25 @@ mod tests {
         assert_eq!(
             resolve_address("192.168.1.44%en0").unwrap(),
             "192.168.1.44:4433".parse().unwrap()
+        );
+    }
+
+    /// Gateways are named as their certificates name them, and found on 443.
+    #[test]
+    fn names_gateways() {
+        assert_eq!(
+            gateway_server_name("gw.corp.example.com"),
+            "gw.corp.example.com"
+        );
+        assert_eq!(
+            gateway_server_name("gw.corp.example.com:8443"),
+            "gw.corp.example.com"
+        );
+        assert_eq!(gateway_server_name("192.0.2.9:443"), GATEWAY_ADDRESS_NAME);
+        assert_eq!(gateway_server_name("[2001:db8::9]"), GATEWAY_ADDRESS_NAME);
+        assert_eq!(
+            resolve_address_on("192.0.2.9", 443).unwrap(),
+            "192.0.2.9:443".parse().unwrap()
         );
     }
 

@@ -80,7 +80,7 @@ pub use client_input::{
 pub use clipboard::{Clipboard, ClipboardDirections, Focus, SharedClipboard};
 pub use gateway_route::{
     AnswerFuture, Credentials, GatewayFailure, GatewayRoute, SignInAnswer, SignInPrompt,
-    SignInRequest, Tunnel, open_tunnel,
+    SignInRequest, Tunnel, gateway_verification, open_tunnel,
 };
 pub use gateway_trust::{GatewayTrust, GatewayUser};
 pub use host::{

@@ -2,7 +2,7 @@
 //! with a password and a TOTP code, enrolling a secret the first time, open
 //! hosts by ID and by address, and their datagrams reach a host, here an
 //! echo, through the tunnel; and the clients' own sign-in, `qdp-runtime`'s,
-//! against it.
+//! and an app's session through it to a host that trusts its assertions.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -72,6 +72,8 @@ struct Running {
     pin: KeyPin,
     /// The key hosts trust its assertions with.
     assertion_key: TrustedKey,
+    /// That key's bytes, as a host is given them.
+    assertion_public_key: [u8; 32],
     /// The echo host's port.
     echo_port: u16,
 }
@@ -137,7 +139,8 @@ async fn start(directory: &Path, extra: &str) -> Running {
     let config = Config::load(&config_path).unwrap();
     let keys = GatewayKeys::load(&config).unwrap();
     let pin = keys.tls_pin();
-    let assertion_key = TrustedKey::new(keys.assertion_public_key());
+    let assertion_public_key = keys.assertion_public_key();
+    let assertion_key = TrustedKey::new(assertion_public_key);
     let totp = TotpStore::load(&config.state_directory).unwrap();
     let gateway = Arc::new(Gateway::new(config, users(), keys, totp));
     let endpoint = gateway.endpoint((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
@@ -147,6 +150,7 @@ async fn start(directory: &Path, extra: &str) -> Running {
         address,
         pin,
         assertion_key,
+        assertion_public_key,
         echo_port,
     }
 }
@@ -698,5 +702,184 @@ async fn clients_sign_in_retype_a_code_and_come_back_with_their_token() {
         .await
         .unwrap();
     assert_eq!(again.host_pin, Some(host_pin));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Shows nothing, counting the frames it is given.
+struct CountingPresenter(Arc<std::sync::atomic::AtomicUsize>);
+
+impl qdp_app::sink::Presenter for CountingPresenter {
+    fn show(
+        &mut self,
+        _: qdp_codec::DecodedPicture,
+        _: &qdp_runtime::FrameInfo,
+    ) -> Result<(), String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Starts a QDP host streaming the test pattern to the users the gateway
+/// with `assertion_key` vouches for, until the test ends, and returns its
+/// address and key pin.
+async fn start_vouched_host(assertion_key: [u8; 32]) -> (SocketAddr, KeyPin) {
+    use qdp_runtime::{
+        Admission, EncoderTuning, GatewayTrust, HostAudio, HostAuthenticator, HostDesktop,
+        HostOptions, NoInput, OpenedDesktop, PassthroughPolicy, TestPattern, input_classes,
+    };
+    let identity = TlsIdentity::generate_self_signed(vec!["qdp-host".to_owned()]).unwrap();
+    let pin = identity.key_pin().unwrap();
+    let endpoint = qdp_quic::HostEndpoint::bind((Ipv4Addr::LOCALHOST, 0).into(), identity).unwrap();
+    let address = endpoint.local_address().unwrap();
+    let mut trust = GatewayTrust::new(pin);
+    trust.add_key(assertion_key);
+    let mut authenticator = HostAuthenticator::new().unwrap();
+    authenticator.trust_gateways(trust);
+    let options = HostOptions {
+        host_name: "desk".to_owned(),
+        authenticator,
+        frame_rate: 30,
+        encoder: EncoderTuning {
+            preference: qdp_codec::CodecPreference::Software,
+            speed: 10,
+            quantizer: 100,
+            threads: 2,
+        },
+        passthrough: PassthroughPolicy::default(),
+    };
+    tokio::spawn(async move {
+        let admission = Admission::default();
+        while let Some(incoming) = endpoint.accept().await {
+            let Ok(ticket) = admission.admit(incoming.remote_address().ip()) else {
+                continue;
+            };
+            let Ok(connection) = incoming.establish().await else {
+                continue;
+            };
+            let desktop = HostDesktop {
+                input_classes: input_classes(&NoInput, PassthroughPolicy::default()),
+                clipboard: None,
+                audio: HostAudio::default(),
+                open: Box::new(|| {
+                    Box::pin(async {
+                        Ok(OpenedDesktop {
+                            source: Box::new(TestPattern::new(320, 240)),
+                            injector: Box::new(NoInput),
+                            lock: None,
+                        })
+                    })
+                }),
+            };
+            let _ = qdp_runtime::serve(connection, ticket, &options, desktop).await;
+        }
+    });
+    (address, pin)
+}
+
+/// Runs an app's session to the host `desk` through `gateway`, with the
+/// session token `token` if given, answering what it asks as alice would,
+/// until it shows a few frames. Returns what it asked, and the session
+/// token the gateway gave.
+fn run_app_session(
+    gateway: &Running,
+    identity_directory: &Path,
+    token: Option<Vec<u8>>,
+) -> (Vec<String>, Option<Vec<u8>>) {
+    use qdp_app::events::{Ending, Event};
+    use qdp_app::session::{Authentication, Config, GatewayConfig, Session};
+    use qdp_runtime::{Credentials, SignInAnswer};
+
+    let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let config = Config {
+        client_name: "test".to_owned(),
+        host: "desk".to_owned(),
+        gateway: Some(GatewayConfig {
+            address: gateway.address.to_string(),
+            pin: Some(gateway.pin),
+            session_token: token,
+        }),
+        authentication: Authentication::Gateway,
+        identity_directory: identity_directory.to_owned(),
+        display: qdp_app::settings::display_size(320, 240, 30_000),
+        decoder: qdp_codec::CodecPreference::Software,
+        microphone: qdp_runtime::Microphone::Off,
+        client_audio: |_| qdp_runtime::ClientAudio::default(),
+        clipboard: None,
+        keyboard_info: None,
+    };
+    let presenting = Arc::clone(&frames);
+    let session = Session::start(config, move || CountingPresenter(presenting)).unwrap();
+    let events = session.events();
+    let mut asked = Vec::new();
+    let mut kept = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while frames.load(std::sync::atomic::Ordering::Relaxed) < 5 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no frames; asked {asked:?}"
+        );
+        let Some(event) = events.next(std::time::Duration::from_millis(100)) else {
+            continue;
+        };
+        match event {
+            Event::GatewaySignIn { .. } => {
+                asked.push(event.to_string());
+                session.answer_sign_in(Some(SignInAnswer::Credentials(Credentials {
+                    user: "alice".to_owned(),
+                    password: "wonderland".to_owned(),
+                })));
+            }
+            Event::GatewayCode { ref enrollment, .. } => {
+                let secret = enrolled_secret(enrollment.as_deref().expect("an enrollment"));
+                asked.push(event.to_string());
+                let typed = String::from_utf8(code(&secret)).unwrap();
+                session.answer_sign_in(Some(SignInAnswer::Code(typed)));
+            }
+            Event::GatewaySession { token, .. } => kept = Some(token.0),
+            Event::Ended(Ending::Failed(error)) => panic!("the session failed: {error}"),
+            _ => {}
+        }
+    }
+    session.stop();
+    (asked, kept)
+}
+
+#[test]
+fn app_sessions_sign_in_through_the_gateway_and_come_back_with_its_token() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let directory = state_directory("app");
+    let gateway = runtime.block_on(async {
+        // The host trusts the gateway's assertion key, and the gateway lists
+        // the host's address and pin: a first gateway makes the keys, which
+        // its state directory keeps for a second one that lists the host.
+        let keys = start(&directory, "").await;
+        let (host, host_pin) = start_vouched_host(keys.assertion_public_key).await;
+        start(
+            &directory,
+            &format!(
+                "[[host]]\nid = \"desk\"\nname = \"Desk\"\naddress = \"{host}\"\npin = \"{}\"\ngroups = [\"QDP Users\"]\n",
+                host_pin.to_hex()
+            ),
+        )
+        .await
+    });
+    let identity = directory.join("app-identity");
+
+    // The first session asks for alice's password and, as she has no secret
+    // yet, enrolls her app; the gateway gives a token for the app to keep.
+    let (asked, token) = run_app_session(&gateway, &identity, None);
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[0], "signin first Example Corp");
+    assert!(asked[1].starts_with("totp first otpauth://totp/Example%20Corp:alice?secret="));
+    let token = token.expect("a session token");
+
+    // The next, with the kept token, asks nothing.
+    let (asked, refreshed) = run_app_session(&gateway, &identity, Some(token));
+    assert_eq!(asked, Vec::<String>::new());
+    assert!(refreshed.is_some());
+    drop(runtime);
     let _ = std::fs::remove_dir_all(directory);
 }

@@ -75,35 +75,14 @@ impl EventLines {
     /// Asks the app what `request` asks for, and returns its answer, or
     /// `None` once its input closes.
     fn ask_sign_in(self, request: &SignInRequest) -> Option<SignInAnswer> {
-        let attempt = |retry: &Option<String>| {
-            if retry.is_some() {
-                CodeRequest::Retry
-            } else {
-                CodeRequest::First
-            }
-        };
-        match request {
-            SignInRequest::Credentials { gateway, retry } => {
-                self.send(&Event::GatewaySignIn {
-                    request: attempt(retry),
-                    gateway: gateway.clone(),
-                });
-                let user = read_answer()?;
-                let password = read_raw_answer()?;
-                Some(SignInAnswer::Credentials(Credentials { user, password }))
-            }
-            SignInRequest::Code {
-                gateway,
-                enrollment,
-                retry,
-            } => {
-                self.send(&Event::GatewayCode {
-                    request: attempt(retry),
-                    enrollment: enrollment.clone(),
-                    gateway: gateway.clone(),
-                });
-                read_answer().map(SignInAnswer::Code)
-            }
+        let credentials = matches!(request, SignInRequest::Credentials { .. });
+        self.send(&Event::sign_in(request.clone()));
+        if credentials {
+            let user = read_answer()?;
+            let password = read_raw_answer()?;
+            Some(SignInAnswer::Credentials(Credentials { user, password }))
+        } else {
+            read_answer().map(SignInAnswer::Code)
         }
     }
 }

@@ -17,6 +17,8 @@ qdp-codec.workspace = true
 qdp-quic.workspace = true
 quinn.workspace = true
 ring.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true

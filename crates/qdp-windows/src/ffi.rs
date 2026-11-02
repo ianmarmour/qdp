@@ -347,6 +347,8 @@ unsafe fn start(config: *const QdpConfig) -> Result<QdpSession, String> {
             client_name: CLIENT_NAME.to_owned(),
             host: host.clone(),
             authentication,
+            // The app reaches hosts through no gateway yet.
+            gateway: None,
             identity_directory,
             // The stream window measures its display once it opens.
             display: DisplaySize {
