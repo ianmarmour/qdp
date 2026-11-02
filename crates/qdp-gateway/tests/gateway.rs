@@ -72,8 +72,6 @@ struct Running {
     pin: KeyPin,
     /// The key hosts trust its assertions with.
     assertion_key: TrustedKey,
-    /// That key's bytes, as a host is given them.
-    assertion_public_key: [u8; 32],
     /// The echo host's port.
     echo_port: u16,
 }
@@ -88,8 +86,24 @@ fn state_directory(test: &str) -> PathBuf {
 
 /// Starts an echo host, and a gateway with its state in `directory` that
 /// lists it as `echo` and routes to it by address, configured with `extra`
-/// besides.
+/// besides. The echo speaks no TLS, so the gateway learns no host's key.
 async fn start(directory: &Path, extra: &str) -> Running {
+    start_with(directory, KeyLearning::Off, extra).await
+}
+
+/// Whether a test's gateway learns the keys of hosts the configuration
+/// gives no pin for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyLearning {
+    /// It does, by a handshake with each.
+    On,
+    /// It does not.
+    Off,
+}
+
+/// Starts a gateway as [`start`] does, learning hosts' keys as `learning`
+/// says.
+async fn start_with(directory: &Path, learning: KeyLearning, extra: &str) -> Running {
     let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let echo_port = echo.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -117,6 +131,7 @@ async fn start(directory: &Path, extra: &str) -> Running {
 
         [assertions]
         groups = ["QDP Users"]
+        learn_host_keys = {learn}
 
         [[host]]
         id = "echo"
@@ -132,15 +147,15 @@ async fn start(directory: &Path, extra: &str) -> Running {
 
         {extra}
     "#,
-            state = directory.display()
+            state = directory.display(),
+            learn = learning == KeyLearning::On,
         ),
     )
     .unwrap();
     let config = Config::load(&config_path).unwrap();
     let keys = GatewayKeys::load(&config).unwrap();
     let pin = keys.tls_pin();
-    let assertion_public_key = keys.assertion_public_key();
-    let assertion_key = TrustedKey::new(assertion_public_key);
+    let assertion_key = TrustedKey::new(keys.assertion_public_key());
     let totp = TotpStore::load(&config.state_directory).unwrap();
     let gateway = Arc::new(Gateway::new(config, users(), keys, totp));
     let endpoint = gateway.endpoint((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
@@ -150,7 +165,6 @@ async fn start(directory: &Path, extra: &str) -> Running {
         address,
         pin,
         assertion_key,
-        assertion_public_key,
         echo_port,
     }
 }
@@ -776,12 +790,13 @@ async fn start_vouched_host(assertion_key: [u8; 32]) -> (SocketAddr, KeyPin) {
     (address, pin)
 }
 
-/// Runs an app's session to the host `desk` through `gateway`, with the
+/// Runs an app's session to the host `target` through `gateway`, with the
 /// session token `token` if given, answering what it asks as alice would,
 /// until it shows a few frames. Returns what it asked, and the session
 /// token the gateway gave.
 fn run_app_session(
     gateway: &Running,
+    target: &str,
     identity_directory: &Path,
     token: Option<Vec<u8>>,
 ) -> (Vec<String>, Option<Vec<u8>>) {
@@ -792,7 +807,7 @@ fn run_app_session(
     let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let config = Config {
         client_name: "test".to_owned(),
-        host: "desk".to_owned(),
+        host: target.to_owned(),
         gateway: Some(GatewayConfig {
             address: gateway.address.to_string(),
             pin: Some(gateway.pin),
@@ -844,6 +859,24 @@ fn run_app_session(
     (asked, kept)
 }
 
+/// Returns the key hosts trust the gateway with its state in `directory`
+/// by, making the gateway's keys as `qdp-gateway keys` does before it first
+/// serves.
+fn assertion_key(directory: &Path) -> [u8; 32] {
+    let path = directory.join("keys.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "name = \"Example Corp\"\nstate_directory = \"{}\"\n\n[directory]\nurl = \"ldaps://directory.invalid\"\nbind_dn = \"cn=gateway\"\nbind_password_file = \"/dev/null\"\nbase_dn = \"dc=corp\"\n",
+            directory.display()
+        ),
+    )
+    .unwrap();
+    GatewayKeys::load(&Config::load(&path).unwrap())
+        .unwrap()
+        .assertion_public_key()
+}
+
 #[test]
 fn app_sessions_sign_in_through_the_gateway_and_come_back_with_its_token() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -851,33 +884,33 @@ fn app_sessions_sign_in_through_the_gateway_and_come_back_with_its_token() {
         .build()
         .unwrap();
     let directory = state_directory("app");
-    let gateway = runtime.block_on(async {
-        // The host trusts the gateway's assertion key, and the gateway lists
-        // the host's address and pin: a first gateway makes the keys, which
-        // its state directory keeps for a second one that lists the host.
-        let keys = start(&directory, "").await;
-        let (host, host_pin) = start_vouched_host(keys.assertion_public_key).await;
-        start(
-            &directory,
-            &format!(
-                "[[host]]\nid = \"desk\"\nname = \"Desk\"\naddress = \"{host}\"\npin = \"{}\"\ngroups = [\"QDP Users\"]\n",
-                host_pin.to_hex()
-            ),
+    // Deployed as an administrator would: the gateway's keys first; then
+    // the host, trusting its assertion key; then a route to the host's
+    // network, without the host's address or pin, which the gateway learns.
+    let key = assertion_key(&directory);
+    let (gateway, target) = runtime.block_on(async {
+        let (host, _) = start_vouched_host(key).await;
+        let route = format!(
+            "[[route]]\nnetworks = [\"127.0.0.0/8\"]\nports = [{}]\ngroups = [\"QDP Users\"]\n",
+            host.port()
+        );
+        (
+            start_with(&directory, KeyLearning::On, &route).await,
+            host.to_string(),
         )
-        .await
     });
     let identity = directory.join("app-identity");
 
     // The first session asks for alice's password and, as she has no secret
     // yet, enrolls her app; the gateway gives a token for the app to keep.
-    let (asked, token) = run_app_session(&gateway, &identity, None);
+    let (asked, token) = run_app_session(&gateway, &target, &identity, None);
     assert_eq!(asked.len(), 2, "{asked:?}");
     assert_eq!(asked[0], "signin first Example Corp");
     assert!(asked[1].starts_with("totp first otpauth://totp/Example%20Corp:alice?secret="));
     let token = token.expect("a session token");
 
     // The next, with the kept token, asks nothing.
-    let (asked, refreshed) = run_app_session(&gateway, &identity, Some(token));
+    let (asked, refreshed) = run_app_session(&gateway, &target, &identity, Some(token));
     assert_eq!(asked, Vec::<String>::new());
     assert!(refreshed.is_some());
     drop(runtime);

@@ -1201,7 +1201,9 @@ async fn receive(
                         Attempt::assertion_replaces(&credentials, resuming),
                     )
                     .await
-                    .map(|tunnel| Attempt::through(tunnel, &verification, &credentials, resuming))
+                    .and_then(|tunnel| {
+                        Attempt::through(tunnel, &verification, &credentials, resuming)
+                    })
                 }
                 _ => return Err("a gateway connection needs the client's identity".to_owned()),
             };
@@ -1316,15 +1318,25 @@ impl Attempt {
     /// Returns the attempt through `tunnel`: verifying the host by the key
     /// the gateway knows, unless the client pairs or the gateway knows none,
     /// and authenticating with the gateway's assertion where it replaces
-    /// `credentials`.
+    /// `credentials`; or fails if the gateway reports another key than the
+    /// client pins for the host.
     fn through(
         tunnel: Tunnel,
         verification: &Option<HostVerification>,
         credentials: &ClientCredentials,
         resuming: bool,
-    ) -> Self {
+    ) -> Result<Self, Failure> {
         let verification = match (verification, tunnel.host_pin) {
             (Some(HostVerification::Pairing), _) => Some(HostVerification::Pairing),
+            // A key the client pins for the host and another the gateway
+            // reports: neither is used (Section 13.5).
+            (Some(HostVerification::PinnedKeys(known)), Some(pin)) if !known.contains(&pin) => {
+                return Err(Failure::Fatal(format!(
+                    "the gateway reports another key for {} than this client pins for it: \
+                     check the host's key with its administrator",
+                    tunnel.server_name
+                )));
+            }
             (_, Some(pin)) => Some(HostVerification::PinnedKeys(vec![pin])),
             (known, None) => known.clone(),
         };
@@ -1334,13 +1346,13 @@ impl Attempt {
             }
             _ => credentials.clone(),
         };
-        Self {
+        Ok(Self {
             endpoint: Arc::new(tunnel.endpoint),
             address: tunnel.address,
             server_name: tunnel.server_name,
             verification,
             credentials,
-        }
+        })
     }
 }
 

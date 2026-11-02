@@ -61,6 +61,11 @@ const FEEDBACK_POLL: Duration = Duration::from_millis(10);
 const NOT_VOUCHED: &str = "the gateway does not vouch for you to this computer, as it does not \
     know its key; ask its administrator to list it on the gateway";
 
+/// Why a session through a gateway failed when the gateway reported
+/// another key for the host than the app pins for it.
+const PIN_CONFLICT: &str = "the gateway reports another key for this computer than this app \
+    keeps for it; check the computer's key with its administrator";
+
 /// Why a session failed when neither the app nor the gateway knew the
 /// host's key.
 const UNKNOWN_HOST_KEY: &str = "the gateway does not know this computer's key, so it cannot be \
@@ -512,6 +517,14 @@ async fn receive<P: Presenter>(
                             let host_verification = match (&verification, tunnel.host_pin) {
                                 (Some(HostVerification::Pairing), _) => {
                                     Some(HostVerification::Pairing)
+                                }
+                                // A key the app pins for the host and
+                                // another the gateway reports: neither is
+                                // used (Section 13.5).
+                                (Some(HostVerification::PinnedKeys(known)), Some(pin))
+                                    if !known.contains(&pin) =>
+                                {
+                                    return Ending::Failed(PIN_CONFLICT.to_owned());
                                 }
                                 (_, Some(pin)) => Some(HostVerification::PinnedKeys(vec![pin])),
                                 (known, None) => known.clone(),

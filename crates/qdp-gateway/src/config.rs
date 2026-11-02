@@ -239,6 +239,14 @@ pub struct AssertionConfig {
     /// The groups an assertion reports, of those the user is in.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Whether the gateway learns the key of a host whose pin the
+    /// configuration does not give, as one a route reaches, by a TLS
+    /// handshake of its own with it inside the network, to vouch for users
+    /// to it and tell clients its key (Section 13.5). It then trusts the
+    /// network's names and addresses for hosts' identities, as users inside
+    /// it do; hosts given with their pins are verified by them.
+    #[serde(default = "default_true")]
+    pub learn_host_keys: bool,
 }
 
 impl Default for AssertionConfig {
@@ -247,6 +255,7 @@ impl Default for AssertionConfig {
             enabled: true,
             lifetime_seconds: default_assertion_lifetime_seconds(),
             groups: Vec::new(),
+            learn_host_keys: true,
         }
     }
 }
@@ -374,8 +383,10 @@ pub struct HostConfig {
     pub description: String,
     /// Where it listens, as a name or address with a port.
     pub address: String,
-    /// Its key pin, as `qdp pin` prints it.
-    pub pin: String,
+    /// Its key pin, as `qdp pin` prints it; without it, the gateway learns
+    /// the key, if `assertions.learn_host_keys` lets it.
+    #[serde(default)]
+    pub pin: Option<String>,
     /// The name its certificate is for.
     #[serde(default = "default_server_name")]
     pub server_name: String,
@@ -388,9 +399,10 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
-    /// Returns the host's key pin, which [`Config::load`] checked.
-    pub fn key_pin(&self) -> KeyPin {
-        KeyPin::from_hex(&self.pin).unwrap_or(KeyPin([0; 32]))
+    /// Returns the host's key pin, which [`Config::load`] checked, if the
+    /// configuration gives it.
+    pub fn key_pin(&self) -> Option<KeyPin> {
+        self.pin.as_deref().and_then(KeyPin::from_hex)
     }
 }
 
@@ -509,7 +521,11 @@ impl Config {
                     "host {id:?}: description and server_name have at most {MAX_FIELD_LENGTH} bytes"
                 ));
             }
-            if KeyPin::from_hex(&host.pin).is_none() {
+            if host
+                .pin
+                .as_deref()
+                .is_some_and(|pin| KeyPin::from_hex(pin).is_none())
+            {
                 return invalid(format!(
                     "host {id:?}: pin must be 64 hexadecimal digits, as `qdp pin` prints"
                 ));
@@ -693,7 +709,7 @@ mod tests {
         assert_eq!(config.assertions.lifetime_seconds, 120);
         let host = &config.hosts[0];
         assert_eq!(host.server_name, "qdp-host");
-        assert_eq!(host.key_pin().to_hex(), host.pin);
+        assert_eq!(host.key_pin().map(|pin| pin.to_hex()), host.pin);
     }
 
     #[test]

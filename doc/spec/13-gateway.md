@@ -238,7 +238,14 @@ NOT open a target its policy does not allow. It then opens the tunnel to the
 host's address ([Section 13.6](#136-tunnel)) and answers `OPENED` with:
 
 - **Host Pin**: the 32-byte key pin of the host's certificate, if the gateway knows
-  it from its configuration, or empty. When present, the client MUST verify the
+  it, or empty. The gateway knows it from its configuration, or MAY learn it with
+  a TLS handshake of its own with the host's address inside the private network,
+  which it closes once the handshake completes, before sending anything on it. A
+  pin learned so trusts the private network's names and addresses for the host's
+  identity, as users inside that network do; it spares administrators listing
+  every host's pin, at that cost, so a gateway SHOULD verify hosts by their
+  configured pins where it has them, and SHOULD let its administrator turn
+  learning off. When present, the client MUST verify the
   inner connection's host certificate against it, as a pinned key
   ([Section 11.1](11-security.md#111-host-authentication)), and a client that
   already pins another key for the same host, for example from pairing, MUST
