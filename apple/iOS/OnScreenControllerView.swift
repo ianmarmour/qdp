@@ -5,8 +5,9 @@ import UIKit
 /// stream's menu shows and hides. While it shows it takes every touch on
 /// the screen, and the core lays its controls out, works out the gamepad's
 /// state from the touches and sends it as a gamepad of its own. The controls
-/// are drawn faint, so that the picture shows through, and brighter where a
-/// thumb holds them; a press taps the haptics, as a real button would click.
+/// are drawn as phone games draw theirs, translucent rings the picture shows
+/// through, lit where a thumb holds them; a press taps the haptics, as a real
+/// button would click.
 final class OnScreenControllerView: UIView {
     /// A control's number, as the core gives it: a Standard Gamepad button
     /// index, the directional pad's first, or a stick's.
@@ -29,19 +30,20 @@ final class OnScreenControllerView: UIView {
     private var fingers: [ObjectIdentifier: UInt32] = [:]
     private let haptics = UIImpactFeedbackGenerator(style: .light)
 
-    /// A control's fill at rest.
-    private static let fill = UIColor(white: 1, alpha: 0.14)
+    /// A control's fill at rest: dark and translucent, so that the
+    /// picture shows through, and bright scenes too.
+    private static let fill = UIColor(white: 0, alpha: 0.28)
     /// A control's fill while held.
-    private static let heldFill = UIColor(white: 1, alpha: 0.42)
-    /// A control's outline.
-    private static let outline = UIColor(white: 1, alpha: 0.55)
+    private static let heldFill = UIColor(white: 1, alpha: 0.35)
+    /// A control's ring.
+    private static let outline = UIColor(white: 1, alpha: 0.6)
     /// Labels, arrows and glyphs.
     private static let ink = UIColor(white: 1, alpha: 0.9)
     /// A stick's knob at rest, and while held.
-    private static let knob = UIColor(white: 1, alpha: 0.35)
-    private static let heldKnob = UIColor(white: 1, alpha: 0.7)
-    /// The outline's width, in points.
-    private static let outlineWidth: CGFloat = 1.5
+    private static let knob = UIColor(white: 1, alpha: 0.4)
+    private static let heldKnob = UIColor(white: 1, alpha: 0.75)
+    /// The ring's width, in points.
+    private static let outlineWidth: CGFloat = 2
     /// A stick's knob's radius, as a share of its base's.
     private static let knobShare: CGFloat = 0.45
     /// A label's size, as a share of its control's height.

@@ -44,7 +44,7 @@ struct StreamScreen: View {
                     .allowsHitTesting(false)
             }
             // Over the on-screen gamepad, the button moves to the middle,
-            // clear of its shoulder buttons.
+            // between its View and Menu, clear of its shoulder buttons.
             menuButton
                 .frame(maxWidth: .infinity, alignment: controllerShown ? .center : .trailing)
                 .padding(12)
