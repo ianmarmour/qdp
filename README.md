@@ -10,28 +10,24 @@ gaming. It leverages cutting edge codecs and techniques to provide the lowest
 latency smoothest streaming possible. QDP offers native apps for Linux,
 Windows, macOS, Android, iPhone and iPad.
 
-QDP is in active development. Its protocol is draft 00 of an
-[open specification](docs/spec/README.md), and may change before version 1.
-
 ## Highlights
 
-- **Low Latency** - Frames are encoded as the desktop draws them, on the GPU
-  where it can, and sent as QUIC datagrams. On Linux they stay in GPU memory
-  from capture to encoder, keeping up with 4K at 120 frames a second. Each device draws the
-  pointer itself, so it never lags, and games get raw mouse input and
-  controllers with rumble.
-- **Multi Platform** - Share a Linux, Windows or Mac computer, and connect
-  from native apps on Linux, Windows, macOS, Android, iPhone and iPad, with
-  sound both ways, a shared clipboard, touch, pens, controllers, and an
-  on-screen controller on phones and tablets.
-- **Simple Setup** - Install, run `qdp serve`, and type the four-digit code
-  the computer shows, once. No accounts, no passwords. Linux computers show
-  up in the apps on their own.
-- **Enterprise Support** - A [gateway](docs/gateway.md) signs people in with
-  the organization's directory and an authenticator app, and reaches the
-  computers inside its network. Sessions use TLS 1.3 with pinned keys, the
-  computer shows a notice while it's shared and locks if a session drops,
-  and Linux hosts can stream the login screen as a system service.
+- **Low Latency** - QDP uses hardware acceleration for encoding and decoding
+  with the latest codecs, wherever the device supports it. It uses
+  multi-threading, SIMD and advanced memory sharing techniques to keep
+  everything as fast as possible, and leverages QUIC datagrams to keep network
+  transmission low latency and optimized.
+- **Multi Platform** - From day one, QDP was designed with multi-platform
+  usage in mind. We offer servers for Windows, Linux and macOS, and clients
+  for all modern platforms, including mobile. We aim to bring every new
+  feature to every platform, and test it on each.
+- **Simple Setup** - QDP installs from each platform's native packages and
+  apps. We never expect our end users to have to compile code from source or
+  go through complex installations.
+- **Enterprise Support** - We believe that enterprise customers should have a
+  delightful experience too. With this in mind, we build and maintain an
+  [enterprise gateway](docs/gateway.md) that gives companies a safe and
+  secure remote desktop experience with QDP.
 
 ## Platforms
 
