@@ -27,6 +27,7 @@ measurements and logs.
 | `QDP_BENCH_SECONDS` | `30` | How long each measurement lasts |
 | `QDP_BENCH_SIZE` | `1920x1080` | The host's and the client's screen size |
 | `QDP_BENCH_REFRESH` | `60 120` | The screens' refresh rates, in hertz |
+| `QDP_BENCH_SCENES` | `low scroll full` | The scenes the host's screen shows |
 
 For example, `QDP_BENCH_ROUNDS=5 bench/run`.
 
@@ -41,6 +42,14 @@ For example, `QDP_BENCH_ROUNDS=5 bench/run`.
 
 `local` is the baseline: the probe on the client's own screen, with no
 protocol in between.
+
+## Scenes
+
+| Scene | What moves on the host's screen |
+|---|---|
+| `low` | Only the probe's timing marks, as on an idle desktop |
+| `scroll` | A page scrolling in a window two thirds of the screen, as in a browser |
+| `full` | The whole screen, panning across a landscape, as in a game |
 
 ## Network profiles
 
@@ -57,10 +66,10 @@ Profiles other than `lan` need the kernel's `sch_netem` module:
 
 The host and the client are headless GNOME sessions, measured at each refresh
 rate in turn. On the host's screen, a probe shows in every frame the time it
-drew it, and lights a marker while a button is held. On the client's, each
-protocol's viewer shows the host's screen, and the measurer finds the probe
-there, reads it and clicks on it.
-Both read the same clock.
+drew it, and lights a marker while a button is held, with the scene around
+them. On the client's, each protocol's viewer shows the host's screen, and
+the measurer finds the probe there, reads it and clicks on it. Both read the
+same clock.
 
 | Column | What it is |
 |---|---|

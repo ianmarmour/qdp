@@ -1,8 +1,8 @@
 //! The probe: a green window filling the host's screen that shows, in every
 //! frame, the time it drew it, and a marker that is white while a pointer
-//! button is held over it. It redraws as often as the compositor shows frames, and
-//! tells the compositor that only the grid and, when it changed, the marker
-//! changed, as an application drawing little would.
+//! button is held over it, around which its scene moves. It redraws as
+//! often as the compositor shows frames, and tells the compositor what
+//! changed: the grid, the marker when it did, and what the scene moves.
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -15,6 +15,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::clock::now_micros;
 use crate::layout::{self, Area, GRID, MARKER, Pixels};
+use crate::scene::{Scene, Texture};
 
 /// The colour of the background, which the measurer finds the probe by.
 const GREEN: u32 = 0x00_FF_00;
@@ -25,10 +26,13 @@ const BLACK: u32 = 0x00_00_00;
 /// The colour of white cells and of the lit marker.
 const WHITE: u32 = 0xFF_FF_FF;
 
-/// Shows the probe until its window is closed.
-pub fn run() -> Result<(), String> {
+/// Shows the probe, with `scene` around it, until its window is closed.
+pub fn run(scene: Scene) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|error| format!("no display: {error}"))?;
-    let mut probe = Probe::default();
+    let mut probe = Probe {
+        scene,
+        ..Probe::default()
+    };
     event_loop
         .run_app(&mut probe)
         .map_err(|error| error.to_string())?;
@@ -43,6 +47,10 @@ type Display = (Rc<Window>, Surface<Rc<Window>, Rc<Window>>);
 struct Probe {
     /// The window and its surface, once the event loop started.
     display: Option<Display>,
+    /// What moves around the grid and the marker.
+    scene: Scene,
+    /// What the scene moves, with the area it was made for.
+    texture: Option<(Pixels, Texture)>,
     /// Whether a pointer button is held.
     pressed: bool,
     /// Whether the marker drawn last was lit.
@@ -94,6 +102,21 @@ impl Probe {
             width,
             height,
         };
+        let moving = self.scene.moving_area().map(|area| area.within(whole));
+        if let Some(area) = moving {
+            if self
+                .texture
+                .as_ref()
+                .is_none_or(|(made_for, _)| *made_for != area)
+            {
+                self.texture = Texture::for_scene(self.scene, area.width, area.height)
+                    .map(|texture| (area, texture));
+            }
+            if let Some((_, texture)) = &self.texture {
+                let offset = self.scene.offset(now_micros(), (width, height));
+                texture.draw(&mut buffer, width, area, offset);
+            }
+        }
         let mut fill = |area: Area, colour: u32| {
             let Pixels {
                 x,
@@ -114,13 +137,14 @@ impl Probe {
         fill(MARKER, if self.pressed { WHITE } else { BLACK });
         let marker_changed = self.shown_pressed != Some(self.pressed);
         self.shown_pressed = Some(self.pressed);
-        let damage = if fresh {
-            vec![rect(whole)]
-        } else if marker_changed {
-            vec![rect(GRID.within(whole)), rect(MARKER.within(whole))]
-        } else {
-            vec![rect(GRID.within(whole))]
-        };
+        let mut damage = vec![rect(GRID.within(whole))];
+        if marker_changed {
+            damage.push(rect(MARKER.within(whole)));
+        }
+        damage.extend(moving.map(rect));
+        if fresh {
+            damage = vec![rect(whole)];
+        }
         window.pre_present_notify();
         buffer
             .present_with_damage(&damage)

@@ -1,7 +1,8 @@
 //! What the probe shows, where, and how the measurer reads it back: the time
 //! the probe drew each frame, as a grid of black and white cells, and a
 //! marker that is white while the pointer's button is held, on a green
-//! background no desktop has.
+//! background no desktop has, which at least a frame around the edge stays
+//! whatever the scene moves.
 //!
 //! Positions are fractions of the probe's picture, which the measurer finds
 //! by its green on the client's screen, wherever a viewer shows it and at
@@ -28,7 +29,7 @@ const LUMA_THRESHOLD: u32 = 128;
 
 /// The chroma below which, in both planes, a pixel is the probe's green:
 /// greys, black and white sit at 128.
-const GREEN_CHROMA: u8 = 90;
+pub(crate) const GREEN_CHROMA: u8 = 90;
 
 /// The share of the screen's pixels, in thousandths, that must be green for
 /// the probe to be taken as shown.
@@ -52,10 +53,27 @@ pub const GRID: Area = Area {
 
 /// The marker's area of the probe.
 pub const MARKER: Area = Area {
-    left: 0.5,
+    left: 0.7,
     top: 0.05,
-    width: 0.45,
-    height: 0.4,
+    width: 0.25,
+    height: 0.2,
+};
+
+/// The area inside the green frame around the probe's edge, which a scene
+/// moving the whole screen fills.
+pub const INSIDE_FRAME: Area = Area {
+    left: 0.02,
+    top: 0.02,
+    width: 0.96,
+    height: 0.96,
+};
+
+/// The window a scrolling scene scrolls, below the grid and the marker.
+pub const WINDOW: Area = Area {
+    left: 0.05,
+    top: 0.3,
+    width: 0.9,
+    height: 0.65,
 };
 
 /// Where the measurer clicks: low in the middle of the probe, away from the
@@ -400,6 +418,24 @@ mod tests {
         for lit in [true, false] {
             let screen = screen(7, lit);
             assert_eq!(marker_lit(&screen, PROBE), Some(lit));
+        }
+    }
+
+    /// The grid and the marker lie inside the green frame, and the
+    /// scrolling window clear of both.
+    #[test]
+    fn keeps_the_frame_green() {
+        let contains = |outer: Area, inner: Area| {
+            outer.left <= inner.left
+                && outer.top <= inner.top
+                && inner.left + inner.width <= outer.left + outer.width
+                && inner.top + inner.height <= outer.top + outer.height
+        };
+        for area in [GRID, MARKER, WINDOW] {
+            assert!(contains(INSIDE_FRAME, area), "{area:?}");
+        }
+        for area in [GRID, MARKER] {
+            assert!(area.top + area.height <= WINDOW.top, "{area:?}");
         }
     }
 

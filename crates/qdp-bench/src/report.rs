@@ -1,11 +1,13 @@
 //! The report: every run's results in a directory, summarised as a table
-//! for each refresh rate and network profile, a row for each protocol.
+//! for each scene, refresh rate and network profile, a row for each
+//! protocol.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::Path;
 
 use crate::results::Run;
+use crate::scene::Scene;
 use crate::stats::{percentile, standard_deviation};
 
 /// The percentile reported beside each median.
@@ -84,10 +86,10 @@ type Protocols<'a> = BTreeMap<&'a str, Summary>;
 
 /// Returns the report on `runs`.
 fn render(runs: &[Run]) -> String {
-    let mut sections: BTreeMap<u32, BTreeMap<&str, Protocols<'_>>> = BTreeMap::new();
+    let mut sections: BTreeMap<(Section<'_>, u32), BTreeMap<&str, Protocols<'_>>> = BTreeMap::new();
     for run in runs {
         sections
-            .entry(run.refresh_hz)
+            .entry((Section::of(&run.scene), run.refresh_hz))
             .or_default()
             .entry(&run.profile)
             .or_default()
@@ -103,8 +105,8 @@ fn render(runs: &[Run]) -> String {
         .collect();
 
     let mut out = String::from("# Benchmark results\n");
-    for (refresh_hz, profiles) in &sections {
-        let _ = write!(out, "\n## {refresh_hz} Hz\n");
+    for ((scene, refresh_hz), profiles) in &sections {
+        let _ = write!(out, "\n## {} at {refresh_hz} Hz\n", scene.title());
         for (profile, protocols) in profiles {
             let _ = write!(out, "\n### {profile}\n\n");
             table(&mut out, protocols, &roles);
@@ -116,6 +118,34 @@ fn render(runs: &[Run]) -> String {
          new pictures.\n",
     );
     out
+}
+
+/// A scene's section of the report: a known scene's, in order of how much
+/// moves, or, after them, one the report does not know, by its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Section<'a> {
+    /// A known scene, by its place among every scene.
+    Known(usize),
+    /// A scene the report does not know.
+    Unknown(&'a str),
+}
+
+impl<'a> Section<'a> {
+    /// Returns the section of the scene named `name`.
+    fn of(name: &'a str) -> Self {
+        match Scene::ALL.iter().position(|scene| scene.name() == name) {
+            Some(index) => Self::Known(index),
+            None => Self::Unknown(name),
+        }
+    }
+
+    /// Returns the section's title.
+    fn title(self) -> &'a str {
+        match self {
+            Self::Known(index) => Scene::ALL[index].title(),
+            Self::Unknown(name) => name,
+        }
+    }
 }
 
 /// Writes to `out` the table of `protocols`, with a CPU column for each of
@@ -178,6 +208,7 @@ mod tests {
         Run {
             protocol: protocol.to_owned(),
             profile: profile.to_owned(),
+            scene: "low".to_owned(),
             round: 1,
             refresh_hz: 60,
             seconds: 10.0,
@@ -208,8 +239,12 @@ mod tests {
             run("qdp", "wan", 30.0),
             fast,
         ]);
-        let sixty = report.find("## 60 Hz").expect("a 60 Hz section");
-        let hundred_twenty = report.find("## 120 Hz").expect("a 120 Hz section");
+        let sixty = report
+            .find("## Low motion at 60 Hz")
+            .expect("a 60 Hz section");
+        let hundred_twenty = report
+            .find("## Low motion at 120 Hz")
+            .expect("a 120 Hz section");
         assert!(sixty < hundred_twenty, "{report}");
         assert_eq!(report.matches("### lan").count(), 2, "{report}");
         assert_eq!(report.matches("### wan").count(), 1, "{report}");
@@ -221,5 +256,20 @@ mod tests {
             "{report}"
         );
         assert!(report.contains("| vnc | 1 | 40.0 (40.0) |"), "{report}");
+    }
+
+    /// The scenes come in order of how much moves, before any the report
+    /// does not know.
+    #[test]
+    fn orders_scenes_by_motion() {
+        let scene = |name: &str| Run {
+            scene: name.to_owned(),
+            ..run("qdp", "lan", 10.0)
+        };
+        let report = render(&[scene("other"), scene("full"), scene("low"), scene("scroll")]);
+        let at = |title: &str| report.find(&format!("## {title} at 60 Hz")).unwrap();
+        assert!(at("Low motion") < at("Scrolling"), "{report}");
+        assert!(at("Scrolling") < at("Full motion"), "{report}");
+        assert!(at("Full motion") < at("other"), "{report}");
     }
 }

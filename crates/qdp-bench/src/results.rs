@@ -12,6 +12,9 @@ pub struct Run {
     pub protocol: String,
     /// The network profile.
     pub profile: String,
+    /// The scene the probe showed.
+    #[serde(default = "default_scene")]
+    pub scene: String,
     /// The round of the benchmark.
     pub round: u32,
     /// The refresh rate of the host's and the client's screens, in hertz.
@@ -46,4 +49,10 @@ pub struct Run {
 /// benchmark ran at any other.
 fn default_refresh_hz() -> u32 {
     60
+}
+
+/// The scene of runs that did not record theirs, from before the probe
+/// showed any other.
+fn default_scene() -> String {
+    "low".to_owned()
 }
