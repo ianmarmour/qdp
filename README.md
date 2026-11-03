@@ -4,10 +4,11 @@
 
 **Quick Desktop Protocol: a fast, modern alternative to RDP and VNC.**
 
-QDP streams a computer's desktop to your other devices with very little delay,
-for work and for games. It sends video as AV1 over QUIC, encodes and decodes
-it on the GPU where it can, and has native apps for Linux, Windows, macOS,
-Android, iPhone and iPad.
+QDP streams a computer's desktop to your other devices with very low latency.
+It's suitable for doing remote work and ultra low latency applications like
+gaming. QDP supports native apps for Linux, Windows, macOS, Android, iPhone and
+iPad. It leverages cutting edge codecs and techniques to provide the lowest
+latency smoothest streaming possible.
 
 QDP is in active development. Its protocol is draft 00 of an
 [open specification](docs/spec/README.md), and may change before version 1.
