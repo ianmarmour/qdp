@@ -105,7 +105,7 @@ impl Picture for MappedFrame<'_> {
 /// Returns the luma and the blue and red differences of a red, green and
 /// blue, by BT.709's weights in 256ths, at full range.
 #[cfg(target_os = "linux")]
-fn to_yuv([red, green, blue]: [i32; 3]) -> (u8, u8, u8) {
+pub(crate) fn to_yuv([red, green, blue]: [i32; 3]) -> (u8, u8, u8) {
     let byte = |value: i32| value.clamp(0, i32::from(u8::MAX)) as u8;
     (
         byte((54 * red + 183 * green + 19 * blue) >> 8),

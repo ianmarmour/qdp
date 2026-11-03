@@ -15,17 +15,20 @@ together.
 qdp-bench: measure remote desktop latency between headless GNOME sessions
 
 Usage:
-  qdp-bench probe
+  qdp-bench probe [--scene NAME]
   qdp-bench measure --protocol NAME --profile NAME --out FILE [options]
   qdp-bench report DIRECTORY
   qdp-bench help
 
-probe shows the probe full screen, for the host's session.
+probe shows the probe full screen, for the host's session, with the scene
+NAME around it: low (the default), where only the probe changes; scroll,
+where a page scrolls in a window; or full, where the whole screen pans.
 
 measure watches the client's session, where a viewer shows the probe full
 screen, and writes what it measured to FILE:
   --protocol NAME      The protocol the viewer streams with
   --profile NAME       The network profile the stream runs over
+  --scene NAME         The scene the probe shows (default low)
   --round N            The round of the benchmark this run is (default 1)
   --refresh HZ         The refresh rate of the host's and the client's
                        screens, which every new picture is counted against

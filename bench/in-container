@@ -1,9 +1,9 @@
 #!/bin/bash
 # Runs inside the benchmark container: builds QDP and qdp-bench from the
-# checkout in /src, then measures each protocol over each network profile,
-# in an order that rotates each round, between a host's and a client's
-# headless GNOME sessions, at each refresh rate. Results and a report go to
-# /results.
+# checkout in /src, then measures each protocol over each network profile
+# and with each scene, in an order that rotates each round, between a
+# host's and a client's headless GNOME sessions, at each refresh rate.
+# Results and a report go to /results.
 set -euo pipefail
 
 size=${QDP_BENCH_SIZE:-1920x1080}
@@ -12,6 +12,7 @@ rounds=${QDP_BENCH_ROUNDS:-3}
 read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp rdp vnc}"
 read -ra profiles <<< "${QDP_BENCH_PROFILES:-lan wan}"
 read -ra refreshes <<< "${QDP_BENCH_REFRESH:-60 120}"
+read -ra scenes <<< "${QDP_BENCH_SCENES:-low scroll full}"
 
 results=/results
 logs=$results/logs
@@ -191,17 +192,17 @@ start_gnome_remote_desktop() {
 # measurer's options, and $pids to every process to stop afterwards. The
 # local baseline has neither: a probe on the client's own screen stands in.
 start_protocol() {
-    log=$logs/$refresh-$profile-$1-$round
+    log=$logs/$run
     local server viewer probe
     case $1 in
         local)
-            spawn client "$log-probe.log" "$bin/qdp-bench" probe
+            spawn client "$log-probe.log" "$bin/qdp-bench" probe --scene "$scene"
             processes=() pids=("$pid")
             return 0
             ;;
         qdp)
             start_session host monitor no-x11
-            spawn host "$log-probe.log" "$bin/qdp-bench" probe
+            spawn host "$log-probe.log" "$bin/qdp-bench" probe --scene "$scene"
             probe=$pid
             spawn host "$log-server.log" "$bin/qdp" serve --source gnome --token bench \
                 --listen 127.0.0.1:4433 --identity "$state/host/qdp" \
@@ -235,7 +236,7 @@ start_protocol() {
             fi
             viewer=$pid
             wait_for has_monitor host
-            spawn host "$log-probe.log" "$bin/qdp-bench" probe
+            spawn host "$log-probe.log" "$bin/qdp-bench" probe --scene "$scene"
             probe=$pid
             ;;
         *)
@@ -263,26 +264,29 @@ for refresh in "${refreshes[@]}"; do
                 echo "skipping the $profile profile" >&2
                 continue
             fi
-            # Each round starts one protocol later, so that none always runs
-            # first or last.
-            count=${#protocols[@]}
-            for index in $(seq 0 $((count - 1))); do
-                protocol=${protocols[$(((index + round - 1) % count))]}
-                echo "$refresh Hz, round $round, $profile: $protocol"
-                run=$refresh-$profile-$protocol-$round
-                measured=0
-                if start_protocol "$protocol"; then
-                    in_session client "$bin/qdp-bench" measure \
-                        --protocol "$protocol" --profile "$profile" --round "$round" \
-                        --refresh "$refresh" --seconds "$seconds" "${processes[@]}" \
-                        --out "$runs/$run.toml" &> "$log-measure.log" || measured=$?
-                else
-                    measured=1
-                fi
-                stop_protocol "$protocol"
-                if [ "$measured" != 0 ]; then
-                    echo "measuring $protocol over $profile failed; see $logs" >&2
-                fi
+            for scene in "${scenes[@]}"; do
+                # Each round starts one protocol later, so that none always
+                # runs first or last.
+                count=${#protocols[@]}
+                for index in $(seq 0 $((count - 1))); do
+                    protocol=${protocols[$(((index + round - 1) % count))]}
+                    echo "$refresh Hz, round $round, $profile, $scene: $protocol"
+                    run=$refresh-$scene-$profile-$protocol-$round
+                    measured=0
+                    if start_protocol "$protocol"; then
+                        in_session client "$bin/qdp-bench" measure \
+                            --protocol "$protocol" --profile "$profile" --scene "$scene" \
+                            --round "$round" --refresh "$refresh" --seconds "$seconds" \
+                            "${processes[@]}" --out "$runs/$run.toml" \
+                            &> "$log-measure.log" || measured=$?
+                    else
+                        measured=1
+                    fi
+                    stop_protocol "$protocol"
+                    if [ "$measured" != 0 ]; then
+                        echo "measuring $protocol over $profile failed; see $logs" >&2
+                    fi
+                done
             done
         done
     done

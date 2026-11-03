@@ -20,6 +20,7 @@ use crate::layout::{self, CLICK, Picture, Pixels};
 #[cfg(target_os = "linux")]
 use crate::picture::MappedFrame;
 use crate::results::Run;
+use crate::scene::Scene;
 use crate::system::{cpu_ticks, interface_bytes};
 
 /// How long the viewer may take to connect and show the probe.
@@ -61,6 +62,8 @@ pub struct MeasureArgs {
     pub protocol: String,
     /// The network profile the stream runs over.
     pub profile: String,
+    /// The scene the probe shows.
+    pub scene: Scene,
     /// The round of the benchmark this run belongs to.
     pub round: u32,
     /// The refresh rate of the host's and the client's screens, in hertz.
@@ -308,6 +311,7 @@ async fn measure(
     Ok(Run {
         protocol: args.protocol.clone(),
         profile: args.profile.clone(),
+        scene: args.scene.name().to_owned(),
         round: args.round,
         refresh_hz: args.refresh_hz,
         seconds: elapsed,
