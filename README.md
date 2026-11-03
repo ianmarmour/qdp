@@ -31,7 +31,8 @@ Windows, macOS, Android, iPhone and iPad.
 
 ## Platforms
 
-A **host** shares its desktop, and a **client** connects to one.
+Install QDP as a **host** on the computer you want to reach, and as a
+**client** on each device you'll connect from.
 
 | Platform | Host | Client | Install |
 |---|:---:|:---:|---|
@@ -41,7 +42,8 @@ A **host** shares its desktop, and a **client** connects to one.
 | Android | | ✅ | [APK](docs/install/android.md) |
 | iPhone and iPad | | ✅ | [IPA](docs/install/iphone-ipad.md) |
 
-Every download is on the
+Each format links to a step-by-step install guide for its platform. You can
+also download every package directly from the
 [latest release](https://github.com/ianmarmour/qdp/releases/latest).
 
 ## Getting started
