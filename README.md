@@ -42,10 +42,10 @@ Install QDP as a **host** on the computer you want to reach, and as a
 | Android | | ✅ | [APK](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-android-arm64.apk) |
 | iPhone and iPad | | ✅ | [IPA](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa) |
 
-Every download, including the Linux app and the gateway, is on the
-[latest release](https://github.com/ianmarmour/qdp/releases/latest), and the
-[installation guides](docs/README.md#installing) walk through each platform
-step by step.
+Every download is on the
+[latest release](https://github.com/ianmarmour/qdp/releases/latest), and our
+[installation guides](docs/README.md#installing) walk through the installation
+on each platform step by step.
 
 ## Getting started
 
