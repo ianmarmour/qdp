@@ -11,9 +11,6 @@ API documentation: `cargo doc -p qdp-apple --open`
 
 ## Dependencies
 
-The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
-version or later.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Xcode | 26+ | macOS | Building for Apple platforms |

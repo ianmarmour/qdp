@@ -6,8 +6,6 @@ The QDP app for Windows 10 or later on x86-64. To install and use it, see
 
 ## Dependencies
 
-What it builds with. A `+` means that version or later; other versions are exact.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Rust | 1.97.0 | Windows | Building the app's Rust core |

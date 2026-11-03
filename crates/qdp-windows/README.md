@@ -11,9 +11,6 @@ API documentation: `cargo doc -p qdp-windows --open`
 
 ## Dependencies
 
-The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
-version or later.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Visual Studio C++ build tools | 2022+ | Windows | Building and linking |

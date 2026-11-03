@@ -11,9 +11,6 @@ API documentation: `cargo doc -p qdp-desktop --open`
 
 ## Dependencies
 
-The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
-version or later.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | C compiler | Any | All | Building bundled C code |

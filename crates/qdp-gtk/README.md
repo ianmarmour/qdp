@@ -6,8 +6,6 @@ and use it, see [Installing on Linux](../../docs/setup/linux.md) and
 
 ## Dependencies
 
-What it builds with. A `+` means that version or later; other versions are exact.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Rust | 1.97.0 | Linux | Building the app |

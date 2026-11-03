@@ -7,8 +7,6 @@ later on 64-bit ARM. To install and use it, see
 
 ## Dependencies
 
-What it builds with. A `+` means that version or later; other versions are exact.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Rust | 1.97.0 | Linux, macOS | Building the app's Rust core |
