@@ -12,19 +12,18 @@ API documentation: `cargo doc -p qdp-cli --open`
 
 ## Dependencies
 
-The tools and native libraries it needs beyond its Cargo dependencies, at
-the oldest versions that work:
+The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
+version or later.
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.87 |
-| C compiler | Any |
-| NASM, on x86-64 | 2.15 |
-| libclang, on Linux | 11 |
-| PipeWire, on Linux | 0.3 |
-| libudev, on Linux | 1 |
-| libva, for hardware encoding on Linux | 2 |
-| NVIDIA driver, for hardware encoding on Windows | 522 |
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| C compiler | Any | All | Building bundled C code |
+| NASM | 2.15+ | x86-64 | Building the codecs |
+| PipeWire | 0.3+ | Linux | Screen capture and audio |
+| libclang | 9+ | Linux | Building screen capture and audio |
+| libudev | 1+ | Linux | Gamepads |
+| libva | 2+ | Linux | Hardware encoding, loaded at run time |
+| NVIDIA driver | 522+ | Windows | Hardware encoding, loaded at run time |
 
 ## License
 

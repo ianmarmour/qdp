@@ -73,11 +73,13 @@ there.
   rather than repeating them.
 - **Uniform.** Give a new document the shape of the others of its kind: every
   crate README alike, every app README alike, every install page alike.
-- **Dependencies.** Every app and crate README has a Dependencies table of
-  the same shape: an app's lists what it builds with, at exact versions, and
-  a crate's the tools and native libraries it needs beyond its Cargo
-  dependencies, at the oldest versions that work. A change to one of those
-  versions updates the table in the same pull request.
+- **Dependencies.** Every app and crate README has a Dependencies table with
+  the columns Dependency, Version, Platform and Needed for, one fact per cell.
+  A crate's lists the tools and native libraries it needs beyond
+  `Cargo.toml`, which already gives its Rust version; an app's lists what it
+  builds with. A `+` marks a minimum version, and a bare number an exact one.
+  A change to one of those versions updates the table in the same pull
+  request.
 
 ### Dependencies
 
