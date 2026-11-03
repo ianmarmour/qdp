@@ -1,17 +1,24 @@
 # Sharing a computer
 
-Any Linux, Windows or Mac computer can share its desktop with `qdp serve`.
-This page covers what to set up on each system; `qdp help` lists every option.
+Any Linux, Windows or Mac computer can share its desktop. This page covers
+what to set up on each system; `qdp help` lists every option.
 
-## Starting the host
+## Running as a service
 
-```bash
-qdp serve
-```
+The host runs as a service, which keeps it running in the background:
 
-The host listens on UDP port 4433, so allow that port through any firewall
-between your devices and the computer. Linux hosts show up in the apps on
-their own; add Windows and Mac hosts by their address.
+- **Linux:** the RPM and Debian package install the service; turn it on with
+  `sudo systemctl enable --now qdp`. Without the packages,
+  `sudo qdp service install` sets it up. It runs from boot, with the
+  [login screen](#streaming-the-login-screen) included, and its pairing codes
+  show on the logged-in desktop and in `journalctl -u qdp -f`.
+- **macOS:** `qdp service install` starts the host whenever you log in.
+- **Windows:** the host can't run as a service yet, so run `qdp serve`.
+
+`qdp serve` also runs the host in a terminal, for trying it out. The host
+listens on UDP port 4433, so allow that port through any firewall between your
+devices and the computer. Linux hosts show up in the apps on their own; add
+Windows and Mac hosts by their address.
 
 ## Pairing
 
@@ -25,6 +32,8 @@ To list the devices paired with this computer, or forget one:
 qdp clients
 qdp clients remove NAME
 ```
+
+For the Linux service, run these with `sudo` and `--identity /var/lib/qdp`.
 
 `--pairing off` turns pairing off. The host can also accept tokens, passwords,
 client keys and your organization's [gateway](../gateway.md): `qdp help`
@@ -56,28 +65,12 @@ describes each.
   Settings, Privacy & Security.
 - Macs encode in software.
 
-## Running as a service
-
-On Linux, run the host from boot, with the login screen included:
-
-```bash
-sudo qdp service install
-```
-
-The RPM and Debian package include the same service, off until you turn it
-on with `sudo systemctl enable --now qdp`. Its pairing codes show on the
-logged-in desktop and in `journalctl -u qdp -f`.
-
-On macOS, `qdp service install` starts the host whenever you log in. Windows
-can't run the host as a service yet.
-
 ## Streaming the login screen
 
 On Linux, the service streams whatever the computer's display shows, from the
 login screen to any desktop, so that a device can log in and unlock as if at
-the machine. To try it without the service, run
-`sudo qdp serve --source console`. A display must be connected and on; a
-dummy plug can stand in for one.
+the machine. To try it in a terminal, run `sudo qdp serve --source console`.
+A display must be connected and on; a dummy plug can stand in for one.
 
 ## Security
 
