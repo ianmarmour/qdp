@@ -1,7 +1,7 @@
 [package]
 name = "qdp"
 description = "Quick Desktop Protocol (QDP): a low-latency protocol for remote desktop and game streaming"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["remote-desktop", "game-streaming", "low-latency", "rdp", "vnc"]
 categories = ["network-programming", "multimedia::video"]
 version.workspace = true

@@ -1,7 +1,7 @@
 [package]
 name = "qdp-windows"
 description = "The Windows app's core of Quick Desktop Protocol (QDP): sessions with a host, in a stream window drawn with Direct3D 11, behind a C interface the app calls"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["remote-desktop", "windows", "streaming"]
 categories = ["network-programming"]
 version.workspace = true

@@ -1,7 +1,7 @@
 //! An implementation of the Quick Desktop Protocol (QDP).
 //!
 //! QDP is a low-latency protocol for remote desktop and game streaming over QUIC.
-//! The protocol is specified in the `doc/spec` directory of the repository.
+//! The protocol is specified in the `docs/spec` directory of the repository.
 //!
 //! This crate is organised in layers:
 //!

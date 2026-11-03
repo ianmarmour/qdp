@@ -1,7 +1,7 @@
 [package]
 name = "qdp-cli"
 description = "The qdp command: serve a desktop or connect to one with the Quick Desktop Protocol (QDP)"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["remote-desktop", "game-streaming", "low-latency"]
 categories = ["command-line-utilities", "network-programming"]
 version.workspace = true
