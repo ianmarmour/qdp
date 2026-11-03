@@ -11,9 +11,6 @@ API documentation: `cargo doc -p qdp-windows --open`
 
 ## Dependencies
 
-The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
-version or later.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Visual Studio C++ build tools | 2022+ | Windows | Building and linking |
@@ -21,4 +18,4 @@ version or later.
 
 ## License
 
-Apache-2.0
+`qdp-windows` is licensed under the [Apache License 2.0](../../LICENSE).

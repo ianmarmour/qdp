@@ -12,13 +12,10 @@ API documentation: `cargo doc -p qdp --open`
 
 ## Dependencies
 
-The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
-version or later.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | C compiler | Any | All | Building bundled C code |
 
 ## License
 
-Apache-2.0
+`qdp` is licensed under the [Apache License 2.0](../../LICENSE).

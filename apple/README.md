@@ -8,8 +8,6 @@ and use them, see [Installing on a Mac](../docs/setup/macos.md),
 
 ## Dependencies
 
-What it builds with. A `+` means that version or later; other versions are exact.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Rust | 1.97.0 | macOS | Building the apps' Rust core |
@@ -46,4 +44,4 @@ The core's tests run with the workspace's: `cargo test --workspace`.
 
 ## License
 
-Apache-2.0
+QDP for Mac, iPhone and iPad is licensed under the [Apache License 2.0](../LICENSE).

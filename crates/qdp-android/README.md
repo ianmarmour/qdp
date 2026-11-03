@@ -11,13 +11,10 @@ API documentation: `cargo doc -p qdp-android --open`
 
 ## Dependencies
 
-The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
-version or later.
-
 | Dependency | Version | Platform | Needed for |
 |---|---|---|---|
 | Android NDK | r25+ | Linux, macOS | Building for Android |
 
 ## License
 
-Apache-2.0
+`qdp-android` is licensed under the [Apache License 2.0](../../LICENSE).

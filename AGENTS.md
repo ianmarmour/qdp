@@ -50,6 +50,8 @@ implementation of the Quick Desktop Protocol (QDP) in Rust.
   rather than repeating them.
 - **Uniform.** Give a new document the shape of the others of its kind: every
   crate README alike, every app README alike, every install page alike.
+- **No filler.** Leave out sentences that only introduce or explain a heading,
+  table or list; let the content speak for itself.
 - **Dependencies.** Every app and crate README has a Dependencies table with
   the columns Dependency, Version, Platform and Needed for, one fact per cell.
   A crate's lists the tools and native libraries it needs beyond
