@@ -8,7 +8,7 @@ set -euo pipefail
 
 size=${QDP_BENCH_SIZE:-1920x1080}
 seconds=${QDP_BENCH_SECONDS:-30}
-rounds=${QDP_BENCH_ROUNDS:-3}
+rounds=${QDP_BENCH_ROUNDS:-1}
 read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp rdp vnc}"
 read -ra profiles <<< "${QDP_BENCH_PROFILES:-lan wan}"
 read -ra refreshes <<< "${QDP_BENCH_REFRESH:-60 120}"
