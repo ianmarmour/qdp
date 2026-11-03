@@ -6,7 +6,7 @@ screen it's called **Quick Desktop**.
 It isn't in the App Store yet. Install it one of two ways:
 
 - **Build it with Xcode** on a Mac, signed with your own Apple account:
-  [`apple`](../../apple/README.md#iphone-and-ipad) says how. Apps signed with
+  [`apple`](../../apple/README.md) says how. Apps signed with
   a free Apple account must be signed again every seven days.
 - **Sideload the release's unsigned app**,
   [`qdp-ios-unsigned.ipa`](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa),

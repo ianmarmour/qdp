@@ -61,6 +61,19 @@ there.
 - **Imports.** Organize them uniformly across files, and import only what you
   need.
 
+### Documentation
+
+- **Minimal over maximal.** Say what something does and how to use it, not how
+  it's built.
+- **No implementation details.** Leave out file paths in the code, type,
+  function and module names, log targets, and anything else that changes when
+  the code does.
+- **One source of truth.** Point to `qdp help` for command options, to the
+  annotated example configuration for settings, and to rustdoc for APIs,
+  rather than repeating them.
+- **Uniform.** Give a new document the shape of the others of its kind: every
+  crate README alike, every app README alike, every install page alike.
+
 ### Dependencies
 
 - Prefer the standard library.
