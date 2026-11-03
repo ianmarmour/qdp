@@ -989,9 +989,9 @@ fn connect_with_sink(args: ConnectArgs) -> CliResult {
     match args.presentation {
         Presentation::Headless => connect_headless(&args, sink),
         #[cfg(feature = "window")]
-        Presentation::Window => connect_in_window(args, sink),
+        Presentation::Window | Presentation::FullScreen => connect_in_window(args, sink),
         #[cfg(not(feature = "window"))]
-        Presentation::Window => {
+        Presentation::Window | Presentation::FullScreen => {
             Err("this qdp was built without the window feature; pass --headless".to_owned())
         }
     }
@@ -1025,6 +1025,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
     let passthrough = args.passthrough.clone();
     let touchpad = args.touchpad;
     let resolution = args.resolution;
+    let presentation = args.presentation;
     let slot = FrameSlot::default();
     let close = Arc::new(CloseSignal::default());
     let title = format!("QDP: {}", args.destination.label());
@@ -1060,6 +1061,7 @@ fn connect_in_window(args: ConnectArgs, sink: CliSink) -> CliResult {
 
     let choices = WindowChoices {
         title,
+        presentation,
         microphone,
         passthrough: &passthrough,
         touchpad,

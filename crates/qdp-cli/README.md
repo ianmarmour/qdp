@@ -129,6 +129,7 @@ Connect options:
   --server-name NAME   Name sent in the TLS handshake (default qdp-host)
   --frames N           Disconnect after N frames
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
+  --full-screen        Show the stream full screen
   --headless           Open no window; only log statistics
   --events             Report the session's progress as lines on standard
                        output, and read a pairing code, or a gateway's user
