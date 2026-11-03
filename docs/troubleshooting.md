@@ -45,6 +45,10 @@ The host couldn't capture the screen:
 - Check the host's log for which encoder it uses. Without a GPU that encodes
   AV1 in hardware, it encodes in software, which struggles at large sizes; the
   [platform notes](setup/hosting.md#platform-notes) list the GPUs that work.
+- Check the client's log for which decoder it uses. Clients with a GPU older
+  than NVIDIA RTX 30, AMD RX 6000, Intel 11th-generation Core or Apple M3, and
+  iPhones before the 15 Pro, decode in software. On Linux, the GPU also needs
+  its [VA-API driver](setup/linux.md#requirements).
 - Ask for a smaller resolution in the app's settings.
 
 ## An app won't install or open
