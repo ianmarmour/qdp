@@ -16,6 +16,23 @@ API documentation: `cargo doc -p qdp-windows --open`
 | Visual Studio C++ build tools | 2022+ | Windows | Building and linking |
 | NASM | 2.15+ | Windows | Building the codecs |
 
+## Build
+
+On Windows, from the repository's root:
+
+```powershell
+cargo rustc -p qdp-windows --lib --release --crate-type cdylib
+```
+
+This builds the core as `qdp_windows.dll`. The app's build does the same:
+see [`windows`](../../windows/README.md).
+
+## Test
+
+```bash
+cargo test -p qdp-windows
+```
+
 ## License
 
 `qdp-windows` is licensed under the [Apache License 2.0](../../LICENSE).
