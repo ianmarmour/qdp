@@ -47,7 +47,9 @@ implementation of the Quick Desktop Protocol (QDP) in Rust.
   the code does.
 - **One source of truth.** Point to `qdp help` for command options, to the
   annotated example configuration for settings, and to rustdoc for APIs,
-  rather than repeating them.
+  rather than repeating them. The command-line programs' READMEs show their
+  help in a Usage section, which their tests keep identical to it:
+  `QDP_UPDATE_USAGE=1 cargo test` rewrites it after an option changes.
 - **Uniform.** Give a new document the shape of the others of its kind: every
   crate README alike, every app README alike, every install page alike.
 - **No filler.** Leave out sentences that only introduce or explain a heading,

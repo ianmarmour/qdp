@@ -10,6 +10,12 @@ together.
 
 API documentation: `cargo doc -p qdp-cli --open`
 
+## Usage
+
+```text
+(generated)
+```
+
 ## Dependencies
 
 | Dependency | Version | Platform | Needed for |
