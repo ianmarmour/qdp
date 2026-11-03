@@ -1,7 +1,8 @@
 //! Reading DMA-BUFs with the processor: mapping a buffer into memory,
 //! bracketed by the synchronization that makes the GPU's writes visible.
 //! Reading GPU memory is slow, so this is for small buffers, such as a
-//! pointer's image, and for the odd frame that must reach memory.
+//! pointer's image, for the odd frame that must reach memory, and for
+//! reading a few pixels of each frame.
 
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -24,7 +25,7 @@ const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
 /// A DMA-BUF mapped for reading. The GPU's writes before the mapping are
 /// visible through it; the mapping is undone when it is dropped.
-pub(super) struct MappedDmaBuf<'a> {
+pub struct MappedDmaBuf<'a> {
     /// Where the buffer is mapped.
     address: NonNull<c_void>,
     /// The mapped bytes.
@@ -36,7 +37,7 @@ pub(super) struct MappedDmaBuf<'a> {
 impl<'a> MappedDmaBuf<'a> {
     /// Maps the first `length` bytes of the buffer read-only, or returns
     /// `None` if its driver cannot map it.
-    pub(super) fn map(descriptor: BorrowedFd<'a>, length: usize) -> Option<Self> {
+    pub fn map(descriptor: BorrowedFd<'a>, length: usize) -> Option<Self> {
         if length == 0 {
             return None;
         }
@@ -66,7 +67,7 @@ impl<'a> MappedDmaBuf<'a> {
     }
 
     /// Returns the mapped bytes.
-    pub(super) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         // SAFETY: the mapping holds `length` readable bytes until it is
         // undone, which needs `self`, so not while the slice is borrowed.
         unsafe { std::slice::from_raw_parts(self.address.as_ptr().cast::<u8>(), self.length) }

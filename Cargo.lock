@@ -3008,6 +3008,7 @@ name = "qdp-bench"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "qdp-codec",
  "qdp-desktop",
  "qdp-runtime",
  "serde",

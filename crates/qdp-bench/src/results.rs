@@ -14,11 +14,14 @@ pub struct Run {
     pub profile: String,
     /// The round of the benchmark.
     pub round: u32,
+    /// The refresh rate of the host's and the client's screens, in hertz.
+    #[serde(default = "default_refresh_hz")]
+    pub refresh_hz: u32,
     /// How long the run measured, in seconds.
     pub seconds: f64,
     /// The probe's pictures the client's screen showed.
     pub shown_frames: u64,
-    /// The probe's pictures it never showed.
+    /// The screen's frames that brought no new picture.
     pub skipped_frames: u64,
     /// The client's frames whose time could not be read.
     pub unreadable_frames: u64,
@@ -37,4 +40,10 @@ pub struct Run {
     pub click_latency_ms: Vec<f64>,
     /// Each measured process's CPU use, in percent of one core, by its role.
     pub cpu_percent: BTreeMap<String, f64>,
+}
+
+/// The refresh rate of runs that did not record theirs, from before the
+/// benchmark ran at any other.
+fn default_refresh_hz() -> u32 {
+    60
 }

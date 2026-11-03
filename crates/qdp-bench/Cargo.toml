@@ -11,6 +11,7 @@ repository.workspace = true
 
 [dependencies]
 libc.workspace = true
+qdp-codec.workspace = true
 qdp-desktop = { workspace = true, features = ["screen-capture"] }
 qdp-runtime.workspace = true
 serde.workspace = true

@@ -9,12 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qdp_desktop::{FrameMemory, ScreenOptions};
-use qdp_runtime::{FrameArrivals, FrameSource, InputAction, InputInjector, PointerButton};
+use qdp_runtime::{
+    CapturedFrame, FrameArrivals, FrameSource, InputAction, InputInjector, PointerButton,
+};
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use crate::clock::{now_micros, ticks_per_second};
 use crate::layout::{self, CLICK, Picture, Pixels};
+#[cfg(target_os = "linux")]
+use crate::picture::MappedFrame;
 use crate::results::Run;
 use crate::system::{cpu_ticks, interface_bytes};
 
@@ -39,6 +43,11 @@ const CLICK_GAP_MILLIS: (u64, u64) = (400, 900);
 /// How long the measurer waits for a frame before looking at its clicks.
 const POLL: Duration = Duration::from_millis(20);
 
+/// How long after looking for the probe on the whole screen the measurer
+/// looks again, if its grid stops reading where it was: looking takes many
+/// of the screen's frames.
+const RELOCATE_INTERVAL: Duration = Duration::from_millis(500);
+
 /// QDP's input units in a pixel.
 const UNITS_PER_PIXEL: f64 = 256.0;
 
@@ -54,6 +63,8 @@ pub struct MeasureArgs {
     pub profile: String,
     /// The round of the benchmark this run belongs to.
     pub round: u32,
+    /// The refresh rate of the host's and the client's screens, in hertz.
+    pub refresh_hz: u32,
     /// How long to measure.
     pub seconds: u64,
     /// The file to write the run's results to.
@@ -66,8 +77,11 @@ pub struct MeasureArgs {
 
 /// Measures a run and writes its results.
 pub fn run(args: &MeasureArgs) -> Result<(), String> {
+    // The screen's frames are left in the GPU's buffers, where only the
+    // pixels read are fetched: copying each into memory takes longer than
+    // the screen's refresh.
     let (source, injector) = qdp_desktop::open_gnome(ScreenOptions {
-        frames: FrameMemory::System,
+        frames: FrameMemory::Gpu,
         ..ScreenOptions::default()
     })?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -103,10 +117,12 @@ struct Screen {
     wake: Arc<Notify>,
     /// The frames read so far.
     read: u64,
-    /// The latest frame's luma plane, with its width and height.
-    latest: Option<(Vec<u8>, usize, usize)>,
+    /// The latest frame that did not show the probe.
+    latest: Option<CapturedFrame>,
     /// Where the screen last showed the probe.
     probe: Option<Pixels>,
+    /// When the probe was last looked for on the whole screen.
+    located_at: Option<u64>,
 }
 
 impl Screen {
@@ -124,6 +140,7 @@ impl Screen {
             read: 0,
             latest: None,
             probe: None,
+            located_at: None,
         })
     }
 
@@ -139,46 +156,80 @@ impl Screen {
         self.read = self.arrivals.count();
         let at = now_micros();
         let captured = self.source.capture().map_err(|error| error.to_string())?;
-        let Some(frame) = captured.in_memory() else {
-            return Err("the client's screen frames are not in memory".to_owned());
-        };
-        let (width, height) = (frame.width(), frame.height());
-        let picture = Picture {
-            luma: frame.y(),
-            blue: frame.u(),
-            red: frame.v(),
-            width,
-            height,
-        };
-        let probe = layout::locate(picture);
-        if probe.is_some() {
-            self.probe = probe;
-        }
-        let seen = Seen {
-            at,
-            drawn: probe.and_then(|probe| layout::read_time(picture, probe)),
-            lit: probe.and_then(|probe| layout::marker_lit(picture, probe)),
+        let seen = match &captured {
+            CapturedFrame::Memory(frame) => self.read_frame(&**frame, at),
+            #[cfg(target_os = "linux")]
+            CapturedFrame::DmaBuf(frame) => match MappedFrame::map(frame) {
+                Some(mapped) => self.read_frame(&mapped, at),
+                None => {
+                    warn!("the client's screen cannot be read where the GPU holds it");
+                    self.source.use_memory_frames();
+                    return Ok(None);
+                }
+            },
         };
         if seen.drawn.is_none() {
-            self.latest = Some((frame.y().to_vec(), width, height));
+            self.latest = Some(captured);
         }
         Ok(Some(seen))
+    }
+
+    /// Reads what `picture`, a frame that arrived at `at`, shows: where the
+    /// probe was last, or, if its grid does not read there, wherever it is
+    /// now, unless it was looked for a moment ago.
+    fn read_frame(&mut self, picture: &impl Picture, at: u64) -> Seen {
+        let read = |probe: Option<Pixels>| {
+            let probe = probe?;
+            Some((layout::read_time(picture, probe)?, probe))
+        };
+        let mut found = read(self.probe);
+        let relocate = self
+            .located_at
+            .is_none_or(|located| at >= located + micros(RELOCATE_INTERVAL));
+        if found.is_none() && relocate {
+            self.located_at = Some(at);
+            if let Some(probe) = layout::locate(picture) {
+                self.probe = Some(probe);
+                found = read(self.probe);
+            }
+        }
+        Seen {
+            at,
+            drawn: found.map(|(drawn, _)| drawn),
+            lit: found.and_then(|(_, probe)| layout::marker_lit(picture, probe)),
+        }
     }
 
     /// Writes the latest frame that did not show the probe to `path`, as a
     /// greyscale PGM picture, for finding out what the viewer showed
     /// instead.
     fn save_latest(&self, path: &Path) {
-        let Some((luma, width, height)) = &self.latest else {
-            return;
+        let luma = match &self.latest {
+            Some(CapturedFrame::Memory(frame)) => luma_plane(&**frame),
+            #[cfg(target_os = "linux")]
+            Some(CapturedFrame::DmaBuf(frame)) => {
+                let Some(mapped) = MappedFrame::map(frame) else {
+                    return;
+                };
+                luma_plane(&mapped)
+            }
+            None => return,
         };
-        let mut picture = format!("P5\n{width} {height}\n255\n").into_bytes();
-        picture.extend_from_slice(luma);
-        match std::fs::write(path, picture) {
+        match std::fs::write(path, luma) {
             Ok(()) => info!(path = %path.display(), "the client's screen was saved"),
             Err(error) => warn!(%error, "the client's screen cannot be saved"),
         }
     }
+}
+
+/// Returns `picture`'s luma as a greyscale PGM picture.
+fn luma_plane(picture: &impl Picture) -> Vec<u8> {
+    let (width, height) = picture.size();
+    let mut out = format!("P5\n{width} {height}\n255\n").into_bytes();
+    for y in 0..height {
+        out.extend((0..width).map(|x| picture.luma(x, y)));
+    }
+    out
 }
 
 /// Where a click is.
@@ -258,9 +309,10 @@ async fn measure(
         protocol: args.protocol.clone(),
         profile: args.profile.clone(),
         round: args.round,
+        refresh_hz: args.refresh_hz,
         seconds: elapsed,
         shown_frames: frames.latencies.len() as u64,
-        skipped_frames: frames.skipped(),
+        skipped_frames: frames.skipped(elapsed, args.refresh_hz),
         unreadable_frames: frames.unreadable,
         missed_clicks: clicks.missed,
         megabits_per_second,
@@ -313,9 +365,6 @@ struct Frames {
     latencies: Vec<f64>,
     /// The time between new pictures arriving, in milliseconds.
     intervals: Vec<f64>,
-    /// The time between the probe drawing successive pictures that arrived,
-    /// in milliseconds.
-    drawn_gaps: Vec<f64>,
     /// The frames whose grid could not be read.
     unreadable: u64,
 }
@@ -333,23 +382,18 @@ impl Frames {
                 return;
             }
             self.intervals.push(millis(seen.at - last_at));
-            self.drawn_gaps.push(millis(drawn - last_drawn));
         }
         self.latencies.push(millis(seen.at.saturating_sub(drawn)));
         self.last = Some((drawn, seen.at));
     }
 
-    /// Returns how many of the probe's pictures never arrived: those the
-    /// gaps between the probe's pictures that did arrive leave out, with the
-    /// probe drawing a picture each typical gap.
-    fn skipped(&self) -> u64 {
-        let Some(period) = crate::stats::percentile(&self.drawn_gaps, 50.0) else {
-            return 0;
-        };
-        self.drawn_gaps
-            .iter()
-            .map(|gap| ((gap / period).round() as u64).saturating_sub(1))
-            .sum()
+    /// Returns how many of the screen's frames over `seconds` at
+    /// `refresh_hz` brought no new picture: those of the host's screen that
+    /// never showed, and those a server never made by slowing the host's
+    /// screen down.
+    fn skipped(&self, seconds: f64, refresh_hz: u32) -> u64 {
+        let frames = (seconds * f64::from(refresh_hz)).round() as u64;
+        frames.saturating_sub(self.latencies.len() as u64)
     }
 }
 
@@ -499,15 +543,17 @@ mod tests {
         assert_eq!(frames.intervals, [16.0]);
     }
 
-    /// Pictures the probe drew between those that arrived count as
-    /// skipped.
+    /// The screen's frames that brought no new picture count as skipped,
+    /// whether the host's screen showed them or not.
     #[test]
     fn counts_skipped_pictures() {
         let mut frames = Frames::default();
         for drawn in [0, 16_000, 32_000, 80_000, 96_000] {
             frames.add(seen(drawn + 5_000, drawn));
         }
-        assert_eq!(frames.skipped(), 2);
+        assert_eq!(frames.skipped(0.1, 60), 1);
+        assert_eq!(frames.skipped(0.1, 120), 7);
+        assert_eq!(frames.skipped(0.05, 60), 0);
     }
 
     /// Unreadable frames are counted apart.

@@ -26,6 +26,7 @@ measurements and logs.
 | `QDP_BENCH_ROUNDS` | `3` | How many times each is measured |
 | `QDP_BENCH_SECONDS` | `30` | How long each measurement lasts |
 | `QDP_BENCH_SIZE` | `1920x1080` | The host's and the client's screen size |
+| `QDP_BENCH_REFRESH` | `60 120` | The screens' refresh rates, in hertz |
 
 For example, `QDP_BENCH_ROUNDS=5 bench/run`.
 
@@ -54,19 +55,20 @@ Profiles other than `lan` need the kernel's `sch_netem` module:
 
 ## What it measures
 
-The host and the client are headless GNOME sessions. On the host's screen, a
-probe shows in every frame the time it drew it, and lights a marker while a
-button is held. On the client's, each protocol's viewer shows the host's
-screen, and the measurer finds the probe there, reads it and clicks on it.
+The host and the client are headless GNOME sessions, measured at each refresh
+rate in turn. On the host's screen, a probe shows in every frame the time it
+drew it, and lights a marker while a button is held. On the client's, each
+protocol's viewer shows the host's screen, and the measurer finds the probe
+there, reads it and clicks on it.
 Both read the same clock.
 
 | Column | What it is |
 |---|---|
 | Click to photon | From a click on the client to its effect showing on the client's screen |
 | Display latency | From the host's screen changing to the change showing on the client's |
-| Frame rate | New pictures a second on the client's screen, of the probe's 60 |
+| Frame rate | New pictures a second on the client's screen, of one each refresh |
 | Frame time spread | How unevenly the pictures arrive: the standard deviation of the time between them |
-| Skipped frames | The probe's pictures that never showed |
+| Skipped frames | The client screen's refreshes that brought no new picture |
 | Missed clicks | Clicks whose effect never showed |
 | Bandwidth | The traffic between the host and the client |
 | CPU | The host's server's and the client's viewer's, in percent of one core |

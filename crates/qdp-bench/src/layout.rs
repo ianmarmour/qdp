@@ -34,6 +34,14 @@ const GREEN_CHROMA: u8 = 90;
 /// the probe to be taken as shown.
 const MIN_GREEN_PER_MILLE: usize = 20;
 
+/// The pixels between those sampled, each way, in looking for the probe's
+/// green; its edges are then found to the pixel.
+const LOCATE_STEP: usize = 4;
+
+/// The pixels sampled each way in reading a cell or the marker, which the
+/// screen's frames being in GPU memory makes slow to read whole.
+const SAMPLES: usize = 3;
+
 /// The grid's area of the probe.
 pub const GRID: Area = Area {
     left: 0.025,
@@ -130,19 +138,23 @@ impl Area {
     }
 }
 
-/// A picture of the client's screen, as 4:2:0 planes.
-#[derive(Debug, Clone, Copy)]
-pub struct Picture<'a> {
-    /// The luma plane, `width` bytes a row.
-    pub luma: &'a [u8],
-    /// The blue-difference plane, `(width + 1) / 2` bytes a row.
-    pub blue: &'a [u8],
-    /// The red-difference plane, as wide.
-    pub red: &'a [u8],
-    /// The width, in pixels.
-    pub width: usize,
-    /// The height, in pixels.
-    pub height: usize,
+/// A picture of the client's screen, read a pixel at a time.
+pub trait Picture {
+    /// Returns the width and height, in pixels.
+    fn size(&self) -> (usize, usize);
+
+    /// Returns the luma of the pixel at `x`, `y`, which is in the picture.
+    fn luma(&self, x: usize, y: usize) -> u8;
+
+    /// Returns the blue and red differences of the pixel at `x`, `y`, which
+    /// is in the picture.
+    fn chroma(&self, x: usize, y: usize) -> (u8, u8);
+
+    /// Returns whether the pixel at `x`, `y` is the probe's green.
+    fn is_green(&self, x: usize, y: usize) -> bool {
+        let (blue, red) = self.chroma(x, y);
+        blue < GREEN_CHROMA && red < GREEN_CHROMA
+    }
 }
 
 /// Returns the grid's cells, left to right then top to bottom, each with
@@ -159,17 +171,14 @@ pub fn cells(time: u64) -> impl Iterator<Item = (Area, bool)> {
 
 /// Returns where `picture` shows the probe: the box around its green, if
 /// enough of the picture is green.
-pub fn locate(picture: Picture<'_>) -> Option<Pixels> {
-    let chroma_width = picture.width.div_ceil(2);
-    let chroma_height = picture.height.div_ceil(2);
+pub fn locate(picture: &impl Picture) -> Option<Pixels> {
+    let (width, height) = picture.size();
     let (mut left, mut top, mut right, mut bottom) = (usize::MAX, usize::MAX, 0, 0);
-    let mut green = 0;
-    for y in 0..chroma_height {
-        let row = y * chroma_width;
-        let blue = picture.blue.get(row..row + chroma_width)?;
-        let red = picture.red.get(row..row + chroma_width)?;
-        for (x, (&blue, &red)) in blue.iter().zip(red).enumerate() {
-            if blue < GREEN_CHROMA && red < GREEN_CHROMA {
+    let (mut green, mut sampled) = (0, 0);
+    for y in (0..height).step_by(LOCATE_STEP) {
+        for x in (0..width).step_by(LOCATE_STEP) {
+            sampled += 1;
+            if picture.is_green(x, y) {
                 green += 1;
                 left = left.min(x);
                 right = right.max(x);
@@ -178,23 +187,38 @@ pub fn locate(picture: Picture<'_>) -> Option<Pixels> {
             }
         }
     }
-    if green * 1000 < chroma_width * chroma_height * MIN_GREEN_PER_MILLE {
+    if green * 1000 < sampled * MIN_GREEN_PER_MILLE {
         return None;
     }
-    let x = left * 2;
-    let y = top * 2;
+    // Each edge, found to within a step, is found to the pixel across the
+    // middle of the box.
+    let (middle_x, middle_y) = ((left + right) / 2, (top + bottom) / 2);
+    let left = (left.saturating_sub(LOCATE_STEP)..left)
+        .find(|&x| picture.is_green(x, middle_y))
+        .unwrap_or(left);
+    let right = (right + 1..(right + LOCATE_STEP).min(width))
+        .rev()
+        .find(|&x| picture.is_green(x, middle_y))
+        .unwrap_or(right);
+    let top = (top.saturating_sub(LOCATE_STEP)..top)
+        .find(|&y| picture.is_green(middle_x, y))
+        .unwrap_or(top);
+    let bottom = (bottom + 1..(bottom + LOCATE_STEP).min(height))
+        .rev()
+        .find(|&y| picture.is_green(middle_x, y))
+        .unwrap_or(bottom);
     Some(Pixels {
-        x,
-        y,
-        width: ((right + 1) * 2).min(picture.width) - x,
-        height: ((bottom + 1) * 2).min(picture.height) - y,
+        x: left,
+        y: top,
+        width: right + 1 - left,
+        height: bottom + 1 - top,
     })
 }
 
 /// Returns the time a frame was drawn, in microseconds, read from the probe
 /// that `picture` shows at `probe`, or `None` if the grid is not there
 /// whole.
-pub fn read_time(picture: Picture<'_>, probe: Pixels) -> Option<u64> {
+pub fn read_time(picture: &impl Picture, probe: Pixels) -> Option<u64> {
     let mut word = 0_u64;
     for row in 0..ROWS {
         for column in 0..COLUMNS {
@@ -209,24 +233,30 @@ pub fn read_time(picture: Picture<'_>, probe: Pixels) -> Option<u64> {
 
 /// Returns whether the marker of the probe that `picture` shows at `probe`
 /// is white.
-pub fn marker_lit(picture: Picture<'_>, probe: Pixels) -> Option<bool> {
+pub fn marker_lit(picture: &impl Picture, probe: Pixels) -> Option<bool> {
     Some(average_luma(picture, MARKER.middle().within(probe))? >= LUMA_THRESHOLD)
 }
 
-/// Returns the average luma of `area`, or `None` if it is empty or lies
-/// outside the picture.
-fn average_luma(picture: Picture<'_>, area: Pixels) -> Option<u32> {
-    let count = area.width * area.height;
-    if count == 0 {
+/// Returns the average luma of `area`, sampled evenly, or `None` if it is
+/// empty or lies outside the picture.
+fn average_luma(picture: &impl Picture, area: Pixels) -> Option<u32> {
+    let (width, height) = picture.size();
+    if area.width == 0
+        || area.height == 0
+        || area.x + area.width > width
+        || area.y + area.height > height
+    {
         return None;
     }
-    let mut sum = 0_u64;
-    for y in area.y..area.y + area.height {
-        let start = y * picture.width + area.x;
-        let row = picture.luma.get(start..start + area.width)?;
-        sum += row.iter().map(|&value| u64::from(value)).sum::<u64>();
+    let mut sum = 0_u32;
+    for row in 0..SAMPLES {
+        let y = area.y + (2 * row + 1) * area.height / (2 * SAMPLES);
+        for column in 0..SAMPLES {
+            let x = area.x + (2 * column + 1) * area.width / (2 * SAMPLES);
+            sum += u32::from(picture.luma(x, y));
+        }
     }
-    u32::try_from(sum / count as u64).ok()
+    Some(sum / (SAMPLES * SAMPLES) as u32)
 }
 
 /// Returns the grid's bits for `time`: the time's low bits, then its check.
@@ -275,16 +305,18 @@ mod tests {
         red: Vec<u8>,
     }
 
-    impl Screen {
-        /// Returns the screen as a picture.
-        fn picture(&self) -> Picture<'_> {
-            Picture {
-                luma: &self.luma,
-                blue: &self.blue,
-                red: &self.red,
-                width: WIDTH,
-                height: HEIGHT,
-            }
+    impl Picture for Screen {
+        fn size(&self) -> (usize, usize) {
+            (WIDTH, HEIGHT)
+        }
+
+        fn luma(&self, x: usize, y: usize) -> u8 {
+            self.luma[y * WIDTH + x]
+        }
+
+        fn chroma(&self, x: usize, y: usize) -> (u8, u8) {
+            let index = y / 2 * (WIDTH / 2) + x / 2;
+            (self.blue[index], self.red[index])
         }
     }
 
@@ -329,7 +361,7 @@ mod tests {
     #[test]
     fn locates_the_probe() {
         let screen = screen(7, false);
-        assert_eq!(locate(screen.picture()), Some(PROBE));
+        assert_eq!(locate(&screen), Some(PROBE));
     }
 
     /// A screen without the probe's green has no probe.
@@ -341,7 +373,7 @@ mod tests {
             blue: vec![128; chroma],
             red: vec![128; chroma],
         };
-        assert_eq!(locate(blank.picture()), None);
+        assert_eq!(locate(&blank), None);
     }
 
     /// A drawn time reads back from where the probe is.
@@ -349,8 +381,8 @@ mod tests {
     fn reads_the_time_back() {
         for time in [1, 0x1234_5678_9abc, (1 << TIME_BITS) - 1] {
             let screen = screen(time, false);
-            let probe = locate(screen.picture()).unwrap();
-            assert_eq!(read_time(screen.picture(), probe), Some(time));
+            let probe = locate(&screen).unwrap();
+            assert_eq!(read_time(&screen, probe), Some(time));
         }
     }
 
@@ -367,7 +399,7 @@ mod tests {
     fn reads_the_marker() {
         for lit in [true, false] {
             let screen = screen(7, lit);
-            assert_eq!(marker_lit(screen.picture(), PROBE), Some(lit));
+            assert_eq!(marker_lit(&screen, PROBE), Some(lit));
         }
     }
 
