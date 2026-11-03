@@ -1,0 +1,32 @@
+# The benchmark environment: headless GNOME sessions for a host and a
+# client, with the servers and viewers of each protocol compared. Every
+# package comes from the Arch Linux archive's snapshot of one day, so the
+# environment is the same wherever and whenever it is built.
+FROM quay.io/archlinux/archlinux:base-devel-20261025.0.616225@sha256:26af427182e674e9fc914fc0f6d9e794d79ca302abea64a3526e371cfa90313d
+
+ARG SNAPSHOT=2026/10/25
+ARG RUST=1.97.0
+
+RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT}/\$repo/os/\$arch" \
+        > /etc/pacman.d/mirrorlist \
+    && pacman -Syyuu --noconfirm \
+        adwaita-cursors \
+        clang \
+        freerdp \
+        gnome-remote-desktop \
+        iproute2 \
+        mesa \
+        mutter \
+        nasm \
+        pipewire \
+        rustup \
+        tigervnc \
+        ttf-dejavu \
+        wireplumber \
+        xorg-xwayland \
+    && pacman -Scc --noconfirm \
+    && rustup toolchain install "${RUST}" --profile minimal \
+    && rustup default "${RUST}"
+
+# Builds go to a volume kept between runs.
+ENV CARGO_HOME=/cargo/home CARGO_TARGET_DIR=/cargo/target

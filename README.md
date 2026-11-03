@@ -78,6 +78,7 @@ on each platform step by step.
 | [`crates/qdp-cli`](crates/qdp-cli/README.md) | The `qdp` command |
 | [`crates/qdp-gateway`](crates/qdp-gateway/README.md) | The gateway |
 | [`crates/qdp-gtk`](crates/qdp-gtk/README.md) | The Linux app |
+| [`crates/qdp-bench`](crates/qdp-bench/README.md), [`bench`](bench/README.md) | Latency benchmarks against RDP and VNC |
 | [`crates/qdp-android`](crates/qdp-android/README.md), [`android`](android/README.md) | The Android app and its core |
 | [`crates/qdp-apple`](crates/qdp-apple/README.md), [`apple`](apple/README.md) | The Mac, iPhone and iPad apps and their core |
 | [`crates/qdp-windows`](crates/qdp-windows/README.md), [`windows`](windows/README.md) | The Windows app and its core |

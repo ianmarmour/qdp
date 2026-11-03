@@ -1,0 +1,41 @@
+#!/bin/sh
+# Measures how quickly QDP, RDP and VNC show a host's screen and answer a
+# client's input, in a container built from bench/Containerfile, and writes
+# the results and a report to bench/results/. Needs Podman or Docker.
+set -eu
+cd "$(dirname "$0")/.."
+
+if command -v podman > /dev/null; then
+    engine=podman
+elif command -v docker > /dev/null; then
+    engine=docker
+else
+    echo "bench/run needs Podman or Docker" >&2
+    exit 1
+fi
+
+"$engine" build --tag qdp-bench --file bench/Containerfile bench
+
+results="bench/results/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$results"
+git rev-parse HEAD > "$results/commit" 2> /dev/null || true
+
+set -- --rm --init --cap-add NET_ADMIN --shm-size 1g \
+    --volume "$PWD:/src:ro" \
+    --volume qdp-bench-cargo:/cargo \
+    --volume "$PWD/$results:/results"
+for variable in QDP_BENCH_SIZE QDP_BENCH_SECONDS QDP_BENCH_ROUNDS \
+    QDP_BENCH_PROTOCOLS QDP_BENCH_PROFILES; do
+    set -- "$@" --env "$variable"
+done
+if [ -e /dev/dri ]; then
+    set -- "$@" --device /dev/dri
+fi
+if [ "$engine" = podman ]; then
+    # The checkout keeps its own SELinux labels, and the GPU's device
+    # nodes stay reachable through the user's own groups.
+    set -- "$@" --security-opt label=disable --group-add keep-groups
+fi
+
+"$engine" run "$@" qdp-bench /src/bench/in-container
+echo "The report is in $results/report.md"
