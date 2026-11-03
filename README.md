@@ -15,22 +15,23 @@ QDP is in active development. Its protocol is draft 00 of an
 
 ## Highlights
 
-- **Low latency.** Frames are encoded as the desktop draws them and sent as
-  QUIC datagrams. On Linux they stay in GPU memory from capture to encoder,
-  keeping up with 4K at 120 frames a second. Each device draws the pointer
-  itself, so it never lags.
-- **Simple pairing.** Type the four-digit code the computer shows, once. No
-  accounts, no passwords.
-- **Made for games too.** Controllers with rumble, raw mouse input, an
-  on-screen controller on phones and tablets, and, between Linux computers,
-  controllers passed through as they are.
-- **Everything you expect.** Sound both ways, a shared clipboard, touch, pens,
-  and the login screen on Linux.
-- **Secure by default.** TLS 1.3 with pinned keys, a notice on the computer
-  while it's shared, and a locked desktop if a session drops.
-- **Ready for organizations.** A [gateway](docs/gateway.md) signs people in
-  with the organization's directory and an authenticator app, and reaches the
-  computers inside its network.
+- **Low Latency** - Frames are encoded as the desktop draws them, on the GPU
+  where it can, and sent as QUIC datagrams. On Linux they stay in GPU memory
+  from capture to encoder, keeping up with 4K at 120 frames a second. Each device draws the
+  pointer itself, so it never lags, and games get raw mouse input and
+  controllers with rumble.
+- **Multi Platform** - Share a Linux, Windows or Mac computer, and connect
+  from native apps on Linux, Windows, macOS, Android, iPhone and iPad, with
+  sound both ways, a shared clipboard, touch, pens, controllers, and an
+  on-screen controller on phones and tablets.
+- **Simple Setup** - Install, run `qdp serve`, and type the four-digit code
+  the computer shows, once. No accounts, no passwords. Linux computers show
+  up in the apps on their own.
+- **Enterprise** - A [gateway](docs/gateway.md) signs people in with the
+  organization's directory and an authenticator app, and reaches the
+  computers inside its network. Sessions use TLS 1.3 with pinned keys, the
+  computer shows a notice while it's shared and locks if a session drops,
+  and Linux hosts can stream the login screen as a system service.
 
 ## Platforms
 
