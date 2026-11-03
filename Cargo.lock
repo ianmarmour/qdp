@@ -3087,6 +3087,7 @@ dependencies = [
  "qdp-runtime",
  "tokio",
  "tracing",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",

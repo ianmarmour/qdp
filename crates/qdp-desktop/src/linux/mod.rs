@@ -46,6 +46,8 @@ mod touchpad_capture;
 mod touchscreen;
 mod uhid;
 mod uinput;
+#[cfg(feature = "wayland-video")]
+mod wayland_video;
 #[cfg(feature = "screen-capture")]
 mod wlr_displays;
 
@@ -58,6 +60,8 @@ pub use mutter::{open_gnome, probe_injector as gnome_probe_injector};
 #[cfg(feature = "screen-capture")]
 pub use screencast::ScreenCapture;
 pub use uinput::UinputInjector;
+#[cfg(feature = "wayland-video")]
+pub use wayland_video::WaylandVideo;
 
 pub(crate) use hidraw::start as start_passthrough;
 #[cfg(feature = "screen-capture")]

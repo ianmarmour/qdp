@@ -103,6 +103,7 @@ windows-service = { version = "0.8.1", default-features = false }
 # The X11 and Wayland clipboards, to find content password managers mark
 # secret, which arboard does not report.
 wl-clipboard-rs = { version = "0.9.3", default-features = false }
+wayland-backend = { version = "0.3.17", default-features = false, features = ["client_system", "dlopen"] }
 wayland-client = { version = "0.31.15", default-features = false }
 wayland-protocols = { version = "0.32.13", default-features = false, features = ["client", "unstable"] }
 # Generates KWin's display settings protocols, which the host changes to the

@@ -3,6 +3,7 @@
 //! handed to it, which the session's frame timing reports.
 
 use std::sync::Arc;
+#[cfg(any(target_os = "macos", target_os = "ios", windows))]
 use std::time::{Duration, Instant};
 
 /// A rectangle in the drawable's pixels.
@@ -49,8 +50,10 @@ pub struct Scene {
 }
 
 /// The layers drawn over the picture: the overlay, then the badge.
+#[cfg(any(target_os = "macos", target_os = "ios", windows))]
 pub(crate) const OVERLAY_LAYERS: usize = 2;
 
+#[cfg(any(target_os = "macos", target_os = "ios", windows))]
 impl Scene {
     /// Returns what is drawn over the picture, bottom first.
     pub(crate) fn layers(&self) -> [Option<&Overlay>; OVERLAY_LAYERS] {
@@ -59,6 +62,7 @@ impl Scene {
 }
 
 /// What became of a picture handed to the render thread, tagged as it was.
+#[cfg(any(target_os = "macos", target_os = "ios", windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fate<T> {
     /// It was drawn and handed to the display.
