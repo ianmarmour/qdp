@@ -429,34 +429,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          : > notes.md
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             tag="$GITHUB_REF_NAME"
             title="QDP ${GITHUB_REF_NAME#v}"
+            # The tag's annotation is the release's description, above the
+            # changelog GitHub writes. Checkout fetches the tag without its
+            # annotation, so fetch the tag itself.
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+            if [ "$(git cat-file -t "refs/tags/$tag")" = tag ]; then
+              git for-each-ref "refs/tags/$tag" \
+                --format='%(contents:subject)%0a%0a%(contents:body)' > notes.md
+            fi
           else
             tag="build-$GITHUB_RUN_NUMBER"
             title="QDP $version, build $GITHUB_RUN_NUMBER"
           fi
-          cat > notes.md <<NOTES
-          | Platform | Download |
-          |---|---|
-          | Windows app installer, with the qdp command (x86-64, Windows 10 or later) | \`qdp-windows-x64.msi\` |
-          | Windows app, without installing (x86-64, Windows 10 or later) | \`qdp-windows-app-x64.zip\` |
-          | Android (64-bit ARM, Android 10 or later) | \`qdp-android-arm64.apk\` |
-          | Mac app (Apple silicon, macOS 26 or later) | \`qdp-macos-app.zip\` |
-          | iPhone and iPad app (iOS 26 or later, unsigned, for sideloading) | \`qdp-ios-unsigned.ipa\` |
-          | Linux (x86-64) | \`qdp-linux-x86_64.tar.gz\` |
-          | Linux RPM (x86-64; Fedora 40 or later, openSUSE Tumbleweed) | \`qdp-linux-x86_64.rpm\` |
-          | Linux Debian package (x86-64; Debian 12 or later, Ubuntu 22.04 or later) | \`qdp-linux-x86_64.deb\` |
-          | Linux app (x86-64; GTK 4.14 and libadwaita 1.5 or later) | \`qdp-gtk-linux-x86_64.tar.gz\` |
-          | Linux app RPM (x86-64; Fedora 40 or later; needs the qdp RPM) | \`qdp-gtk-linux-x86_64.rpm\` |
-          | macOS (Apple silicon) | \`qdp-macos-arm64.tar.gz\` |
-          | Windows (x86-64) | \`qdp-windows-x86_64.zip\` |
-          | Gateway for Linux (x86-64) | \`qdp-gateway-linux-x86_64.tar.gz\` |
-          | Gateway RPM (x86-64; Fedora 40 or later, RHEL 9 or later) | \`qdp-gateway-linux-x86_64.rpm\` |
-          | Gateway Debian package (x86-64; Debian 12 or later, Ubuntu 22.04 or later) | \`qdp-gateway-linux-x86_64.deb\` |
-          | Gateway installer for Windows (x86-64; Windows Server 2019 or later) | \`qdp-gateway-windows-x64.msi\` |
-          | Gateway for Windows, without installing (x86-64) | \`qdp-gateway-windows-x86_64.zip\` |
-          NOTES
           gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "$title" --notes-file notes.md --generate-notes
 
