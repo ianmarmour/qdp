@@ -39,6 +39,7 @@ internet, and grant access to endpoints.
 | [Contributing](../CONTRIBUTING.md) | Reporting problems, making changes, code style |
 | [Building from source](building.md) | Setting up Linux, macOS and Windows to build and test |
 | [Architecture](architecture.md) | How the crates and apps fit together |
+| [Benchmarks](../bench/README.md) | Measuring QDP's, RDP's and VNC's latency |
 | [Releasing](releasing.md) | Continuous integration, releases, signing |
 | [Packaging](../packaging/README.md) | The RPMs, Debian packages and Windows installers |
 

@@ -31,9 +31,11 @@ Each layer builds on the ones above it:
 | Integration | [`qdp-desktop`](../crates/qdp-desktop/README.md), [`qdp-app`](../crates/qdp-app/README.md) |
 | Programs | [`qdp-cli`](../crates/qdp-cli/README.md), and the apps' cores: [`qdp-android`](../crates/qdp-android/README.md), [`qdp-apple`](../crates/qdp-apple/README.md), [`qdp-windows`](../crates/qdp-windows/README.md) |
 
-Two stand apart: [`qdp-gateway`](../crates/qdp-gateway/README.md), the
-gateway server, and [`qdp-gtk`](../crates/qdp-gtk/README.md), the Linux app,
-which runs the `qdp` command for its streams.
+Three stand apart: [`qdp-gateway`](../crates/qdp-gateway/README.md), the
+gateway server, [`qdp-gtk`](../crates/qdp-gtk/README.md), the Linux app,
+which runs the `qdp` command for its streams, and
+[`qdp-bench`](../crates/qdp-bench/README.md), which measures QDP, RDP and VNC
+for the [benchmarks](../bench/README.md).
 
 ## Apps
 
