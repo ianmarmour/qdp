@@ -3,8 +3,8 @@
 # qdp
 Quick Desktop Protocol (QDP): a fast and modern alternative to RDP and VNC
 
-The protocol is specified in [`doc/spec`](doc/spec), with the reasoning behind
-its design in [`doc/design-rationale.md`](doc/design-rationale.md).
+The protocol is specified in [`docs/spec`](docs/spec), with the reasoning behind
+its design in [`docs/design-rationale.md`](docs/design-rationale.md).
 
 ## Building
 
@@ -250,7 +250,7 @@ the token beside paired clients, and `--pairing off` turns pairing off:
 
 A host inside an organization's network can also accept the users a
 `qdp-gateway` signs in with the organization's directory and a TOTP code
-([Section 13](doc/spec/13-gateway.md) of the spec): `--gateway-key KEY`
+([Section 13](docs/spec/13-gateway.md) of the spec): `--gateway-key KEY`
 trusts the gateway whose assertion key `qdp-gateway keys` prints, and
 `--gateway-group NAME` admits only its users in that group:
 
@@ -680,7 +680,7 @@ packaging/linux/stage-gtk.sh target/release/qdp-gtk ~/.local && cp target/releas
 
 `qdp-gateway` ([`crates/qdp-gateway`](crates/qdp-gateway)) lets users outside
 an organization's network reach the QDP hosts inside it through one public
-endpoint ([Section 13](doc/spec/13-gateway.md) of the spec). The organization
+endpoint ([Section 13](docs/spec/13-gateway.md) of the spec). The organization
 brings its own accounts: each user signs in with their domain credentials,
 checked with its directory, LDAP or Active Directory over TLS, then always a
 TOTP code from an authenticator app such as Google Authenticator, Microsoft

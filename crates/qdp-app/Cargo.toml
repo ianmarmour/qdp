@@ -1,7 +1,7 @@
 [package]
 name = "qdp-app"
 description = "The core QDP's app clients share: sessions with a host, with reconnection and pairing, the events the app is told, and the sink that hands the video to the platform"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["remote-desktop", "streaming"]
 categories = ["network-programming"]
 version.workspace = true
