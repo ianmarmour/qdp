@@ -34,17 +34,18 @@ Windows, macOS, Android, iPhone and iPad.
 Install QDP as a **host** on the computer you want to reach, and as a
 **client** on each device you'll connect from.
 
-| Platform | Host | Client | Install |
+| Platform | Host | Client | Download |
 |---|:---:|:---:|---|
-| Linux | ✅ | ✅ | [RPM, DEB, TARBALL](docs/install/linux.md) |
-| Windows | ✅ | ✅ | [MSI](docs/install/windows.md) |
-| macOS (Apple silicon) | ✅ | ✅ | [APP / BIN](docs/install/macos.md) |
-| Android | | ✅ | [APK](docs/install/android.md) |
-| iPhone and iPad | | ✅ | [IPA](docs/install/iphone-ipad.md) |
+| Linux | ✅ | ✅ | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) |
+| Windows | ✅ | ✅ | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) |
+| macOS (Apple silicon) | ✅ | ✅ | [APP](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-app.zip) / [BIN](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-arm64.tar.gz) |
+| Android | | ✅ | [APK](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-android-arm64.apk) |
+| iPhone and iPad | | ✅ | [IPA](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa) |
 
-Each format links to a step-by-step install guide for its platform. You can
-also download every package directly from the
-[latest release](https://github.com/ianmarmour/qdp/releases/latest).
+Every download, including the Linux app and the gateway, is on the
+[latest release](https://github.com/ianmarmour/qdp/releases/latest), and the
+[installation guides](docs/README.md#installing) walk through each platform
+step by step.
 
 ## Getting started
 
