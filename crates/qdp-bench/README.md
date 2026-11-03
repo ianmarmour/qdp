@@ -27,6 +27,9 @@ screen, and writes what it measured to FILE:
   --protocol NAME      The protocol the viewer streams with
   --profile NAME       The network profile the stream runs over
   --round N            The round of the benchmark this run is (default 1)
+  --refresh HZ         The refresh rate of the host's and the client's
+                       screens, which every new picture is counted against
+                       (default 60)
   --seconds N          How long to measure (default 30)
   --process ROLE=PID   Measure the CPU time of process PID as ROLE
                        (repeatable)

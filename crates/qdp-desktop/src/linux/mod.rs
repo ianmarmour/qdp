@@ -54,6 +54,8 @@ mod wlr_displays;
 #[cfg(feature = "audio")]
 pub use audio::{PipeWireInput, PipeWireOutput};
 #[cfg(feature = "screen-capture")]
+pub use dma_buf_map::MappedDmaBuf;
+#[cfg(feature = "screen-capture")]
 pub use kms::ConsoleCapture;
 #[cfg(feature = "screen-capture")]
 pub use mutter::{open_gnome, probe_injector as gnome_probe_injector};

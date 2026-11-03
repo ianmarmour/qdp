@@ -10,6 +10,7 @@
 mod clock;
 mod layout;
 mod measure;
+mod picture;
 mod probe;
 mod report;
 mod results;
@@ -40,6 +41,9 @@ screen, and writes what it measured to FILE:
   --protocol NAME      The protocol the viewer streams with
   --profile NAME       The network profile the stream runs over
   --round N            The round of the benchmark this run is (default 1)
+  --refresh HZ         The refresh rate of the host's and the client's
+                       screens, which every new picture is counted against
+                       (default 60)
   --seconds N          How long to measure (default 30)
   --process ROLE=PID   Measure the CPU time of process PID as ROLE
                        (repeatable)
@@ -109,6 +113,7 @@ fn parse_measure(mut arguments: impl Iterator<Item = String>) -> Result<MeasureA
         protocol: String::new(),
         profile: String::new(),
         round: 1,
+        refresh_hz: 60,
         seconds: 30,
         out: PathBuf::new(),
         processes: Vec::new(),
@@ -125,6 +130,7 @@ fn parse_measure(mut arguments: impl Iterator<Item = String>) -> Result<MeasureA
             "--profile" => profile = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--round" => args.round = number(&option, &value()?)?,
+            "--refresh" => args.refresh_hz = number(&option, &value()?)?,
             "--seconds" => args.seconds = number(&option, &value()?)?,
             "--interface" => args.interface = value()?,
             "--process" => {
@@ -170,7 +176,7 @@ mod tests {
             Ok(Command::Report(PathBuf::from("results")))
         );
         let Ok(Command::Measure(args)) = parse_line(
-            "measure --protocol qdp --profile lan --round 2 --seconds 5 \
+            "measure --protocol qdp --profile lan --round 2 --refresh 120 --seconds 5 \
              --process server=10 --process viewer=11 --out run.toml",
         ) else {
             panic!("expected measure");
@@ -178,6 +184,7 @@ mod tests {
         assert_eq!(args.protocol, "qdp");
         assert_eq!(args.profile, "lan");
         assert_eq!(args.round, 2);
+        assert_eq!(args.refresh_hz, 120);
         assert_eq!(args.seconds, 5);
         assert_eq!(
             args.processes,

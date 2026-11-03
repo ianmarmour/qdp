@@ -97,7 +97,7 @@ pub use linux::WaylandVideo;
 #[cfg(all(target_os = "linux", feature = "notifications"))]
 pub use linux::run_session_helper;
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
-pub use linux::{ConsoleCapture, ScreenCapture};
+pub use linux::{ConsoleCapture, MappedDmaBuf, ScreenCapture};
 #[cfg(target_os = "linux")]
 pub use linux::{SeatSession, UinputInjector, seat_session};
 

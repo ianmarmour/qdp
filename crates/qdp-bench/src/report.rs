@@ -1,5 +1,5 @@
 //! The report: every run's results in a directory, summarised as a table
-//! for each network profile, a row for each protocol.
+//! for each refresh rate and network profile, a row for each protocol.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -79,11 +79,16 @@ impl Summary {
     }
 }
 
+/// The runs of each protocol, by protocol.
+type Protocols<'a> = BTreeMap<&'a str, Summary>;
+
 /// Returns the report on `runs`.
 fn render(runs: &[Run]) -> String {
-    let mut profiles: BTreeMap<&str, BTreeMap<&str, Summary>> = BTreeMap::new();
+    let mut sections: BTreeMap<u32, BTreeMap<&str, Protocols<'_>>> = BTreeMap::new();
     for run in runs {
-        profiles
+        sections
+            .entry(run.refresh_hz)
+            .or_default()
             .entry(&run.profile)
             .or_default()
             .entry(&run.protocol)
@@ -98,39 +103,11 @@ fn render(runs: &[Run]) -> String {
         .collect();
 
     let mut out = String::from("# Benchmark results\n");
-    for (profile, protocols) in &profiles {
-        let _ = write!(out, "\n## {profile}\n\n");
-        out.push_str(
-            "| Protocol | Runs | Click to photon (ms) | Display latency (ms) \
-             | Frame rate (fps) | Frame time spread (ms) | Skipped frames \
-             | Missed clicks | Bandwidth (Mbit/s) |",
-        );
-        for role in &roles {
-            let _ = write!(out, " {role} CPU (%) |");
-        }
-        out.push_str("\n|---|---:|---:|---:|---:|---:|---:|---:|---:|");
-        out.push_str(&"---:|".repeat(roles.len()));
-        out.push('\n');
-        for (protocol, summary) in protocols {
-            let seconds = summary.seconds.max(f64::MIN_POSITIVE);
-            let drawn = (summary.shown + summary.skipped).max(1);
-            let _ = write!(
-                out,
-                "| {protocol} | {} | {} | {} | {:.1} | {} | {:.1}% | {} | {:.1} |",
-                summary.runs,
-                median_and_tail(&summary.clicks),
-                median_and_tail(&summary.display),
-                summary.shown as f64 / seconds,
-                optional(standard_deviation(&summary.intervals)),
-                summary.skipped as f64 * 100.0 / drawn as f64,
-                summary.missed,
-                summary.megabits / seconds,
-            );
-            for role in &roles {
-                let cpu = summary.cpu.get(role).map(|cpu| cpu / seconds);
-                let _ = write!(out, " {} |", optional(cpu));
-            }
-            out.push('\n');
+    for (refresh_hz, profiles) in &sections {
+        let _ = write!(out, "\n## {refresh_hz} Hz\n");
+        for (profile, protocols) in profiles {
+            let _ = write!(out, "\n### {profile}\n\n");
+            table(&mut out, protocols, &roles);
         }
     }
     out.push_str(
@@ -139,6 +116,43 @@ fn render(runs: &[Run]) -> String {
          new pictures.\n",
     );
     out
+}
+
+/// Writes to `out` the table of `protocols`, with a CPU column for each of
+/// `roles`.
+fn table(out: &mut String, protocols: &Protocols<'_>, roles: &[String]) {
+    out.push_str(
+        "| Protocol | Runs | Click to photon (ms) | Display latency (ms) \
+         | Frame rate (fps) | Frame time spread (ms) | Skipped frames \
+         | Missed clicks | Bandwidth (Mbit/s) |",
+    );
+    for role in roles {
+        let _ = write!(out, " {role} CPU (%) |");
+    }
+    out.push_str("\n|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+    out.push_str(&"---:|".repeat(roles.len()));
+    out.push('\n');
+    for (protocol, summary) in protocols {
+        let seconds = summary.seconds.max(f64::MIN_POSITIVE);
+        let frames = (summary.shown + summary.skipped).max(1);
+        let _ = write!(
+            out,
+            "| {protocol} | {} | {} | {} | {:.1} | {} | {:.1}% | {} | {:.1} |",
+            summary.runs,
+            median_and_tail(&summary.clicks),
+            median_and_tail(&summary.display),
+            summary.shown as f64 / seconds,
+            optional(standard_deviation(&summary.intervals)),
+            summary.skipped as f64 * 100.0 / frames as f64,
+            summary.missed,
+            summary.megabits / seconds,
+        );
+        for role in roles {
+            let cpu = summary.cpu.get(role).map(|cpu| cpu / seconds);
+            let _ = write!(out, " {} |", optional(cpu));
+        }
+        out.push('\n');
+    }
 }
 
 /// Returns the median of `samples` with their tail percentile, or a dash
@@ -165,6 +179,7 @@ mod tests {
             protocol: protocol.to_owned(),
             profile: profile.to_owned(),
             round: 1,
+            refresh_hz: 60,
             seconds: 10.0,
             shown_frames: 590,
             skipped_frames: 10,
@@ -178,18 +193,27 @@ mod tests {
         }
     }
 
-    /// Each profile gets a table, with a row for each protocol, whose runs
-    /// are summarised together.
+    /// Each refresh rate and profile gets a table, with a row for each
+    /// protocol, whose runs are summarised together.
     #[test]
     fn summarises_each_profile() {
+        let fast = Run {
+            refresh_hz: 120,
+            ..run("qdp", "lan", 5.0)
+        };
         let report = render(&[
             run("qdp", "lan", 10.0),
             run("qdp", "lan", 20.0),
             run("vnc", "lan", 40.0),
             run("qdp", "wan", 30.0),
+            fast,
         ]);
-        assert!(report.contains("## lan"), "{report}");
-        assert!(report.contains("## wan"), "{report}");
+        let sixty = report.find("## 60 Hz").expect("a 60 Hz section");
+        let hundred_twenty = report.find("## 120 Hz").expect("a 120 Hz section");
+        assert!(sixty < hundred_twenty, "{report}");
+        assert_eq!(report.matches("### lan").count(), 2, "{report}");
+        assert_eq!(report.matches("### wan").count(), 1, "{report}");
+        assert!(report.contains("| qdp | 1 | 5.0 (5.0) |"), "{report}");
         assert!(
             report.contains(
                 "| qdp | 2 | 10.0 (20.0) | 22.0 (30.0) | 59.0 | 0.6 | 1.7% | 0 | 12.0 | 50.0 |"

@@ -2,7 +2,8 @@
 # Runs inside the benchmark container: builds QDP and qdp-bench from the
 # checkout in /src, then measures each protocol over each network profile,
 # in an order that rotates each round, between a host's and a client's
-# headless GNOME sessions. Results and a report go to /results.
+# headless GNOME sessions, at each refresh rate. Results and a report go to
+# /results.
 set -euo pipefail
 
 size=${QDP_BENCH_SIZE:-1920x1080}
@@ -10,6 +11,7 @@ seconds=${QDP_BENCH_SECONDS:-30}
 rounds=${QDP_BENCH_ROUNDS:-3}
 read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp rdp vnc}"
 read -ra profiles <<< "${QDP_BENCH_PROFILES:-lan wan}"
+read -ra refreshes <<< "${QDP_BENCH_REFRESH:-60 120}"
 
 results=/results
 logs=$results/logs
@@ -82,13 +84,14 @@ declare -A session_pids
 
 # Starts headless GNOME session $1, afresh: its own D-Bus session bus,
 # PipeWire, WirePlumber and Mutter. With $2 "monitor", Mutter has a virtual
-# monitor of the benchmark's size; with "none", it has none until a remote
-# desktop server makes one. With $3 "x11", X11 applications run in it too.
+# monitor of the benchmark's size, refreshing at the rate measured; with
+# "none", it has none until a remote desktop server makes one. With $3
+# "x11", X11 applications run in it too.
 start_session() {
     local name=$1 monitor=$2 x11=$3
     local mutter=(mutter --headless --wayland)
     if [ "$monitor" = monitor ]; then
-        mutter+=(--virtual-monitor "$size")
+        mutter+=(--virtual-monitor "$size@$refresh")
     fi
     if [ "$x11" != x11 ]; then
         mutter+=(--no-x11)
@@ -188,7 +191,7 @@ start_gnome_remote_desktop() {
 # measurer's options, and $pids to every process to stop afterwards. The
 # local baseline has neither: a probe on the client's own screen stands in.
 start_protocol() {
-    log=$logs/$profile-$1-$round
+    log=$logs/$refresh-$profile-$1-$round
     local server viewer probe
     case $1 in
         local)
@@ -252,36 +255,38 @@ stop_protocol() {
     fi
 }
 
-start_session client monitor x11
-
-for round in $(seq "$rounds"); do
-    for profile in "${profiles[@]}"; do
-        if ! apply_profile "$profile"; then
-            echo "skipping the $profile profile" >&2
-            continue
-        fi
-        # Each round starts one protocol later, so that none always runs
-        # first or last.
-        count=${#protocols[@]}
-        for index in $(seq 0 $((count - 1))); do
-            protocol=${protocols[$(((index + round - 1) % count))]}
-            echo "round $round, $profile: $protocol"
-            measured=0
-            if start_protocol "$protocol"; then
-                in_session client "$bin/qdp-bench" measure \
-                    --protocol "$protocol" --profile "$profile" --round "$round" \
-                    --seconds "$seconds" "${processes[@]}" \
-                    --out "$runs/$profile-$protocol-$round.toml" \
-                    &> "$log-measure.log" || measured=$?
-            else
-                measured=1
+for refresh in "${refreshes[@]}"; do
+    start_session client monitor x11
+    for round in $(seq "$rounds"); do
+        for profile in "${profiles[@]}"; do
+            if ! apply_profile "$profile"; then
+                echo "skipping the $profile profile" >&2
+                continue
             fi
-            stop_protocol "$protocol"
-            if [ "$measured" != 0 ]; then
-                echo "measuring $protocol over $profile failed; see $logs" >&2
-            fi
+            # Each round starts one protocol later, so that none always runs
+            # first or last.
+            count=${#protocols[@]}
+            for index in $(seq 0 $((count - 1))); do
+                protocol=${protocols[$(((index + round - 1) % count))]}
+                echo "$refresh Hz, round $round, $profile: $protocol"
+                run=$refresh-$profile-$protocol-$round
+                measured=0
+                if start_protocol "$protocol"; then
+                    in_session client "$bin/qdp-bench" measure \
+                        --protocol "$protocol" --profile "$profile" --round "$round" \
+                        --refresh "$refresh" --seconds "$seconds" "${processes[@]}" \
+                        --out "$runs/$run.toml" &> "$log-measure.log" || measured=$?
+                else
+                    measured=1
+                fi
+                stop_protocol "$protocol"
+                if [ "$measured" != 0 ]; then
+                    echo "measuring $protocol over $profile failed; see $logs" >&2
+                fi
+            done
         done
     done
+    stop_session client
 done
 apply_profile lan
 
@@ -297,7 +302,8 @@ apply_profile lan
         | grep -m1 PCI_ID | cut -d= -f2 || echo none)"
     echo "- QDP's encoder: $(grep -ho 'encoder="[^"]*"' "$logs"/*-qdp-*-server.log 2> /dev/null \
         | head -1 | cut -d'"' -f2 || echo unknown)"
-    echo "- Screen: $size, $seconds seconds a run, $rounds rounds"
+    echo "- Screen: $size at $(echo "${refreshes[*]}" | sed 's/ /, /g') Hz," \
+        "$seconds seconds a run, $rounds rounds"
     echo "- Packages: $(pacman -Q mutter gnome-remote-desktop freerdp tigervnc mesa \
         | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
 } > "$results/report.md"

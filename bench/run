@@ -25,7 +25,7 @@ set -- --rm --init --cap-add NET_ADMIN --shm-size 1g \
     --volume qdp-bench-cargo:/cargo \
     --volume "$PWD/$results:/results"
 for variable in QDP_BENCH_SIZE QDP_BENCH_SECONDS QDP_BENCH_ROUNDS \
-    QDP_BENCH_PROTOCOLS QDP_BENCH_PROFILES; do
+    QDP_BENCH_PROTOCOLS QDP_BENCH_PROFILES QDP_BENCH_REFRESH; do
     set -- "$@" --env "$variable"
 done
 if [ -e /dev/dri ]; then
