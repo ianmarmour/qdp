@@ -1,0 +1,3 @@
+# The benchmark's files run in a Linux container, from checkouts made on any
+# system, so they keep Linux line endings everywhere.
+bench/** text eol=lf

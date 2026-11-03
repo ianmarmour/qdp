@@ -31,6 +31,13 @@ done
 if [ -e /dev/dri ]; then
     set -- "$@" --device /dev/dri
 fi
+if [ -e /dev/dxg ]; then
+    # Under WSL, the GPU is Windows's, which Mesa reaches through its D3D12
+    # driver and Windows's libraries.
+    set -- "$@" --device /dev/dxg --volume /usr/lib/wsl:/usr/lib/wsl:ro \
+        --env LD_LIBRARY_PATH=/usr/lib/wsl/lib --env GALLIUM_DRIVER=d3d12 \
+        --env LIBVA_DRIVER_NAME=d3d12
+fi
 if [ "$engine" = podman ]; then
     # The checkout keeps its own SELinux labels, and the GPU's device
     # nodes stay reachable through the user's own groups.
