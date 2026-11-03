@@ -1,6 +1,13 @@
-<img src="branding/qdp-orbit-q.svg" width="96" height="96" alt="The QDP logo: an ivory Q on deep teal">
+<p align="center">
+  <img src="branding/qdp-banner.svg" width="760" alt="QDP: Quick Desktop Protocol">
+</p>
 
-# QDP
+<p align="center">
+  <a href="https://github.com/ianmarmour/qdp/actions/workflows/ci.yml"><img src="https://github.com/ianmarmour/qdp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-025559" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/rust-1.87%2B-025559?logo=rust" alt="Rust 1.87+">
+  <a href="#platforms"><img src="https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20iOS-025559" alt="Platforms: Linux, Windows, macOS, Android, iOS"></a>
+</p>
 
 **Quick Desktop Protocol: a fast, modern alternative to RDP and VNC.**
 
