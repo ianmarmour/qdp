@@ -48,4 +48,4 @@ describes.
 
 ## License
 
-Apache-2.0
+QDP for Android is licensed under the [Apache License 2.0](../LICENSE).

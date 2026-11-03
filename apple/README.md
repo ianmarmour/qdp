@@ -44,4 +44,4 @@ The core's tests run with the workspace's: `cargo test --workspace`.
 
 ## License
 
-Apache-2.0
+QDP for Mac, iPhone and iPad is licensed under the [Apache License 2.0](../LICENSE).

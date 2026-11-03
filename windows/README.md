@@ -39,4 +39,4 @@ dotnet test windows/QDP.Tests/QDP.Tests.csproj -c Release
 
 ## License
 
-Apache-2.0
+QDP for Windows is licensed under the [Apache License 2.0](../LICENSE).

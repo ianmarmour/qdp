@@ -17,4 +17,4 @@ API documentation: `cargo doc -p qdp-android --open`
 
 ## License
 
-Apache-2.0
+`qdp-android` is licensed under the [Apache License 2.0](../../LICENSE).

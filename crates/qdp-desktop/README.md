@@ -21,4 +21,4 @@ API documentation: `cargo doc -p qdp-desktop --open`
 
 ## License
 
-Apache-2.0
+`qdp-desktop` is licensed under the [Apache License 2.0](../../LICENSE).

@@ -18,4 +18,4 @@ API documentation: `cargo doc -p qdp-windows --open`
 
 ## License
 
-Apache-2.0
+`qdp-windows` is licensed under the [Apache License 2.0](../../LICENSE).

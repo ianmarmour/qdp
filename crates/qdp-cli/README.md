@@ -24,4 +24,4 @@ API documentation: `cargo doc -p qdp-cli --open`
 
 ## License
 
-Apache-2.0
+`qdp-cli` is licensed under the [Apache License 2.0](../../LICENSE).

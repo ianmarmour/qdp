@@ -16,4 +16,4 @@ API documentation: `cargo doc -p qdp-quic --open`
 
 ## License
 
-Apache-2.0
+`qdp-quic` is licensed under the [Apache License 2.0](../../LICENSE).

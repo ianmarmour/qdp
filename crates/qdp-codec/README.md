@@ -20,4 +20,4 @@ API documentation: `cargo doc -p qdp-codec --open`
 
 ## License
 
-Apache-2.0
+`qdp-codec` is licensed under the [Apache License 2.0](../../LICENSE).

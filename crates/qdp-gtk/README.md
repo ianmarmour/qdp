@@ -31,4 +31,4 @@ cargo test -p qdp-gtk
 
 ## License
 
-Apache-2.0
+QDP for Linux is licensed under the [Apache License 2.0](../../LICENSE).
