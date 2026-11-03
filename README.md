@@ -35,11 +35,11 @@ A **host** shares its desktop, and a **client** connects to one.
 
 | Platform | Host | Client | Install |
 |---|:---:|:---:|---|
-| Linux | ✅ | ✅ | [RPM, Debian package or tarball](docs/install/linux.md) |
-| Windows | ✅ | ✅ | [Installer](docs/install/windows.md) |
-| macOS (Apple silicon) | ✅ | ✅ | [App and command line](docs/install/macos.md) |
+| Linux | ✅ | ✅ | [RPM, DEB, TARBALL](docs/install/linux.md) |
+| Windows | ✅ | ✅ | [MSI](docs/install/windows.md) |
+| macOS (Apple silicon) | ✅ | ✅ | [APP / BIN](docs/install/macos.md) |
 | Android | | ✅ | [APK](docs/install/android.md) |
-| iPhone and iPad | | ✅ | [Xcode or sideloading](docs/install/iphone-ipad.md) |
+| iPhone and iPad | | ✅ | [IPA](docs/install/iphone-ipad.md) |
 
 Every download is on the
 [latest release](https://github.com/ianmarmour/qdp/releases/latest).
