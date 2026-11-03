@@ -2,10 +2,7 @@
 //! buffer of the GPU's, mapped, where only the pixels read are fetched, so
 //! that reading a frame takes a fraction of the screen's refresh.
 
-use qdp_codec::Yuv420Frame;
-#[cfg(target_os = "linux")]
-use qdp_codec::{DRM_FORMAT_MOD_LINEAR, DmaBufFrame, PixelDepth, Rgb32Order};
-#[cfg(target_os = "linux")]
+use qdp_codec::{DRM_FORMAT_MOD_LINEAR, DmaBufFrame, PixelDepth, Rgb32Order, Yuv420Frame};
 use qdp_desktop::MappedDmaBuf;
 
 use crate::layout::Picture;
@@ -26,12 +23,10 @@ impl Picture for Yuv420Frame {
 }
 
 /// The bytes of a pixel in a frame the GPU holds.
-#[cfg(target_os = "linux")]
 const PIXEL_BYTES: usize = 4;
 
 /// A frame of 8-bit colours in a linear buffer of the GPU's, mapped for
 /// reading.
-#[cfg(target_os = "linux")]
 pub struct MappedFrame<'a> {
     /// The buffer, mapped.
     mapped: MappedDmaBuf<'a>,
@@ -45,7 +40,6 @@ pub struct MappedFrame<'a> {
     channels: [usize; 3],
 }
 
-#[cfg(target_os = "linux")]
 impl<'a> MappedFrame<'a> {
     /// Maps `frame`, or returns `None` if it is not all of a linear buffer
     /// of 8-bit colours that the processor can map.
@@ -86,7 +80,6 @@ impl<'a> MappedFrame<'a> {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Picture for MappedFrame<'_> {
     fn size(&self) -> (usize, usize) {
         self.size
@@ -104,7 +97,6 @@ impl Picture for MappedFrame<'_> {
 
 /// Returns the luma and the blue and red differences of a red, green and
 /// blue, by BT.709's weights in 256ths, at full range.
-#[cfg(target_os = "linux")]
 pub(crate) fn to_yuv([red, green, blue]: [i32; 3]) -> (u8, u8, u8) {
     let byte = |value: i32| value.clamp(0, i32::from(u8::MAX)) as u8;
     (
@@ -114,7 +106,7 @@ pub(crate) fn to_yuv([red, green, blue]: [i32; 3]) -> (u8, u8, u8) {
     )
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
