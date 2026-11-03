@@ -522,7 +522,10 @@ impl<T: Send + 'static> MetalVideo<T> {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name(RENDER_THREAD.to_owned())
-                .spawn(move || render(renderer, &layer, &shared, report))
+                .spawn(move || {
+                    qdp_runtime::prioritize_current_thread();
+                    render(renderer, &layer, &shared, report)
+                })
                 .map_err(|error| format!("cannot start drawing the video: {error}"))?
         };
         Ok(Self {

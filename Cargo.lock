@@ -3135,6 +3135,7 @@ name = "qdp-runtime"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "libc",
  "qdp",
  "qdp-codec",
  "qdp-quic",

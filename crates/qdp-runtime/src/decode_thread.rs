@@ -52,6 +52,7 @@ impl DecodeThread {
         let handle = std::thread::Builder::new()
             .name(THREAD_NAME.to_owned())
             .spawn(move || {
+                crate::prioritize_current_thread();
                 while let Ok(frame) = frames.recv() {
                     let started_at = Instant::now();
                     let picture = decoder.decode_picture(frame.temporal_unit());
