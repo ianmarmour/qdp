@@ -411,9 +411,12 @@ fn run_thread<P: Presenter>(
     stop: &Notify,
     prompts: Prompts,
 ) {
+    // The session receives the video on this thread and the runtime's.
+    qdp_runtime::prioritize_current_thread();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("qdp-runtime")
+        .on_thread_start(qdp_runtime::prioritize_current_thread)
         .build();
     let ending = match runtime {
         Ok(runtime) => {

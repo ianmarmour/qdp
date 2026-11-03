@@ -57,6 +57,7 @@ mod send_stats;
 mod standing_input;
 mod stream_format;
 mod stream_ids;
+mod thread_priority;
 
 use qdp::auth::scram::ScramError;
 use qdp::registry::ErrorCode;
@@ -102,6 +103,7 @@ pub use pairing::{
     CODE_LIFETIME, CodeFuture, Pairing, PairingEvent, PairingOutcome, PairingPrompt, PairingRefusal,
 };
 pub use resumption::{DEFAULT_RESUMPTION_LIFETIME, ResumptionSlot};
+pub use thread_priority::prioritize_current_thread;
 
 /// An error that ends a session.
 #[derive(Debug, Error)]
