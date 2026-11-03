@@ -171,7 +171,7 @@ QDP_LOG=info,qdp::window=debug.
 | PipeWire | 0.3+ | Linux | Screen capture and audio |
 | libclang | 9+ | Linux | Building screen capture and audio |
 | libudev | 1+ | Linux | Gamepads |
-| libva | 2+ | Linux | Hardware encoding, loaded at run time |
+| libva | 2+ | Linux | Hardware encoding and decoding, loaded at run time |
 | NVIDIA driver | 522+ | Windows | Hardware encoding, loaded at run time |
 
 ## Build

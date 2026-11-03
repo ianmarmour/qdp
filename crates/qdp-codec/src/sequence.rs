@@ -56,7 +56,7 @@ pub struct SequenceHeader {
     /// Whether frames may carry film grain (`film_grain_params_present`).
     pub film_grain: bool,
     /// The coding tools frames may use, which their headers depend on.
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
     pub(crate) coding: SequenceCoding,
     /// The whole sequence header OBU.
     obu: Vec<u8>,
@@ -78,6 +78,8 @@ pub(crate) enum ToolChoice {
 /// specification, Section 5.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SequenceCoding {
+    /// `still_picture`.
+    pub(crate) still_picture: bool,
     /// `reduced_still_picture_header`.
     pub(crate) reduced_still_picture_header: bool,
     /// The decoder model, if `decoder_model_info_present_flag` is set.
@@ -198,7 +200,7 @@ impl SequenceHeader {
     fn parse_payload(payload: &[u8], obu: Vec<u8>) -> Result<Self, CodecError> {
         let mut reader = BitReader::new(payload);
         let profile = reader.bits(3)?;
-        reader.bit()?; // still_picture
+        let still_picture = reader.bit()?;
         let reduced_still_picture_header = reader.bit()?;
         let points = if reduced_still_picture_header {
             OperatingPoints {
@@ -224,6 +226,7 @@ impl SequenceHeader {
             None
         };
         let mut coding = SequenceCoding {
+            still_picture,
             reduced_still_picture_header,
             decoder_model: points.decoder_model,
             frame_width_bits,

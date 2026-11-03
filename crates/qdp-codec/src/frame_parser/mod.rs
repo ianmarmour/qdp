@@ -1,6 +1,6 @@
 //! AV1 frame headers and tile groups, read for hardware decoders that are
 //! given them by the application rather than parsing the bitstream
-//! themselves, as DXVA decoders on Windows are.
+//! themselves, as DXVA decoders on Windows and VA-API decoders on Linux are.
 //!
 //! [`FrameParser`] keeps the state the AV1 specification keeps for each of
 //! the eight reference slots (Section 7.20), which later frames' headers
@@ -19,7 +19,10 @@ use crate::bits::BitReader;
 use crate::{CodecError, ObuType, SequenceHeader, parse_obus};
 
 pub(crate) use grain::FilmGrain;
-pub(crate) use header::{FrameHeader, FrameSize, FrameType, RestorationType, SegmentFeatures};
+// The DXVA structures name the restoration types; VA-API's take numbers.
+#[cfg(any(windows, test))]
+pub(crate) use header::RestorationType;
+pub(crate) use header::{FrameHeader, FrameSize, FrameType, SegmentFeatures};
 
 /// `NUM_REF_FRAMES`: the reference slots, and the reference frames
 /// `INTRA_FRAME` … `ALTREF_FRAME`.

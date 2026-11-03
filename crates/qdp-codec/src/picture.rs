@@ -20,6 +20,9 @@ pub enum DecodedPicture {
     /// which Direct3D draws from directly.
     #[cfg(windows)]
     D3d11(crate::D3d11Picture),
+    /// A picture in the surface a VA-API decoder decoded into.
+    #[cfg(target_os = "linux")]
+    Vaapi(crate::VaapiPicture),
 }
 
 impl DecodedPicture {
@@ -33,6 +36,8 @@ impl DecodedPicture {
             Self::Surface(picture) => picture.visible_size(),
             #[cfg(windows)]
             Self::D3d11(picture) => picture.visible_size(),
+            #[cfg(target_os = "linux")]
+            Self::Vaapi(picture) => picture.visible_size(),
         }
     }
 
@@ -47,6 +52,8 @@ impl DecodedPicture {
             Self::Surface(picture) => Self::Surface(picture.cropped(width, height)),
             #[cfg(windows)]
             Self::D3d11(picture) => Self::D3d11(picture.cropped(width, height)),
+            #[cfg(target_os = "linux")]
+            Self::Vaapi(picture) => Self::Vaapi(picture.cropped(width, height)),
         }
     }
 
@@ -60,6 +67,8 @@ impl DecodedPicture {
             Self::Surface(_) => None,
             #[cfg(windows)]
             Self::D3d11(_) => None,
+            #[cfg(target_os = "linux")]
+            Self::Vaapi(_) => None,
         }
     }
 
@@ -77,6 +86,8 @@ impl DecodedPicture {
             Self::Surface(_) => Err(surface_unreadable()),
             #[cfg(windows)]
             Self::D3d11(picture) => Ok(use_frame(&picture.to_memory()?)),
+            #[cfg(target_os = "linux")]
+            Self::Vaapi(picture) => Ok(use_frame(&picture.to_memory()?)),
         }
     }
 
@@ -90,6 +101,8 @@ impl DecodedPicture {
             Self::Surface(_) => Err(surface_unreadable()),
             #[cfg(windows)]
             Self::D3d11(picture) => picture.to_memory(),
+            #[cfg(target_os = "linux")]
+            Self::Vaapi(picture) => picture.to_memory(),
         }
     }
 }

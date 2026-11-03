@@ -1,5 +1,7 @@
-//! Hardware AV1 encoding through VA-API, the video interface of Linux GPU
-//! drivers: Mesa's for AMD (RDNA 3 and later), and Intel's (Arc and later).
+//! Hardware AV1 encoding and decoding through VA-API, the video interface of
+//! Linux GPU drivers: Mesa's for AMD (decoding on RDNA 2 and later, encoding
+//! on RDNA 3 and later), and Intel's (decoding on Xe and later, encoding on
+//! Arc and later). The decoder is in the `decoder` module.
 //!
 //! The encoder sends the sequence and frame headers it wants as packed
 //! headers, which drivers either copy into the stream (Intel) or read the
@@ -17,8 +19,11 @@
 
 #![allow(unsafe_code)]
 
+mod av1_parameters;
 mod conversion;
+mod decoder;
 mod ffi;
+mod picture;
 mod references;
 
 use std::ffi::{CStr, c_int, c_void};
@@ -94,6 +99,9 @@ const RT_FORMAT: u32 = ffi::RT_FORMAT_YUV420;
 /// How often the encoder logs how long its stages take.
 const TIMING_INTERVAL: Duration = Duration::from_secs(1);
 
+pub use decoder::VaapiDecoder;
+pub use picture::VaapiPicture;
+
 /// An initialized VA display on one GPU.
 struct Display {
     /// libva's functions.
@@ -104,6 +112,49 @@ struct Display {
     _device: File,
     /// The node's path, for messages.
     path: PathBuf,
+}
+
+// SAFETY: every libva function is thread safe (`va.h`, "Multithreading
+// Guide"), drivers included; what a display's users must not share between
+// threads is a context, which none does.
+unsafe impl Send for Display {}
+// SAFETY: as above.
+unsafe impl Sync for Display {}
+
+/// Logs a message from libva or its driver, rather than letting libva print
+/// it: its errors include those of ordinary probing, as of a GPU without a
+/// video driver, and QDP says itself why it does not use one.
+unsafe extern "C" fn log_message(_context: *mut c_void, message: *const std::ffi::c_char) {
+    if let Some(message) = message_text(message) {
+        debug!(message, "VA-API");
+    }
+}
+
+/// Returns a libva message's text, without its line break.
+fn message_text(message: *const std::ffi::c_char) -> Option<String> {
+    if message.is_null() {
+        return None;
+    }
+    // SAFETY: libva passes a NUL-terminated string valid for the call.
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    Some(text.trim_end().to_owned())
+}
+
+/// Returns the GPUs' render nodes, in order.
+fn render_nodes() -> Result<Vec<PathBuf>, CodecError> {
+    let mut nodes: Vec<PathBuf> = std::fs::read_dir(DRI_DIRECTORY)
+        .map_err(|error| encoder_error(format!("cannot list {DRI_DIRECTORY}: {error}")))?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RENDER_NODE_PREFIX)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    nodes.sort();
+    Ok(nodes)
 }
 
 impl Display {
@@ -122,6 +173,12 @@ impl Display {
                 "{} has no VA-API driver",
                 path.display()
             )));
+        }
+        // SAFETY: `handle` is a display from `vaGetDisplayDRM`, and the
+        // callbacks need no context.
+        unsafe {
+            (va.set_error_callback)(handle, Some(log_message), std::ptr::null_mut());
+            (va.set_info_callback)(handle, Some(log_message), std::ptr::null_mut());
         }
         let (mut major, mut minor) = (0, 0);
         // SAFETY: `handle` is a display from `vaGetDisplayDRM`.
@@ -241,11 +298,35 @@ impl Display {
         data: *mut c_void,
         size: usize,
     ) -> Result<VaId, CodecError> {
+        self.create_buffers(context, buffer_type, data, size, 1)
+    }
+
+    /// Creates a buffer holding `count` elements of `size` bytes each at
+    /// `data`.
+    fn create_buffers(
+        &self,
+        context: VaId,
+        buffer_type: c_int,
+        data: *mut c_void,
+        size: usize,
+        count: usize,
+    ) -> Result<VaId, CodecError> {
         let mut id = ffi::VA_INVALID_ID;
-        let size = u32::try_from(size).map_err(|_| encoder_error("buffer too large"))?;
-        // SAFETY: `data` points to `size` readable bytes, which libva copies.
+        let too_large = || encoder_error("buffer too large");
+        let size = u32::try_from(size).map_err(|_| too_large())?;
+        let count = u32::try_from(count).map_err(|_| too_large())?;
+        // SAFETY: `data` points to `count` elements of `size` readable bytes,
+        // which libva copies.
         let status = unsafe {
-            (self.va.create_buffer)(self.handle, context, buffer_type, size, 1, data, &mut id)
+            (self.va.create_buffer)(
+                self.handle,
+                context,
+                buffer_type,
+                size,
+                count,
+                data,
+                &mut id,
+            )
         };
         self.check(status, "vaCreateBuffer")?;
         Ok(id)
@@ -286,6 +367,25 @@ impl PictureBuffers<'_> {
         Ok(())
     }
 
+    /// Adds a buffer holding a copy of `values`, as that many elements.
+    fn add_array<T: Copy>(
+        &mut self,
+        context: VaId,
+        buffer_type: c_int,
+        values: &[T],
+    ) -> Result<(), CodecError> {
+        let mut copy = values.to_vec();
+        let id = self.display.create_buffers(
+            context,
+            buffer_type,
+            copy.as_mut_ptr().cast(),
+            size_of::<T>(),
+            copy.len(),
+        )?;
+        self.ids.push(id);
+        Ok(())
+    }
+
     /// Adds a packed header: its parameters, then its bytes.
     fn add_packed_header(
         &mut self,
@@ -300,10 +400,21 @@ impl PictureBuffers<'_> {
             ..PackedHeaderParameters::zeroed()
         };
         self.add(context, ffi::BUFFER_PACKED_HEADER_PARAMETERS, &parameters)?;
+        self.add_bytes(context, ffi::BUFFER_PACKED_HEADER_DATA, bytes)
+    }
+
+    /// Adds a buffer holding a copy of `bytes`, as one element: drivers
+    /// read data buffers' sizes from their element size alone.
+    fn add_bytes(
+        &mut self,
+        context: VaId,
+        buffer_type: c_int,
+        bytes: &[u8],
+    ) -> Result<(), CodecError> {
         let mut data = bytes.to_vec();
         let id = self.display.create_buffer(
             context,
-            ffi::BUFFER_PACKED_HEADER_DATA,
+            buffer_type,
             data.as_mut_ptr().cast(),
             data.len(),
         )?;
@@ -556,20 +667,8 @@ impl VaapiEncoder {
     /// Opens the first GPU whose driver can encode AV1.
     pub fn new(settings: EncoderSettings) -> Result<Self, CodecError> {
         let va = ffi::libva().map_err(encoder_error)?;
-        let mut nodes: Vec<PathBuf> = std::fs::read_dir(DRI_DIRECTORY)
-            .map_err(|error| encoder_error(format!("cannot list {DRI_DIRECTORY}: {error}")))?
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(RENDER_NODE_PREFIX)
-            })
-            .map(|entry| entry.path())
-            .collect();
-        nodes.sort();
         let mut reasons = Vec::new();
-        for node in nodes {
+        for node in render_nodes()? {
             match Display::open(va, &node).and_then(|display| Self::with_display(display, settings))
             {
                 Ok(encoder) => return Ok(encoder),

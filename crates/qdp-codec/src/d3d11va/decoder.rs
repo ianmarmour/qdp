@@ -116,7 +116,7 @@ impl D3d11Decoder {
         /// The outcome of the check, made once per process.
         static VERIFIED: OnceLock<Result<(), String>> = OnceLock::new();
         VERIFIED
-            .get_or_init(verify)
+            .get_or_init(|| crate::hardware_check::verify(Self::open))
             .clone()
             .map_err(CodecError::HardwareUnavailable)?;
         Ok(decoder)
@@ -522,82 +522,6 @@ impl VideoDecoder for D3d11Decoder {
     }
 }
 
-/// The frames of the stream [`verify`] decodes.
-const VERIFY_FRAMES: usize = 4;
-
-/// The size of that stream: wide enough for two tiles.
-const VERIFY_SIZE: (usize, usize) = (512, 256);
-
-/// Decodes a short stream with the hardware decoder and with rav1d, and
-/// returns why the hardware decoder cannot be used if their pictures differ
-/// at all: AV1 decoding is exact, so any difference is a fault, here or in
-/// the driver.
-fn verify() -> Result<(), String> {
-    let (width, height) = VERIFY_SIZE;
-    let mut encoder = crate::Av1Encoder::new(crate::EncoderSettings {
-        width,
-        height,
-        frame_rate: 60,
-        speed: crate::FASTEST_SPEED,
-        quantizer: 100,
-        threads: 1,
-    })
-    .map_err(|error| error.to_string())?;
-    let mut hardware = D3d11Decoder::open().map_err(|error| error.to_string())?;
-    let mut software = crate::Av1Decoder::new(1).map_err(|error| error.to_string())?;
-    for index in 0..VERIFY_FRAMES {
-        let frame = verification_frame(width, height, index);
-        let request = if index == 0 {
-            crate::KeyFrameRequest::Force
-        } else {
-            crate::KeyFrameRequest::Auto
-        };
-        let units = encoder
-            .encode(&frame, request)
-            .map_err(|error| error.to_string())?;
-        for unit in units {
-            let expected = software
-                .decode(&unit.temporal_unit)
-                .map_err(|error| error.to_string())?;
-            let decoded = hardware
-                .decode(&unit.temporal_unit)
-                .map_err(|error| format!("hardware AV1 decoding failed: {error}"))?;
-            if decoded != expected {
-                let psnr = decoded.luma_psnr(&expected).unwrap_or(0.0);
-                return Err(format!(
-                    "hardware AV1 decoding differs from rav1d's ({psnr:.1} dB on frame {index})"
-                ));
-            }
-        }
-    }
-    info!("hardware AV1 decoding matches rav1d's");
-    Ok(())
-}
-
-/// Returns frame `index` of the verification stream: a scrolling gradient
-/// with a moving square and coloured chroma, for prediction and filters to
-/// act on.
-fn verification_frame(width: usize, height: usize, index: usize) -> Yuv420Frame {
-    let square = 32 + 8 * index;
-    let y = (0..height)
-        .flat_map(|row| (0..width).map(move |column| (row, column)))
-        .map(|(row, column)| {
-            if (square..square + 64).contains(&row) && (square..square + 64).contains(&column) {
-                235
-            } else {
-                ((column + row + 6 * index) % 200) as u8 + 16
-            }
-        })
-        .collect();
-    let chroma = |offset: usize| {
-        (0..width * height / 4)
-            .map(|i| (64 + (i % (width / 2) + offset + 2 * index) % 128) as u8)
-            .collect()
-    };
-    Yuv420Frame::from_planes(width, height, y, chroma(0), chroma(40))
-        .expect("the planes fit the frame")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,16 +536,5 @@ mod tests {
             Err(CodecError::HardwareUnavailable(reason)) => assert!(!reason.is_empty()),
             Err(error) => panic!("unexpected error: {error}"),
         }
-    }
-
-    /// The verification frames differ from one to the next, so that inter
-    /// frames have motion to code.
-    #[test]
-    fn verification_frames_move() {
-        let (width, height) = VERIFY_SIZE;
-        let first = verification_frame(width, height, 0);
-        let second = verification_frame(width, height, 1);
-        assert_eq!((first.width(), first.height()), VERIFY_SIZE);
-        assert_ne!(first, second);
     }
 }

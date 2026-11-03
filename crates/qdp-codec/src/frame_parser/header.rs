@@ -156,6 +156,8 @@ impl FrameSize {
 /// How a frame is split into tiles (Section 5.9.15).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TileInfo {
+    /// `uniform_tile_spacing_flag`.
+    pub(crate) uniform: bool,
     /// `TileColsLog2`.
     pub(crate) cols_log2: u32,
     /// `TileRowsLog2`.
@@ -954,9 +956,11 @@ fn tile_info(
     let max_log2_tile_cols = tile_log2(1, sb_cols.min(MAX_TILE_COLS as u32));
     let max_log2_tile_rows = tile_log2(1, sb_rows.min(MAX_TILE_ROWS as u32));
     let min_log2_tiles = min_log2_tile_cols.max(tile_log2(max_tile_area_sb, sb_rows * sb_cols));
-    let mut tiles = TileInfo::default();
-    if reader.bit()? {
-        // uniform_tile_spacing_flag
+    let mut tiles = TileInfo {
+        uniform: reader.bit()?,
+        ..TileInfo::default()
+    };
+    if tiles.uniform {
         tiles.cols_log2 = increment(reader, min_log2_tile_cols, max_log2_tile_cols)?;
         let width_sb = (sb_cols + (1 << tiles.cols_log2) - 1) >> tiles.cols_log2;
         tiles.col_widths = split(sb_cols, width_sb);

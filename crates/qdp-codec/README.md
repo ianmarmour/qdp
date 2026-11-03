@@ -15,7 +15,7 @@ API documentation: `cargo doc -p qdp-codec --open`
 |---|---|---|---|
 | C compiler | Any | All | Building bundled C code |
 | NASM | 2.15+ | x86-64 | Building the codecs |
-| libva | 2+ | Linux | Hardware encoding, loaded at run time |
+| libva | 2+ | Linux | Hardware encoding and decoding, loaded at run time |
 | NVIDIA driver | 522+ | Windows | Hardware encoding, loaded at run time |
 
 ## License
