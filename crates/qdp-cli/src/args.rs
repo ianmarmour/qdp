@@ -61,10 +61,12 @@ Serve options:
                        in the identity directory (default on)
   --advertise on|off   Advertise this host on the local network with DNS-SD,
                        so that clients list it (default on)
-  --source KIND        auto, screen, console or test-pattern (default auto: the
-                       screen, or the test pattern if it cannot be captured);
-                       console streams what the graphics card shows, the
-                       login and lock screens included (Linux, as root)
+  --source KIND        auto, screen, console, gnome or test-pattern (default
+                       auto: the screen, or the test pattern if it cannot be
+                       captured); console streams what the graphics card
+                       shows, the login and lock screens included (Linux, as
+                       root); gnome shares a GNOME desktop, headless ones
+                       included, without asking anyone to allow it (Linux)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
   --match-display on|off
                        Change the streamed monitor's resolution and scale to
@@ -302,6 +304,9 @@ pub enum SourceKind {
     /// What the graphics card shows, whatever shows it: the login screen,
     /// the lock screen or a desktop.
     Console,
+    /// A GNOME desktop, headless or not, with its input, through Mutter's
+    /// remote desktop interface, which asks nobody.
+    Gnome,
     /// A moving test pattern.
     TestPattern,
 }
@@ -841,10 +846,11 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<ServeArgs,
                     "auto" => SourceKind::Auto,
                     "screen" => SourceKind::Screen,
                     "console" => SourceKind::Console,
+                    "gnome" => SourceKind::Gnome,
                     "test-pattern" => SourceKind::TestPattern,
                     other => {
                         return Err(error(format!(
-                            "--source must be auto, screen, console or test-pattern, not {other}"
+                            "--source must be auto, screen, console, gnome or test-pattern, not {other}"
                         )));
                     }
                 }
@@ -1138,6 +1144,10 @@ mod tests {
             panic!("expected serve");
         };
         assert_eq!(serve.source, SourceKind::Console);
+        let Command::Serve(serve) = parse_line("serve --token abc --source gnome").unwrap() else {
+            panic!("expected serve");
+        };
+        assert_eq!(serve.source, SourceKind::Gnome);
         assert!(parse_line("serve --token abc --source camera").is_err());
         let Command::Serve(serve) = parse_line("serve --token abc --encoder software").unwrap()
         else {

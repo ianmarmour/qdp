@@ -177,6 +177,9 @@ pub struct ScreenCapture {
     frames: FrameMemory,
     /// Has the PipeWire thread ask for frames in memory.
     to_memory: Option<pw::channel::Sender<()>>,
+    /// Keeps the session the stream belongs to, other than a portal's, for
+    /// as long as the capture, ending it after the stream.
+    session: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl std::fmt::Debug for ScreenCapture {
@@ -273,7 +276,14 @@ impl ScreenCapture {
             matching: None,
             frames,
             to_memory: Some(to_memory),
+            session: None,
         })
+    }
+
+    /// Keeps `session`, which the stream belongs to, for as long as the
+    /// capture, ending it after the stream.
+    pub(super) fn keep_alive(&mut self, session: Box<dyn std::any::Any + Send>) {
+        self.session = Some(session);
     }
 
     /// Has the monitor take the client's display when the host asks it to,
