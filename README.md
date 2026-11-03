@@ -27,8 +27,8 @@ QDP is in active development. Its protocol is draft 00 of an
 - **Simple Setup** - Install, run `qdp serve`, and type the four-digit code
   the computer shows, once. No accounts, no passwords. Linux computers show
   up in the apps on their own.
-- **Enterprise** - A [gateway](docs/gateway.md) signs people in with the
-  organization's directory and an authenticator app, and reaches the
+- **Enterprise Support** - A [gateway](docs/gateway.md) signs people in with
+  the organization's directory and an authenticator app, and reaches the
   computers inside its network. Sessions use TLS 1.3 with pinned keys, the
   computer shows a notice while it's shared and locks if a session drops,
   and Linux hosts can stream the login screen as a system service.
