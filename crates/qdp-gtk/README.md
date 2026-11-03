@@ -11,8 +11,6 @@ and use it, see [Installing on Linux](../../docs/setup/linux.md) and
 | Rust | 1.97.0 |
 | GTK | 4.14 |
 | libadwaita | 1.5 |
-| gtk4-rs | 0.11.5 |
-| libadwaita-rs | 0.9.2 |
 
 ## Build
 
