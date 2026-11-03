@@ -9,6 +9,8 @@ stream.
 - An x86-64 computer
 - For the app, GTK 4.14 and libadwaita 1.5 or later, as on Fedora 40 and
   Ubuntu 24.04
+- For video on the GPU, its VA-API driver: Mesa's for AMD, and
+  intel-media-driver for Intel
 
 ## Install
 
