@@ -34,8 +34,8 @@ struct HostListView: View {
                             ForEach(throughGateway) { host in gatewayButton(host) }
                         }
                     }
-                    // The network is searched while the list shows.
-                    if store.networkAllowed {
+                    // A local network is searched while the list shows.
+                    if store.networkAllowed && store.onLocalNetwork {
                         Section {
                             ForEach(nearby) { row in rowButton(row) }
                         } header: {
@@ -87,7 +87,15 @@ struct HostListView: View {
     /// What to do while no computer is found, or the network cannot be
     /// searched.
     @ViewBuilder private var emptyState: some View {
-        if store.networkAllowed {
+        if !store.onLocalNetwork {
+            ContentUnavailableView {
+                Label("Not on a Local Network", systemImage: "wifi.slash")
+            } description: {
+                Text("Join Wi-Fi to find computers nearby, or add one by its address.")
+            } actions: {
+                Button("Add by Address", action: addByAddress)
+            }
+        } else if store.networkAllowed {
             ContentUnavailableView {
                 Label {
                     Text("Looking for Computers")

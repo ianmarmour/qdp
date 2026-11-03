@@ -2,6 +2,7 @@
 //! typed them, and the display the video is shown on.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::time::Duration;
 
 use qdp_quic::KeyPin;
 use qdp_runtime::DisplaySize;
@@ -140,6 +141,20 @@ pub fn display_size(width: u32, height: u32, refresh_millihertz: u32) -> Display
         refresh_millihertz,
         scale_percent: DisplaySize::UNSCALED,
     }
+}
+
+/// How long [`host_reachable`] waits for a host to answer.
+pub const REACHABILITY_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Returns whether a QDP host answers at `address`, written as
+/// [`resolve_address`] takes it, without connecting to it: the check the
+/// apps make of the hosts they paired with where the local network cannot
+/// be searched for them. Blocks for up to [`REACHABILITY_TIMEOUT`], and for
+/// a name, as long as resolving it takes.
+pub fn host_reachable(address: &str) -> bool {
+    resolve_address(address)
+        .ok()
+        .is_some_and(|address| qdp_quic::probe(address, REACHABILITY_TIMEOUT).unwrap_or(false))
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ mod driver;
 mod endpoint;
 mod gateway;
 mod identity;
+mod probe;
 mod streams;
 mod verify;
 
@@ -37,6 +38,7 @@ pub use driver::{ClientDriver, DrivenSession, DriverInput, HostDriver, SessionDr
 pub use endpoint::{ClientEndpoint, HostEndpoint, IncomingConnection};
 pub use gateway::{GatewayClient, SignIn};
 pub use identity::{IdentityFiles, IdentityOrigin, KeyPin, TlsIdentity};
+pub use probe::probe;
 pub use streams::{
     OutgoingStream, ReceivedStream, StreamChunk, StreamFailure, StreamLimit, StreamPolicy,
 };
