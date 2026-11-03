@@ -8,13 +8,18 @@ import io.github.ianmarmour.qdp.Discovery
 import io.github.ianmarmour.qdp.HostCard
 import io.github.ianmarmour.qdp.HostList
 import io.github.ianmarmour.qdp.LocalNetwork
+import io.github.ianmarmour.qdp.Native
 import io.github.ianmarmour.qdp.NetworkReach
 import io.github.ianmarmour.qdp.Gateway
 import io.github.ianmarmour.qdp.GatewayHost
 import io.github.ianmarmour.qdp.PairedHosts
 import io.github.ianmarmour.qdp.StreamTarget
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +27,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** How the search for computers on the local network goes. */
 enum class SearchPhase {
@@ -77,10 +83,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val throughGateway = MutableStateFlow(gatewayHosts(application))
     private val reach = MutableStateFlow(NetworkReach.LOCAL)
     private val searchedLong = MutableStateFlow(false)
+
+    /** The pins of the paired computers not found on the network that answered at their addresses when last checked. */
+    private val answering = MutableStateFlow<Set<String>>(emptySet())
     private val discovery = Discovery(application) { hosts -> discovered.value = hosts }
     private val network = LocalNetwork(application) { value -> reach.value = value }
     private val openDialog = MutableStateFlow<HomeDialog?>(null)
     private var quietTimer: Job? = null
+
+    /** Checks the paired computers not found at their addresses, while the screen shows. */
+    private var checking: Job? = null
 
     /** How many times the Add by address dialog was opened. */
     private var addRequests = 0
@@ -93,8 +105,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The computers and the search's progress. */
     val state: StateFlow<HomeState> =
-        combine(discovered, paired, throughGateway, reach, searchedLong) { found, pairedHosts, gatewayHosts, network, long ->
-            HomeState(HostList.cards(found, pairedHosts, gatewayHosts), phase(found, network, long))
+        combine(discovered, combine(paired, answering, ::Pair), throughGateway, reach, searchedLong) {
+                found, (pairedHosts, answered), gatewayHosts, network, long ->
+            HomeState(HostList.cards(found, pairedHosts, gatewayHosts, answered), phase(found, network, long))
         }.stateIn(
             viewModelScope,
             SharingStarted.Eagerly,
@@ -114,11 +127,19 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             delay(QUIET_AFTER_MILLIS)
             searchedLong.value = true
         }
+        checking?.cancel()
+        checking = viewModelScope.launch {
+            while (isActive) {
+                answering.value = answeringPins()
+                delay(CHECK_INTERVAL_MILLIS)
+            }
+        }
     }
 
     /** Stops looking, as the screen goes out of view. */
     fun stopSearching() {
         quietTimer?.cancel()
+        checking?.cancel()
         discovery.stop()
         network.stop()
     }
@@ -169,6 +190,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         stopSearching()
     }
 
+    /**
+     * Checks each paired computer the search has not found at its address,
+     * all at once off the main thread, as on mobile data, where there is no
+     * local network to find it on, and returns the pins of those that answer.
+     */
+    private suspend fun answeringPins(): Set<String> = withContext(Dispatchers.IO) {
+        val found = discovered.value.mapNotNull { it.pin }.toSet()
+        paired.value
+            .filter { it.pin !in found }
+            .map { host -> async { host.pin.takeIf { Native.hostReachable(host.address) } } }
+            .awaitAll()
+            .filterNotNull()
+            .toSet()
+    }
+
     private companion object {
         /** Returns the computers reached through the gateway, while one is set. */
         fun gatewayHosts(application: Application): List<GatewayHost> =
@@ -176,6 +212,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
         /** How long the search runs without finding anything before the screen suggests what to check. */
         const val QUIET_AFTER_MILLIS = 15_000L
+
+        /** How long after one check of the paired computers' addresses the next starts. */
+        const val CHECK_INTERVAL_MILLIS = 8_000L
 
         /** Returns how the search goes, having [found] computers on a network of [reach], searching [long] or not. */
         fun phase(found: List<DiscoveredHost>, reach: NetworkReach, long: Boolean): SearchPhase = when {

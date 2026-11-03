@@ -118,6 +118,11 @@ char *qdp_client_pin(void);
 /* Returns whether text is a key pin. */
 bool qdp_is_pin(const char *text);
 
+/* Returns whether a QDP host answers at address, "host" or "host:port",
+   without connecting to it. Blocks for up to a second and a half: call it
+   off the main thread. */
+bool qdp_host_reachable(const char *address);
+
 /* Starts a session with config, showing its video in a Metal layer added to
    layer (a CALayer), which is width x height pixels at scale pixels a point.
    Returns NULL, and sets *error if error is not NULL, if it cannot start. */

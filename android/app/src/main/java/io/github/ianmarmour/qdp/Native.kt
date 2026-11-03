@@ -244,4 +244,11 @@ object Native {
 
     /** Returns whether [pin] is a key pin. */
     @JvmStatic external fun isPin(pin: String): Boolean
+
+    /**
+     * Returns whether a QDP host answers at [address], "host" or
+     * "host:port", without connecting to it. Blocks for up to a second and
+     * a half: call it off the main thread.
+     */
+    @JvmStatic external fun hostReachable(address: String): Boolean
 }

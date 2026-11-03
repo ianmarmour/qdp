@@ -401,6 +401,27 @@ async fn session_over_quic() {
     }
 }
 
+/// A host answers a probe, without a connection, and a closed port does
+/// not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_answers_a_probe() {
+    let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
+    let host = HostEndpoint::bind(loopback(), identity).unwrap();
+    let address = host.local_address().unwrap();
+    let wait = Duration::from_secs(2);
+    let answered = tokio::task::spawn_blocking(move || qdp_quic::probe(address, wait))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(answered);
+    drop(host);
+    let closed = tokio::task::spawn_blocking(move || qdp_quic::probe(address, wait))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!closed);
+}
+
 /// A client refuses a host whose key does not match its pin.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_pin_is_refused() {

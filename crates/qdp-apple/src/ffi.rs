@@ -19,7 +19,7 @@ use std::time::Duration;
 use qdp::message::DeviceFeatures;
 use qdp_app::gamepad::GamepadState;
 use qdp_app::session::{Authentication, Config, GatewayConfig, Session};
-use qdp_app::settings::{format_pin, parse_pin};
+use qdp_app::settings::{format_pin, host_reachable, parse_pin};
 use qdp_app::sink::SharedCursor;
 use qdp_app::virtual_gamepad::{self, Insets, Point, Screen, VirtualGamepad};
 use qdp_codec::CodecPreference;
@@ -311,6 +311,20 @@ pub extern "C" fn qdp_client_pin() -> *mut c_char {
 pub unsafe extern "C" fn qdp_is_pin(text: *const c_char) -> bool {
     // SAFETY: as the caller promises.
     guarded(false, || parse_pin(&unsafe { read(text) }).is_ok())
+}
+
+/// Returns whether a QDP host answers at `address`, "host" or "host:port",
+/// without connecting to it. Blocks for up to a second and a half, so the
+/// app calls it off its main thread.
+///
+/// # Safety
+///
+/// `address` is null or a live NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qdp_host_reachable(address: *const c_char) -> bool {
+    // SAFETY: as the caller promises.
+    let address = unsafe { read(address) };
+    guarded(false, || host_reachable(&address))
 }
 
 /// Starts a session, drawing its video in a layer over `layer`.

@@ -5,7 +5,7 @@ package io.github.ianmarmour.qdp
  * order: ready first, then new ones, then paired ones not found.
  */
 enum class HostStatus {
-    /** Paired, and found on the network. */
+    /** Paired, and found on the network or answering at its address. */
     READY,
 
     /** Reached through the organization's gateway. */
@@ -23,7 +23,7 @@ enum class HostStatus {
     /** Found, not paired, and not offering pairing. */
     PAIRING_OFF,
 
-    /** Paired, and not found on the network. */
+    /** Paired, neither found on the network nor answering at its address. */
     NOT_SEEN,
     ;
 
@@ -62,12 +62,14 @@ object HostList {
     /**
      * Returns the cards for the computers [discovered] on the network,
      * recognized as paired by their pin, the [paired] computers not found,
+     * ready if their pins are among those [answering] at their addresses,
      * and those reached [throughGateway], in [HostStatus] order and by name.
      */
     fun cards(
         discovered: List<DiscoveredHost>,
         paired: List<PairedHost>,
         throughGateway: List<GatewayHost> = emptyList(),
+        answering: Set<String> = emptySet(),
     ): List<HostCard> {
         val found = mutableSetOf<String>()
         val discoveredCards = discovered.map { host ->
@@ -116,7 +118,7 @@ object HostList {
                 key = PAIRED_KEY + host.pin,
                 name = host.name,
                 address = host.address,
-                status = HostStatus.NOT_SEEN,
+                status = if (host.pin in answering) HostStatus.READY else HostStatus.NOT_SEEN,
                 target = StreamTarget(host.name, host.address, Native.AUTH_PAIRED, host.pin),
                 paired = host,
                 advertisedPin = null,

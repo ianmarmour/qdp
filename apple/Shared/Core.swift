@@ -28,6 +28,13 @@ enum Core {
         text.withCString { qdp_is_pin($0) }
     }
 
+    /// Returns whether a QDP host answers at `address`, "host" or
+    /// "host:port", without connecting to it. Blocks for up to a second and
+    /// a half, so it is called off the main thread.
+    static func hostReachable(_ address: String) -> Bool {
+        address.withCString { qdp_host_reachable($0) }
+    }
+
     /// Returns a string the core returned, freeing it, or `nil` for none.
     static func takeString(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
         guard let pointer else { return nil }

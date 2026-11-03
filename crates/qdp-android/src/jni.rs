@@ -28,7 +28,7 @@ use tracing::{info, warn};
 use qdp_app::gamepad::GamepadState;
 use qdp_app::qr::QrModules;
 use qdp_app::session::{Authentication, Config, GatewayConfig, Session};
-use qdp_app::settings::{display_size, format_pin, parse_pin};
+use qdp_app::settings::{display_size, format_pin, host_reachable, parse_pin};
 use qdp_app::virtual_gamepad::{self, Insets, Point, Screen, VirtualGamepad};
 use qdp_runtime::{Credentials, SignInAnswer};
 
@@ -971,6 +971,23 @@ pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_clientPin(
                 ptr::null_mut()
             }
         }
+    })
+}
+
+/// Returns whether a QDP host answers at `address`, "host" or "host:port",
+/// without connecting to it. Blocks for up to a second and a half, so the
+/// app calls it off its main thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_ianmarmour_qdp_Native_hostReachable(
+    env: *mut JNIEnv,
+    _class: jclass,
+    address: jstring,
+) -> jboolean {
+    guarded(JNI_FALSE, || {
+        // SAFETY: the VM calls this with its environment and a live
+        // reference.
+        let address = unsafe { read_string(env, address) };
+        boolean(host_reachable(&address))
     })
 }
 

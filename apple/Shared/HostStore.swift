@@ -19,9 +19,10 @@ struct DiscoveredHost: Hashable, Identifiable {
 struct HostRow: Identifiable, Hashable {
     /// How the row stands.
     enum Status: Hashable {
-        /// Paired and on this network: choosing it streams.
+        /// Paired, and found on this network or answering at its address:
+        /// choosing it streams.
         case ready
-        /// Paired, but not seen on this network: choosing it tries anyway.
+        /// Paired, but neither found nor answering: choosing it tries anyway.
         case notSeen
         /// New and offering pairing: choosing it pairs.
         case new
@@ -57,6 +58,13 @@ final class HostStore {
     /// Whether the local network can be browsed; `false` once the user
     /// declined the permission.
     private(set) var networkAllowed = true
+    /// Whether the device is on a local network, Wi-Fi or Ethernet, where
+    /// hosts are looked for; not on a cellular network, where only the
+    /// paired hosts' addresses are checked.
+    private(set) var onLocalNetwork = true
+    /// The pins of the paired hosts not found on the network that answered
+    /// at their addresses when last checked.
+    private var answering: Set<String> = []
 
     private let defaults: UserDefaults
     private var browser: NWBrowser?
@@ -65,6 +73,11 @@ final class HostStore {
     private var listShown = false
     /// The streams running, during which the network is not searched.
     private var streams = 0
+    /// Follows the network the device is on.
+    private let pathMonitor = NWPathMonitor()
+    /// Checks the paired hosts not found on the network at their
+    /// addresses, while the list shows.
+    private var checking: Task<Void, Never>?
 
     /// Where paired hosts are kept.
     private static let pairedKey = "pairedHosts"
@@ -79,6 +92,9 @@ final class HostStore {
     /// DNS-SD's `kDNSServiceErr_PolicyDenied`: the user declined the local
     /// network permission.
     private static let policyDenied: Int32 = -65570
+    /// How long after one check of the paired hosts' addresses the next
+    /// starts.
+    private static let checkInterval: Duration = .seconds(8)
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -90,6 +106,11 @@ final class HostStore {
            let hosts = try? JSONDecoder().decode([GatewayHost].self, from: data) {
             gatewayHosts = hosts
         }
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let local = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
+            Task { @MainActor in self?.networkChanged(local: local) }
+        }
+        pathMonitor.start(queue: .main)
     }
 
     /// Keeps `host`, to reach through the gateway, replacing the one with
@@ -177,10 +198,11 @@ final class HostStore {
             return HostRow(name: host.name, detail: "Pairing off", status: .pairingOff)
         }
         rows += paired.filter { !found.contains($0.pin) }.map { host in
-            HostRow(
+            let online = answering.contains(host.pin)
+            return HostRow(
                 name: host.name,
-                detail: "Offline",
-                status: .notSeen,
+                detail: online ? "Online" : "Offline",
+                status: online ? .ready : .notSeen,
                 target: StreamTarget(name: host.name, address: host.address, authentication: .paired, pin: host.pin),
                 paired: host
             )
@@ -215,11 +237,66 @@ final class HostStore {
     }
 
     private func updateBrowsing() {
-        if listShown && streams == 0 {
+        let active = listShown && streams == 0
+        if active && onLocalNetwork {
             startBrowsing()
         } else {
             stopBrowsing()
         }
+        if active {
+            startChecking()
+        } else {
+            stopChecking()
+        }
+    }
+
+    /// Follows the device onto a network: hosts are looked for only on a
+    /// local one, and those found on another are gone.
+    private func networkChanged(local: Bool) {
+        guard local != onLocalNetwork else { return }
+        onLocalNetwork = local
+        if !local {
+            discovered = []
+        }
+        updateBrowsing()
+    }
+
+    /// Starts checking the paired hosts the search has not found at their
+    /// addresses, now and every [`checkInterval`].
+    private func startChecking() {
+        guard checking == nil else { return }
+        checking = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.checkPairedHosts()
+                try? await Task.sleep(for: Self.checkInterval)
+            }
+        }
+    }
+
+    private func stopChecking() {
+        checking?.cancel()
+        checking = nil
+    }
+
+    /// Checks each paired host the search has not found at its address, all
+    /// at once, off the main thread.
+    private func checkPairedHosts() async {
+        let found = Set(discovered.compactMap(\.pin))
+        let unfound = paired.filter { !found.contains($0.pin) }.map { ($0.pin, $0.address) }
+        let answered = await withTaskGroup(of: String?.self) { group in
+            for (pin, address) in unfound {
+                group.addTask { Core.hostReachable(address) ? pin : nil }
+            }
+            var answered = Set<String>()
+            for await pin in group {
+                if let pin {
+                    answered.insert(pin)
+                }
+            }
+            return answered
+        }
+        guard !Task.isCancelled else { return }
+        answering = answered
     }
 
     /// Starts looking for hosts on the local network.
