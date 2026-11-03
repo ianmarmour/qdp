@@ -4,14 +4,23 @@ The QDP app for Windows 10 or later on x86-64. To install and use it, see
 [Installing on Windows](../docs/setup/windows.md) and
 [Using the apps](../docs/setup/apps.md#windows).
 
-## Requirements
+## Dependencies
 
-- Windows 10 or later
-- Rust, NASM and the .NET 8 SDK, which [Building](../docs/building.md#windows) sets up
+| Dependency | Version |
+|---|---|
+| Rust | 1.97.0 |
+| NASM | Latest |
+| .NET SDK | 8 |
+| Windows App SDK | 1.7.250310001 |
+| Windows SDK build tools | 10.0.26100.1742 |
+| WiX Toolset, for the installer | 5.0.2 |
+| Minimum Windows | 10, version 1809 |
 
 ## Build
 
-From the repository's root:
+On Windows, install Rust, NASM and the .NET SDK as
+[Building](../docs/building.md#windows) describes. Then, from the repository's
+root:
 
 ```powershell
 .\windows\build.ps1

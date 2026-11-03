@@ -50,6 +50,9 @@ implementation of the Quick Desktop Protocol (QDP) in Rust.
   rather than repeating them.
 - **Uniform.** Give a new document the shape of the others of its kind: every
   crate README alike, every app README alike, every install page alike.
+- **Dependencies.** Every app README lists what it builds with, at exact
+  versions, in a Dependencies table of the same shape; a change to one of
+  those versions updates the table in the same pull request.
 
 ## Changes, Commits, and Pull Requests
 

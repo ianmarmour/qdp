@@ -6,16 +6,28 @@ and use them, see [Installing on a Mac](../docs/setup/macos.md),
 [Installing on iPhone and iPad](../docs/setup/iphone-ipad.md) and
 [Using the apps](../docs/setup/apps.md).
 
-## Requirements
+## Dependencies
 
-- A Mac with Apple silicon
-- Xcode 26
-- XcodeGen: `brew install xcodegen`
-- Rust's Apple targets: `rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim`
+| Dependency | Version |
+|---|---|
+| Rust | 1.97.0 |
+| Xcode | 26 |
+| XcodeGen | Latest |
+| Swift | 5 |
+| Minimum macOS | 26.0 |
+| Minimum iOS and iPadOS | 26.0 |
 
 ## Build
 
-From this folder, build the apps' Rust core and generate the Xcode project:
+On a Mac with Apple silicon, install XcodeGen and Rust's Apple targets:
+
+```bash
+brew install xcodegen
+rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+```
+
+Then, from this folder, build the apps' Rust core and generate the Xcode
+project:
 
 ```bash
 ./build-core.sh && xcodegen generate && open QDP.xcodeproj
