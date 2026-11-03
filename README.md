@@ -31,26 +31,18 @@ Windows, macOS, Android, iPhone and iPad.
 
 ## Platforms
 
-| | Share this computer | Connect to a computer |
-|---|---|---|
-| **Linux** | `qdp serve`, the login screen included | The QDP app, `qdp connect` |
-| **Windows** | `qdp serve` | The QDP app, `qdp connect` |
-| **macOS** | `qdp serve` | The QDP app, `qdp connect` |
-| **Android** | | The QDP app |
-| **iPhone and iPad** | | The Quick Desktop app |
+A **host** shares its desktop, and a **client** connects to one.
 
-## Installing
+| Platform | Host | Client | Install |
+|---|:---:|:---:|---|
+| Linux | ✅ | ✅ | [RPM, Debian package or tarball](docs/install/linux.md) |
+| Windows | ✅ | ✅ | [Installer](docs/install/windows.md) |
+| macOS (Apple silicon) | ✅ | ✅ | [App and command line](docs/install/macos.md) |
+| Android | | ✅ | [APK](docs/install/android.md) |
+| iPhone and iPad | | ✅ | [Xcode or sideloading](docs/install/iphone-ipad.md) |
 
 Every download is on the
 [latest release](https://github.com/ianmarmour/qdp/releases/latest).
-
-| Platform | Download | Guide |
-|---|---|---|
-| Linux | `qdp-linux-x86_64.rpm` or `.deb`, and the app's `qdp-gtk-linux-x86_64.rpm` or `.tar.gz` | [Installing on Linux](docs/install/linux.md) |
-| Windows | `qdp-windows-x64.msi` | [Installing on Windows](docs/install/windows.md) |
-| Mac (Apple silicon) | `qdp-macos-app.zip` and `qdp-macos-arm64.tar.gz` | [Installing on a Mac](docs/install/macos.md) |
-| Android | `qdp-android-arm64.apk` | [Installing on Android](docs/install/android.md) |
-| iPhone and iPad | Build with Xcode, or sideload `qdp-ios-unsigned.ipa` | [Installing on iPhone and iPad](docs/install/iphone-ipad.md) |
 
 ## Getting started
 
