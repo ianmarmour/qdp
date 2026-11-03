@@ -11,13 +11,31 @@ platforms the branch changes.
 
 ## Publishing a release
 
-Raise `version` in the root `Cargo.toml`, then push a tag for it:
+1. Raise `version` in the root `Cargo.toml`, and merge that change.
+2. Write the release's description in a file, such as `release.md`:
 
-```bash
-git tag v0.2.0 && git push origin v0.2.0
-```
+   ```markdown
+   A paragraph on what this release brings to the people who use QDP.
 
-Once every build passes, CI publishes them all as a GitHub release.
+   ## Highlights
+
+   - Each change people will notice, in a sentence, newest features first.
+
+   ## Upgrading
+
+   - Anything existing installs must do, such as pairing again. Leave this
+     section out when there's nothing.
+   ```
+
+3. Tag the release with the description as its annotation, and push the tag:
+
+   ```bash
+   git tag -a v0.2.0 --cleanup=verbatim -F release.md
+   git push origin v0.2.0
+   ```
+
+Once every build passes, CI publishes the release: the description, then the
+pull requests merged since the last release, with every build attached.
 
 ## Signing the Android app
 

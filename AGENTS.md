@@ -60,6 +60,17 @@ implementation of the Quick Desktop Protocol (QDP) in Rust.
   A change to one of those versions updates the table in the same pull
   request.
 
+## Releases
+
+- Publish a release only when the maintainer asks for one, as
+  [docs/releasing.md](docs/releasing.md) describes.
+- The release's description is the version tag's annotation, written for the
+  people who use QDP: a paragraph on what the release brings, its highlights,
+  and anything existing installs must do. It follows the documentation rules
+  above; the changelog GitHub adds below it lists every pull request.
+- Tag with `git tag -a --cleanup=verbatim`, so that the description's
+  Markdown headings survive.
+
 ## Changes, Commits, and Pull Requests
 
 - Keep changes small and focused, with meaningful commit messages.
