@@ -6,11 +6,13 @@ and use it, see [Installing on Linux](../../docs/setup/linux.md) and
 
 ## Dependencies
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.97.0 |
-| GTK | 4.14 |
-| libadwaita | 1.5 |
+What it builds with. A `+` means that version or later; other versions are exact.
+
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| Rust | 1.97.0 | Linux | Building the app |
+| GTK | 4.14+ | Linux | The app's interface |
+| libadwaita | 1.5+ | Linux | The app's interface |
 
 ## Build
 

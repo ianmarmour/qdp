@@ -7,17 +7,20 @@ later on 64-bit ARM. To install and use it, see
 
 ## Dependencies
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.97.0 |
-| JDK | 17 |
-| Gradle | 8.14.3 |
-| Android Gradle Plugin | 8.11.1 |
-| Kotlin | 2.2.21 |
-| Jetpack Compose BOM | 2026.06.01 |
-| Android SDK platform | 35 |
-| Android NDK | Latest |
-| Minimum Android | 10 (API 29) |
+What it builds with. A `+` means that version or later; other versions are exact.
+
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| Rust | 1.97.0 | Linux, macOS | Building the app's Rust core |
+| Android NDK | r25+ | Linux, macOS | Building the app's Rust core |
+| JDK | 17 | Linux, macOS | Running Gradle |
+| Gradle | 8.14.3 | Linux, macOS | Building the app |
+| Android Gradle Plugin | 8.11.1 | Linux, macOS | Building the app |
+| Android SDK platform | 35 | Linux, macOS | Building the app |
+| Kotlin | 2.2.21 | Linux, macOS | The app's code |
+| Jetpack Compose BOM | 2026.06.01 | Linux, macOS | The app's interface |
+
+The app runs on Android 10 (API 29) or later.
 
 ## Build
 

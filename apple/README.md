@@ -8,14 +8,16 @@ and use them, see [Installing on a Mac](../docs/setup/macos.md),
 
 ## Dependencies
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.97.0 |
-| Xcode | 26 |
-| XcodeGen | Latest |
-| Swift | 5 |
-| Minimum macOS | 26.0 |
-| Minimum iOS and iPadOS | 26.0 |
+What it builds with. A `+` means that version or later; other versions are exact.
+
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| Rust | 1.97.0 | macOS | Building the apps' Rust core |
+| Xcode | 26+ | macOS | Building the apps |
+| XcodeGen | Any | macOS | Generating the Xcode project |
+| Swift | 5 | macOS | The apps' code |
+
+The apps run on macOS, iOS and iPadOS 26.0 or later.
 
 ## Build
 

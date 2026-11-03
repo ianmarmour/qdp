@@ -6,15 +6,19 @@ The QDP app for Windows 10 or later on x86-64. To install and use it, see
 
 ## Dependencies
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.97.0 |
-| NASM | Latest |
-| .NET SDK | 8 |
-| Windows App SDK | 1.7.250310001 |
-| Windows SDK build tools | 10.0.26100.1742 |
-| WiX Toolset, for the installer | 5.0.2 |
-| Minimum Windows | 10, version 1809 |
+What it builds with. A `+` means that version or later; other versions are exact.
+
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| Rust | 1.97.0 | Windows | Building the app's Rust core |
+| Visual Studio C++ build tools | 2022+ | Windows | Building the app's Rust core |
+| NASM | 2.15+ | Windows | Building the codecs |
+| .NET SDK | 8 | Windows | Building the app |
+| Windows SDK build tools | 10.0.26100.1742 | Windows | Building the app |
+| Windows App SDK | 1.7.250310001 | Windows | The app's interface |
+| WiX Toolset | 5.0.2 | Windows | Building the installer |
+
+The app runs on Windows 10, version 1809, or later.
 
 ## Build
 

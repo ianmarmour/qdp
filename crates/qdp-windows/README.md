@@ -11,14 +11,13 @@ API documentation: `cargo doc -p qdp-windows --open`
 
 ## Dependencies
 
-The tools and native libraries it needs beyond its Cargo dependencies, at
-the oldest versions that work:
+The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
+version or later.
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.87 |
-| Visual Studio C++ build tools | 2022 |
-| NASM | 2.15 |
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| Visual Studio C++ build tools | 2022+ | Windows | Building and linking |
+| NASM | 2.15+ | Windows | Building the codecs |
 
 ## License
 

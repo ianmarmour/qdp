@@ -11,14 +11,13 @@ API documentation: `cargo doc -p qdp-runtime --open`
 
 ## Dependencies
 
-The tools and native libraries it needs beyond its Cargo dependencies, at
-the oldest versions that work:
+The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
+version or later.
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.87 |
-| C compiler | Any |
-| NASM, on x86-64 | 2.15 |
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| C compiler | Any | All | Building bundled C code |
+| NASM | 2.15+ | x86-64 | Building the codecs |
 
 ## License
 

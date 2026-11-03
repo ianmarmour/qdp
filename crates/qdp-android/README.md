@@ -11,13 +11,12 @@ API documentation: `cargo doc -p qdp-android --open`
 
 ## Dependencies
 
-The tools and native libraries it needs beyond its Cargo dependencies, at
-the oldest versions that work:
+The native tools and libraries it needs beyond `Cargo.toml`. A `+` means that
+version or later.
 
-| Dependency | Version |
-|---|---|
-| Rust | 1.87 |
-| Android NDK | Latest |
+| Dependency | Version | Platform | Needed for |
+|---|---|---|---|
+| Android NDK | r25+ | Linux, macOS | Building for Android |
 
 ## License
 
