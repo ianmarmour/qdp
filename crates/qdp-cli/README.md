@@ -22,6 +22,22 @@ API documentation: `cargo doc -p qdp-cli --open`
 | libva | 2+ | Linux | Hardware encoding, loaded at run time |
 | NVIDIA driver | 522+ | Windows | Hardware encoding, loaded at run time |
 
+## Build
+
+Set up your system as [Building](../../docs/building.md) describes, then:
+
+```bash
+cargo build --release -p qdp-cli
+```
+
+The command is built as `target/release/qdp`.
+
+## Test
+
+```bash
+cargo test -p qdp-cli
+```
+
 ## License
 
 `qdp-cli` is licensed under the [Apache License 2.0](../../LICENSE).

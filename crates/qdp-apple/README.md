@@ -15,6 +15,23 @@ API documentation: `cargo doc -p qdp-apple --open`
 |---|---|---|---|
 | Xcode | 26+ | macOS | Building for Apple platforms |
 
+## Build
+
+On a Mac with Apple silicon, from the `apple` folder:
+
+```bash
+./build-core.sh
+```
+
+This builds the core for Macs, iPhones, iPads and the iOS simulator, for the
+apps' Xcode project: see [`apple`](../../apple/README.md).
+
+## Test
+
+```bash
+cargo test -p qdp-apple
+```
+
 ## License
 
 `qdp-apple` is licensed under the [Apache License 2.0](../../LICENSE).

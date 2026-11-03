@@ -16,6 +16,24 @@ API documentation: `cargo doc -p qdp-gateway --open`
 |---|---|---|---|
 | C compiler | Any | All | Building bundled C code |
 
+## Build
+
+On Linux or Windows, set up your system as
+[Building](../../docs/building.md) describes, then:
+
+```bash
+cargo build --release -p qdp-gateway
+```
+
+The gateway is built as `target/release/qdp-gateway`. Its packages build from
+there: see [Packaging](../../packaging/README.md).
+
+## Test
+
+```bash
+cargo test -p qdp-gateway
+```
+
 ## License
 
 `qdp-gateway` is licensed under the [Apache License 2.0](../../LICENSE).
