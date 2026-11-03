@@ -56,7 +56,11 @@ struct HostsScreen: View {
                     .navigationTitle("Settings")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
+                        // Settings take effect as they change, so Done only
+                        // closes them: plain glass, as the buttons on the
+                        // list are, not filled with the accent colour as a
+                        // confirming button is.
+                        ToolbarItem(placement: .topBarTrailing) {
                             Button("Done") { showingSettings = false }
                         }
                     }
