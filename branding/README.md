@@ -6,6 +6,7 @@ QDP's logo is the Orbit Q: an ivory Q with a short, rounded tail.
 | --- | --- |
 | [`qdp-orbit-q.svg`](qdp-orbit-q.svg) | The Q on its deep teal square: the logo, and the source of every app icon. |
 | [`qdp-orbit-q-transparent.svg`](qdp-orbit-q-transparent.svg) | The Q alone, for placing on other backgrounds. |
+| [`qdp-banner.svg`](qdp-banner.svg) | The README's banner: the Q and the QDP wordmark, set in Inter Display, on a teal card. |
 
 | Color | Value |
 | --- | --- |
