@@ -40,10 +40,10 @@ A Windows host encodes on the GPU where the GPU encodes AV1:
 - AMD Radeon RX 7000 or newer, and Intel Arc or newer, with the AV1 encoder
   their drivers provide through Media Foundation.
 
-Elsewhere it encodes in software. [Hosting](../hosting.md#encoding) covers the
+Elsewhere it encodes in software. [Sharing a computer](hosting.md#encoding) covers the
 details.
 
 ## Next steps
 
-- [Connect to a computer](../connecting.md#windows) from the app.
-- [Share this PC](../hosting.md) with `qdp serve`.
+- [Connect to a computer](apps.md#windows) from the app.
+- [Share this PC](hosting.md) with `qdp serve`.

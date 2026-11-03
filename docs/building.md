@@ -2,7 +2,7 @@
 
 This page sets up a machine to build and test QDP: the `qdp` command, the
 gateway and the apps. Most people don't need to build anything: the
-[installation guides](README.md#installing) cover the prebuilt releases.
+[installation guides](setup/README.md) cover the prebuilt releases.
 
 - [Requirements](#requirements)
 - [Linux](#linux)
@@ -75,9 +75,9 @@ so `qdp connect` runs only with `--headless`. The
 The RPM and Debian packages build from these programs:
 [`packaging`](../packaging/README.md) says how.
 
-To run the host you built, see [Hosting](hosting.md). On Linux it needs
+To run the host you built, see [Sharing a computer](setup/hosting.md). On Linux it needs
 access to `/dev/uinput` for input, which the packages set up; a build run from
-the repository needs the [manual setup](install/linux.md#input-without-the-packages).
+the repository needs the [manual setup](setup/linux.md#input-without-the-packages).
 
 ## macOS
 

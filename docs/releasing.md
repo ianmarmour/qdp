@@ -64,7 +64,7 @@ the systems it needs. The packages take their version from the workspace
 version.
 
 The Mac app and the `qdp` command for macOS are not notarized yet, so macOS
-asks before opening them: the [installation guide](install/macos.md) says how
+asks before opening them: the [installation guide](setup/macos.md) says how
 to open them anyway.
 
 ## Signing the Android app

@@ -5,8 +5,8 @@ handhelds running Android 10 or later on 64-bit ARM. It's written in Kotlin
 with Jetpack Compose and Material 3, around a Rust core,
 [`qdp-android`](../crates/qdp-android/README.md), which it calls through JNI.
 
-To install and use it, see [Installing on Android](../docs/install/android.md)
-and [Connecting](../docs/connecting.md#android).
+To install and use it, see [Installing on Android](../docs/setup/android.md)
+and [Using the apps](../docs/setup/apps.md#android).
 
 ## Building
 

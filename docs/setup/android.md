@@ -24,4 +24,4 @@ the screen, and in software on devices without one.
 
 ## Next steps
 
-[Connect to a computer](../connecting.md#android) from the app.
+[Connect to a computer](apps.md#android) from the app.

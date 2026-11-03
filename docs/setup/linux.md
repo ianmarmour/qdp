@@ -36,7 +36,7 @@ Besides the command, the RPM and the Debian package install:
   virtual input devices (`/dev/uinput`, and `/dev/uhid` for passed-through
   devices), for the user at the machine and members of the `input` group.
 - **A system service**, off until you turn it on, which streams the console
-  from boot, the login screen included. [Hosting](../hosting.md#running-as-a-service)
+  from boot, the login screen included. [Sharing a computer](hosting.md#running-as-a-service)
   describes it.
 
 ### Other distributions
@@ -83,7 +83,7 @@ Hardware encoding needs the GPU's VA-API driver, which desktop distributions
 install with Mesa (`mesa-va-drivers`) or Intel's media driver
 (`intel-media-driver`). To check, run `vainfo`: it lists
 `VAProfileAV1Profile0` with `VAEntrypointEncSlice` when hardware encoding is
-available. [Hosting](../hosting.md#encoding) covers the details.
+available. [Sharing a computer](hosting.md#encoding) covers the details.
 
 ## Input without the packages
 
@@ -117,6 +117,6 @@ sudo apt remove qdp
 
 ## Next steps
 
-- [Share this computer](../hosting.md) with `qdp serve`.
-- [Connect to a computer](../connecting.md) from the app or with
+- [Share this computer](hosting.md) with `qdp serve`.
+- [Connect to a computer](apps.md) from the app or with
   `qdp connect`.

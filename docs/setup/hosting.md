@@ -2,7 +2,7 @@
 
 A **host** is a computer that shares its desktop. Any Linux, Windows or Mac
 computer can host with the `qdp serve` command, which the
-[installation guides](README.md#installing) set up.
+[installation guides](README.md#1-install-qdp) set up.
 
 - [Getting started](#getting-started)
 - [Pairing and signing in](#pairing-and-signing-in)
@@ -35,7 +35,7 @@ stops it. Windows and Mac hosts don't advertise yet, so add them in the apps
 by their address.
 
 On a client, choose the host and type the four-digit code it shows: see
-[Connecting](connecting.md). From then on, the two remember each other and
+[Using the apps](apps.md). From then on, the two remember each other and
 connect without a code.
 
 ## Pairing and signing in
@@ -80,7 +80,7 @@ Besides pairing, a host can accept:
   nor `--user` presents its key.
 - **A gateway's users.** In an organization, `--gateway-key KEY` accepts the
   users a `qdp-gateway` vouches for, and `--gateway-group NAME` only those in
-  that group. See [the gateway guide](gateway.md).
+  that group. See [the gateway guide](../gateway.md).
 
 ## Platform notes
 
@@ -93,7 +93,7 @@ Besides pairing, a host can accept:
 - **Input** goes through uinput virtual devices, which work under any Wayland
   compositor or X11. The host needs write access to `/dev/uinput`, and to
   `/dev/uhid` for passed-through devices. The RPM and Debian package grant
-  it; otherwise, follow [the manual setup](install/linux.md#input-without-the-packages).
+  it; otherwise, follow [the manual setup](linux.md#input-without-the-packages).
   Without access, the host logs a warning and ignores input.
 - **Multiple monitors.** The host finds where the streamed monitor sits among
   the desktop's monitors through xdg-output, and places the pointer on it.
@@ -136,7 +136,7 @@ Besides pairing, a host can accept:
 
 The host sends video at the size of the client's window or display, up to its
 own screen's, and scales its frames to fit. Clients can ask for less: see
-[Connecting](connecting.md#resolution).
+[Using the apps](apps.md#resolution).
 
 With `--match-display on`, the host instead changes the streamed monitor's
 resolution and interface scale to the client's for each session, so that the
@@ -257,7 +257,7 @@ gamepad input. How it does so on each system is under
   virtual Xbox 360 controller, rumble included. Hosts on other systems
   decline them.
 - **Passed-through devices.** A Linux host recreates the HID devices a client
-  passes through (see [Connecting](connecting.md#passing-a-device-through))
+  passes through (see [Using the apps](apps.md#passing-a-device-through))
   with uhid, for its games, rumble and lights included. By default it accepts
   only game controllers; `--passthrough all` accepts every device and
   `--passthrough off` none. Devices in a firmware update mode, such as

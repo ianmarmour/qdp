@@ -21,4 +21,4 @@ software.
 
 ## Next steps
 
-[Connect to a computer](../connecting.md#iphone-and-ipad) from the app.
+[Connect to a computer](apps.md#iphone-and-ipad) from the app.

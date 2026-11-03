@@ -10,8 +10,8 @@ Quick Desktop Protocol (QDP).
 - `qdp discover`, `qdp pin`, `qdp clients`, `qdp hosts` and `qdp service`
   find hosts, show keys, manage paired devices and run the host as a service.
 
-The user guides cover it: [Sharing a computer](../../docs/hosting.md) and
-[Connecting](../../docs/connecting.md#the-command-line). `qdp help`
+The user guides cover it: [Sharing a computer](../../docs/setup/hosting.md) and
+[Using the apps](../../docs/setup/apps.md#the-command-line). `qdp help`
 describes every option.
 
 ## Building
