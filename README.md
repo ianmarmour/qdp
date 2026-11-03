@@ -58,22 +58,6 @@ on each platform step by step.
 - **[Specification](docs/spec/README.md)**: the Quick Desktop Protocol, and
   the reasoning behind its design.
 
-## Building from source
-
-You need Rust 1.87 or later, a C compiler, and your system's development
-files, which [Building from source](docs/building.md) lists for each system.
-
-```bash
-git clone https://github.com/ianmarmour/qdp.git && cd qdp
-cargo build --release
-cargo test --workspace
-```
-
-This builds the `qdp` command and the gateway into `target/release`. Each app
-builds with its platform's tools: see [`android`](android/README.md),
-[`apple`](apple/README.md), [`windows`](windows/README.md) and
-[`crates/qdp-gtk`](crates/qdp-gtk/README.md).
-
 ## Repository layout
 
 | Path | What it is |
@@ -100,7 +84,8 @@ together.
 ## Contributing
 
 Bug reports and pull requests are welcome: see
-[Contributing](CONTRIBUTING.md).
+[Contributing](CONTRIBUTING.md). To build QDP yourself, see
+[Building from source](docs/building.md).
 
 ## License
 
