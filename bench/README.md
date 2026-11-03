@@ -14,6 +14,10 @@ It needs Podman or Docker, and uses the machine's GPU when it has one. The
 first run builds the container and QDP, which takes a while; later runs reuse
 both.
 
+On Windows, run it in a WSL distribution, with Docker Desktop's WSL
+integration turned on or Docker installed there. It measures QDP for Linux,
+which the container runs.
+
 The report is written to `bench/results/TIME/report.md`, beside each run's
 measurements and logs.
 

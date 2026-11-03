@@ -64,9 +64,12 @@ fn main() -> ExitCode {
 }
 
 /// Says that the benchmark runs only on Linux, where the sessions it
-/// measures between do.
+/// measures between do, and how to run it from elsewhere.
 #[cfg(not(target_os = "linux"))]
 fn main() -> ExitCode {
-    eprintln!("qdp-bench runs on Linux, between headless GNOME sessions");
+    eprintln!(
+        "qdp-bench runs on Linux, between headless GNOME sessions; bench/run \
+         runs it in a container, from Linux, or from WSL on Windows"
+    );
     ExitCode::FAILURE
 }
