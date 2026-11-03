@@ -131,6 +131,7 @@ Connect options:
   --server-name NAME   Name sent in the TLS handshake (default qdp-host)
   --frames N           Disconnect after N frames
   --output FILE        Write the decoded video to FILE as YUV4MPEG2
+  --full-screen        Show the stream full screen
   --headless           Open no window; only log statistics
   --events             Report the session's progress as lines on standard
                        output, and read a pairing code, or a gateway's user
@@ -453,6 +454,8 @@ pub enum DecoderPlacement {
 pub enum Presentation {
     /// In a window.
     Window,
+    /// In a window filling the screen.
+    FullScreen,
     /// Nowhere: the stream is only counted, and written to the file
     /// `--output` names.
     Headless,
@@ -1053,6 +1056,7 @@ fn parse_connect(mut arguments: impl Iterator<Item = String>) -> Result<ConnectA
             "--server-name" => connect.server_name = value("--server-name", &mut arguments)?,
             "--frames" => connect.frames = Some(parse("--frames", &mut arguments)?),
             "--output" => connect.output = Some(value("--output", &mut arguments)?.into()),
+            "--full-screen" => connect.presentation = Presentation::FullScreen,
             "--headless" => connect.presentation = Presentation::Headless,
             "--events" => connect.events = EventOutput::Lines,
             "--decoder" => {
@@ -1383,6 +1387,13 @@ mod tests {
         };
         assert_eq!(connect.presentation, Presentation::Headless);
         assert_eq!(connect.decoder, CodecPreference::Auto);
+        let Command::Connect(connect) = parse_line(&format!(
+            "connect 192.0.2.7 --pin {pin} --token t --full-screen"
+        ))
+        .unwrap() else {
+            panic!("expected connect");
+        };
+        assert_eq!(connect.presentation, Presentation::FullScreen);
         let Command::Connect(connect) = parse_line(&format!(
             "connect 192.0.2.7 --pin {pin} --token t --decoder software"
         ))

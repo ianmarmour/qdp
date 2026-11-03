@@ -31,6 +31,10 @@ const MUTTER_THREAD: &str = "qdp-mutter";
 /// How long Mutter may take to start the screen cast's PipeWire stream.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long applications are given to take the session's new pointer before
+/// it is moved for them to see.
+const POINTER_SETTLE: Duration = Duration::from_millis(250);
+
 /// The connector that asks Mutter for the primary monitor.
 const PRIMARY_MONITOR: &str = "";
 
@@ -404,6 +408,7 @@ async fn start_sessions() -> Result<(RemoteDesktopSessionProxy<'static>, Started
         .map_err(|error| failed("bad PipeWire stream signal", error))?
         .node_id;
     debug!(node_id, stream = %stream_path.as_str(), "Mutter screen cast started");
+    create_pointer(&session).await;
     Ok((
         session,
         StartedStream {
@@ -411,6 +416,25 @@ async fn start_sessions() -> Result<(RemoteDesktopSessionProxy<'static>, Started
             node_id,
         },
     ))
+}
+
+/// Has Mutter create the session's pointer now, rather than on the client's
+/// first input. Where the desktop had no pointer, as a headless one has
+/// not, applications take the new one a moment after it appears: the event
+/// that created it, and so the client's first move or click, never reached
+/// them, and they went on unaware of the pointer above them until it moved
+/// again. A pointer that has not moved since is shown as hidden, too, which
+/// the host would take for a game's. So the pointer is created, left a
+/// moment for applications to take, and moved by nothing, which tells the
+/// one under it.
+async fn create_pointer(session: &RemoteDesktopSessionProxy<'_>) {
+    for _ in 0..2 {
+        if let Err(error) = session.notify_pointer_motion_relative(0.0, 0.0).await {
+            debug!(%error, "Mutter refused to create the pointer");
+            return;
+        }
+        tokio::time::sleep(POINTER_SETTLE).await;
+    }
 }
 
 /// Performs one command through the remote desktop session.

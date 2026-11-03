@@ -31,9 +31,9 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
+use winit::window::{CursorGrabMode, CustomCursor, Fullscreen, Window, WindowId};
 
-use crate::args::TouchpadMode;
+use crate::args::{self, TouchpadMode};
 use crate::color::{Placement, RgbFrame, scale_into, yuv420_to_rgb};
 use crate::sink::CliSink;
 use qdp_app::cursor::ScaledCursor;
@@ -319,6 +319,8 @@ impl Painter {
 
 /// The application the window's event loop runs.
 pub struct WindowApp {
+    /// Whether the window fills the screen.
+    presentation: args::Presentation,
     /// Whether the microphone is on.
     microphone: Microphone,
     /// The window's title.
@@ -455,6 +457,8 @@ pub struct WindowChoices<'a> {
     /// The window's title, to which the window adds whether the microphone
     /// is on.
     pub title: String,
+    /// Whether the window fills the screen.
+    pub presentation: args::Presentation,
     /// Whether the microphone is on as the session starts.
     pub microphone: Microphone,
     /// The devices to pass through.
@@ -478,6 +482,7 @@ impl WindowApp {
     ) -> Self {
         let WindowChoices {
             title,
+            presentation,
             microphone,
             passthrough,
             touchpad,
@@ -485,6 +490,7 @@ impl WindowApp {
         } = choices;
         Self {
             resolution,
+            presentation,
             draw_stats: DrawStats::new(Instant::now()),
             microphone,
             display_sender: Some(display_sender),
@@ -921,6 +927,10 @@ impl WindowApp {
         let attributes = Window::default_attributes()
             .with_title(self.window_title())
             .with_inner_size(INITIAL_SIZE)
+            .with_fullscreen(
+                (self.presentation == args::Presentation::FullScreen)
+                    .then_some(Fullscreen::Borderless(None)),
+            )
             .with_visible(false);
         let window = event_loop
             .create_window(attributes)
