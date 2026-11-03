@@ -19,17 +19,17 @@ device you'll connect from.
 
 ## 2. Share a computer
 
-On the computer you want to reach, start the host:
+On the computer you want to reach, turn on the host's service, which starts it
+now and keeps it running in the background:
 
-```bash
-qdp serve
-```
+- **Linux:** `sudo systemctl enable --now qdp`
+- **macOS:** `qdp service install`
+- **Windows:** the host can't run as a service yet, so run `qdp serve`.
 
-It listens on UDP port 4433, so allow that port through any firewall between
-your devices and the computer. Each system needs a little preparation, such as
-allowing Screen Recording on a Mac: see
-[Sharing a computer](hosting.md#platform-notes). To start the host
-automatically, see [Running as a service](hosting.md#running-as-a-service).
+The host listens on UDP port 4433, so allow that port through any firewall
+between your devices and the computer. Each system needs a little preparation,
+such as allowing Screen Recording on a Mac: see
+[Sharing a computer](hosting.md#platform-notes).
 
 ## 3. Pair and connect
 
