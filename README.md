@@ -31,33 +31,21 @@ Windows, macOS, Android, iPhone and iPad.
 
 ## Platforms
 
-A **host** shares its desktop, and a **client** connects to one.
+Install QDP as a **host** on the computer you want to reach, and as a
+**client** on each device you'll connect from.
 
-| Platform | Host | Client | Install |
+| Platform | Host | Client | Download |
 |---|:---:|:---:|---|
-| Linux | ✅ | ✅ | [RPM, DEB, TARBALL](docs/install/linux.md) |
-| Windows | ✅ | ✅ | [MSI](docs/install/windows.md) |
-| macOS (Apple silicon) | ✅ | ✅ | [APP / BIN](docs/install/macos.md) |
-| Android | | ✅ | [APK](docs/install/android.md) |
-| iPhone and iPad | | ✅ | [IPA](docs/install/iphone-ipad.md) |
+| Linux | ✅ | ✅ | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) |
+| Windows | ✅ | ✅ | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) |
+| macOS (Apple silicon) | ✅ | ✅ | [APP](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-app.zip) / [BIN](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-arm64.tar.gz) |
+| Android | | ✅ | [APK](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-android-arm64.apk) |
+| iPhone and iPad | | ✅ | [IPA](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa) |
 
 Every download is on the
-[latest release](https://github.com/ianmarmour/qdp/releases/latest).
-
-## Getting started
-
-1. On the computer you want to reach, start the host:
-
-   ```bash
-   qdp serve
-   ```
-
-2. On your device, open the QDP app and choose the computer. Linux computers
-   show up on their own; add Windows and Mac computers by their address. From
-   a terminal, `qdp connect ADDRESS --pair` does the same.
-3. Type the four-digit code the computer shows.
-
-From then on, the two remember each other, and connecting takes one tap.
+[latest release](https://github.com/ianmarmour/qdp/releases/latest), and our
+[installation guides](docs/README.md#installing) walk through the installation
+on each platform step by step.
 
 ## Documentation
 
