@@ -17,7 +17,6 @@ use tracing::{info, warn};
 
 use crate::clock::{now_micros, ticks_per_second};
 use crate::layout::{self, CLICK, Picture, Pixels};
-#[cfg(target_os = "linux")]
 use crate::picture::MappedFrame;
 use crate::results::Run;
 use crate::scene::Scene;
@@ -161,7 +160,6 @@ impl Screen {
         let captured = self.source.capture().map_err(|error| error.to_string())?;
         let seen = match &captured {
             CapturedFrame::Memory(frame) => self.read_frame(&**frame, at),
-            #[cfg(target_os = "linux")]
             CapturedFrame::DmaBuf(frame) => match MappedFrame::map(frame) {
                 Some(mapped) => self.read_frame(&mapped, at),
                 None => {
@@ -209,7 +207,6 @@ impl Screen {
     fn save_latest(&self, path: &Path) {
         let luma = match &self.latest {
             Some(CapturedFrame::Memory(frame)) => luma_plane(&**frame),
-            #[cfg(target_os = "linux")]
             Some(CapturedFrame::DmaBuf(frame)) => {
                 let Some(mapped) = MappedFrame::map(frame) else {
                     return;

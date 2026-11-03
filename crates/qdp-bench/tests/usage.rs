@@ -1,5 +1,7 @@
 //! The README's Usage section is `qdp-bench help`, word for word, so that the
-//! two never drift apart.
+//! two never drift apart. The benchmark runs only on Linux.
+
+#![cfg(target_os = "linux")]
 
 use std::env;
 use std::fs;
