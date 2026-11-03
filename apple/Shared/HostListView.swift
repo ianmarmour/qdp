@@ -13,7 +13,6 @@ struct HostListView: View {
     @State private var forgettingGatewayHost: GatewayHost?
     @State private var explanation: HostRow?
     @AppStorage(SettingsKey.gatewayAddress) private var gatewayAddress = ""
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let rows = store.rows
@@ -109,13 +108,8 @@ struct HostListView: View {
             } description: {
                 Text("Run qdp serve on a computer on this network, and it appears here.")
             } actions: {
-                Button(action: addByAddress) {
-                    Text("Add by Address")
-                        #if os(iOS)
-                        .foregroundStyle(Brand.onAccent(scheme))
-                        #endif
-                }
-                .buttonStyle(.borderedProminent)
+                Button("Add by Address", action: addByAddress)
+                    .buttonStyle(.borderedProminent)
             }
         } else {
             ContentUnavailableView {
@@ -136,11 +130,11 @@ struct HostListView: View {
                 explanation = row
             }
         } label: {
-            HStack(spacing: 14) {
-                HostIcon(look: Self.look(for: row.status), symbol: Self.symbol(for: row.status))
+            HStack(spacing: 12) {
+                Self.icon(Self.symbol(for: row.status), tint: Self.tint(for: row.status))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.name)
-                        .font(.body.weight(.medium))
+                        .font(.headline)
                     if !row.detail.isEmpty {
                         Text(row.detail)
                             .font(.subheadline)
@@ -172,10 +166,10 @@ struct HostListView: View {
         Button {
             open(host.stream)
         } label: {
-            HStack(spacing: 14) {
-                HostIcon(look: .online, symbol: "desktopcomputer")
+            HStack(spacing: 12) {
+                Self.icon("desktopcomputer", tint: .accentColor)
                 Text(host.name)
-                    .font(.body.weight(.medium))
+                    .font(.headline)
                 Spacer()
                 Self.chevron
             }
@@ -193,22 +187,34 @@ struct HostListView: View {
         #endif
     }
 
+    /// A host's icon: the SF Symbol `symbol` in `tint`.
+    private static func icon(_ symbol: String, tint: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.title2)
+            .foregroundStyle(tint)
+            .frame(width: iconWidth)
+    }
+
+    /// The width a host's icon takes, in points, so that the names line up.
+    private static let iconWidth: CGFloat = 32
+
     private static func symbol(for status: HostRow.Status) -> String {
         switch status {
-        case .ready, .notSeen, .resolving: "desktopcomputer"
-        case .new: "plus"
-        case .pairingOff: "lock.fill"
-        case .differentKey: "exclamationmark.shield.fill"
+        case .ready, .resolving: "desktopcomputer"
+        case .notSeen: "desktopcomputer.trianglebadge.exclamationmark"
+        case .new: "plus.circle"
+        case .pairingOff: "lock"
+        case .differentKey: "exclamationmark.shield"
         }
     }
 
-    /// How a host's icon looks.
-    private static func look(for status: HostRow.Status) -> HostIcon.Look {
+    /// The colour of a host's icon: the accent for one online, orange for
+    /// one to beware of, and grey otherwise.
+    private static func tint(for status: HostRow.Status) -> Color {
         switch status {
-        case .ready, .resolving: .online
-        case .notSeen, .pairingOff: .offline
-        case .new: .pairable
-        case .differentKey: .warning
+        case .ready: .accentColor
+        case .differentKey: .orange
+        default: .secondary
         }
     }
 

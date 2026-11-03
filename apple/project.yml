@@ -91,9 +91,6 @@ targets:
       base:
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # The icon's teal in light mode and its cream in dark mode, for
-        # every control and dialog.
-        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
 schemes:
   QDP-macOS:
     build:

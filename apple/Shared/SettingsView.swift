@@ -87,7 +87,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .brandSwitches()
         .task { clientPin = Core.clientPin }
         #if os(macOS)
         .frame(width: 520)
