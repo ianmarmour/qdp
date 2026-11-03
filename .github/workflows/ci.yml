@@ -456,12 +456,6 @@ jobs:
           | Gateway Debian package (x86-64; Debian 12 or later, Ubuntu 22.04 or later) | \`qdp-gateway-linux-x86_64.deb\` |
           | Gateway installer for Windows (x86-64; Windows Server 2019 or later) | \`qdp-gateway-windows-x64.msi\` |
           | Gateway for Windows, without installing (x86-64) | \`qdp-gateway-windows-x86_64.zip\` |
-
-          The newest build is always at
-          \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/FILE\`.
-          The Mac app and \`qdp\` are not notarized yet: open the app once from
-          Privacy & Security settings, and run \`xattr -d com.apple.quarantine qdp\`
-          before \`qdp\`.
           NOTES
           gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "$title" --notes-file notes.md --generate-notes
