@@ -47,21 +47,6 @@ Every download is on the
 [installation guides](docs/README.md#installing) walk through the installation
 on each platform step by step.
 
-## Getting started
-
-1. On the computer you want to reach, start the host:
-
-   ```bash
-   qdp serve
-   ```
-
-2. On your device, open the QDP app and choose the computer. Linux computers
-   show up on their own; add Windows and Mac computers by their address. From
-   a terminal, `qdp connect ADDRESS --pair` does the same.
-3. Type the four-digit code the computer shows.
-
-From then on, the two remember each other, and connecting takes one tap.
-
 ## Documentation
 
 - [Sharing a computer](docs/hosting.md): pairing, platform setup, video,
