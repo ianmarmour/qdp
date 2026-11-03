@@ -1,15 +1,15 @@
 #!/bin/bash
 # Runs inside the benchmark container: builds QDP and qdp-bench from the
-# checkout in /src, starts the host's and the client's headless GNOME
-# sessions, and measures each protocol over each network profile, in an
-# order that rotates each round. Results and a report go to /results.
+# checkout in /src, then measures each protocol over each network profile,
+# in an order that rotates each round, between a host's and a client's
+# headless GNOME sessions. Results and a report go to /results.
 set -euo pipefail
 
 size=${QDP_BENCH_SIZE:-1920x1080}
 seconds=${QDP_BENCH_SECONDS:-30}
 rounds=${QDP_BENCH_ROUNDS:-3}
-read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp}"
-read -ra profiles <<< "${QDP_BENCH_PROFILES:-lan}"
+read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp rdp vnc}"
+read -ra profiles <<< "${QDP_BENCH_PROFILES:-lan wan}"
 
 results=/results
 logs=$results/logs
@@ -17,9 +17,17 @@ runs=$results/runs
 state=/run/bench
 mkdir -p "$logs" "$runs"
 
+# The credentials the RDP and VNC viewers sign in with; VNC's passwords
+# have at most eight characters.
+user=bench
+password=benchpas
+
 cd /src
 cargo build --release --locked -p qdp-cli -p qdp-bench
 bin=$CARGO_TARGET_DIR/release
+
+# The X11 display of the client's session, once it has one.
+client_x11=""
 
 # Prints the environment of session $1. Its pointer has GNOME's cursors, as
 # a desktop's does: a host takes a pointer kept hidden over an application
@@ -28,6 +36,17 @@ session_env() {
     echo "HOME=$state/$1 XDG_RUNTIME_DIR=$state/$1" \
         "DBUS_SESSION_BUS_ADDRESS=unix:path=$state/$1/bus WAYLAND_DISPLAY=wayland-0" \
         "XCURSOR_THEME=Adwaita XCURSOR_SIZE=24"
+    if [ "$1" = client ]; then
+        echo "$client_x11"
+    fi
+}
+
+# Runs a command in session $1.
+in_session() {
+    local name=$1
+    shift
+    # shellcheck disable=SC2046 # The environment splits into its variables.
+    env $(session_env "$name") "$@"
 }
 
 # Starts a command in session $1, logging to $2, and sets $pid to its
@@ -35,7 +54,7 @@ session_env() {
 spawn() {
     local name=$1 log=$2
     shift 2
-    # shellcheck disable=SC2046 # The environment splits into its variables.
+    # shellcheck disable=SC2046
     env $(session_env "$name") "$@" &> "$log" &
     pid=$!
 }
@@ -58,88 +77,206 @@ wait_for() {
     return 1
 }
 
-# Starts headless GNOME session $1: its own D-Bus session bus, PipeWire and
-# WirePlumber, and Mutter with one virtual monitor.
+# The processes of each running session.
+declare -A session_pids
+
+# Starts headless GNOME session $1, afresh: its own D-Bus session bus,
+# PipeWire, WirePlumber and Mutter. With $2 "monitor", Mutter has a virtual
+# monitor of the benchmark's size; with "none", it has none until a remote
+# desktop server makes one. With $3 "x11", X11 applications run in it too.
 start_session() {
-    local name=$1
+    local name=$1 monitor=$2 x11=$3
+    local mutter=(mutter --headless --wayland)
+    if [ "$monitor" = monitor ]; then
+        mutter+=(--virtual-monitor "$size")
+    fi
+    if [ "$x11" != x11 ]; then
+        mutter+=(--no-x11)
+    fi
+    rm -rf "${state:?}/$name"
     mkdir -p -m 700 "$state/$name"
-    spawn "$name" "$logs/$name-dbus.log" \
+    local log=$logs/$name
+    spawn "$name" "$log-dbus.log" \
         dbus-daemon --session --nofork --address="unix:path=$state/$name/bus"
+    local pids=("$pid")
     wait_for test -S "$state/$name/bus"
-    spawn "$name" "$logs/$name-pipewire.log" pipewire
+    spawn "$name" "$log-pipewire.log" pipewire
+    pids+=("$pid")
     wait_for test -S "$state/$name/pipewire-0"
-    spawn "$name" "$logs/$name-wireplumber.log" wireplumber
-    spawn "$name" "$logs/$name-mutter.log" \
-        mutter --headless --virtual-monitor "$size" --wayland --no-x11
-    # shellcheck disable=SC2046
-    wait_for env $(session_env "$name") gdbus introspect --session \
+    spawn "$name" "$log-wireplumber.log" wireplumber
+    pids+=("$pid")
+    spawn "$name" "$log-mutter.log" "${mutter[@]}"
+    pids+=("$pid")
+    session_pids[$name]="${pids[*]}"
+    wait_for in_session "$name" gdbus introspect --session \
         --dest org.gnome.Mutter.ScreenCast --object-path /org/gnome/Mutter/ScreenCast
+    if [ "$x11" = x11 ]; then
+        wait_for compgen -G "$state/$name/.mutter-Xwaylandauth.*"
+        local authority
+        authority=$(compgen -G "$state/$name/.mutter-Xwaylandauth.*" | head -1)
+        client_x11="DISPLAY=:0 XAUTHORITY=$authority"
+    fi
 }
 
-# Sets the network that the host and the client talk over to profile $1.
+# Stops session $1.
+stop_session() {
+    # shellcheck disable=SC2086 # The IDs split into words.
+    stop ${session_pids[$1]}
+}
+
+# Returns whether session $1 has a monitor.
+has_monitor() {
+    in_session "$1" gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+        --object-path /org/gnome/Mutter/DisplayConfig \
+        --method org.gnome.Mutter.DisplayConfig.GetCurrentState | grep -q "'Meta-"
+}
+
+# Sets the network that the host and the client talk over to profile $1:
+# its delay applies each way.
 apply_profile() {
     tc qdisc del dev lo root 2> /dev/null || true
+    local netem
     case $1 in
-        lan) ;;
+        lan) return 0 ;;
+        wan) netem=(delay 15ms) ;;
+        lossy) netem=(delay 15ms loss 1%) ;;
         *)
             echo "unknown network profile $1" >&2
             return 1
             ;;
     esac
+    if ! tc qdisc add dev lo root netem "${netem[@]}"; then
+        echo "the $1 profile needs the sch_netem kernel module: sudo modprobe sch_netem" >&2
+        return 1
+    fi
 }
 
-# Starts the server and the viewer of protocol $1, setting $processes to
-# them, as the measurer's options, and $pids to their process IDs. The local
-# baseline has neither: a probe on the client's own screen stands in.
+# Starts GNOME's remote desktop server in the host's session, serving
+# protocol $1, rdp or vnc, and sets $pid to it. Headless, it gives each
+# client a monitor of its own.
+start_gnome_remote_desktop() {
+    local kind=$1
+    if [ "$kind" = rdp ]; then
+        local tls=$state/host/tls
+        mkdir -p "$tls"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=bench \
+            -keyout "$tls/key.pem" -out "$tls/cert.pem" &> /dev/null
+        in_session host grdctl --headless rdp set-tls-cert "$tls/cert.pem" &> /dev/null
+        in_session host grdctl --headless rdp set-tls-key "$tls/key.pem" &> /dev/null
+        in_session host grdctl --headless rdp set-credentials "$user" "$password" &> /dev/null
+    else
+        in_session host grdctl --headless vnc set-auth-method password &> /dev/null
+        in_session host grdctl --headless vnc set-password "$password" &> /dev/null
+    fi
+    in_session host gsettings set "org.gnome.desktop.remote-desktop.$kind" view-only false
+    in_session host gsettings set "org.gnome.desktop.remote-desktop.$kind.headless" \
+        negotiate-port false
+    in_session host gsettings set "org.gnome.desktop.remote-desktop.$kind.headless" enable true
+    local port=3389
+    if [ "$kind" = vnc ]; then
+        port=5900
+    fi
+    spawn host "$log-server.log" /usr/lib/gnome-remote-desktop-daemon --headless
+    local server=$pid
+    wait_for bash -c "ss -ltn | grep -q ':$port '"
+    pid=$server
+}
+
+# Starts what protocol $1 needs: a host's session with the probe on its
+# screen, the protocol's server there, and its viewer full screen on the
+# client's screen. Sets $processes to the server and the viewer, as the
+# measurer's options, and $pids to every process to stop afterwards. The
+# local baseline has neither: a probe on the client's own screen stands in.
 start_protocol() {
-    local log=$logs/$profile-$1-$round
+    log=$logs/$profile-$1-$round
+    local server viewer probe
     case $1 in
         local)
             spawn client "$log-probe.log" "$bin/qdp-bench" probe
             processes=() pids=("$pid")
+            return 0
             ;;
         qdp)
+            start_session host monitor no-x11
+            spawn host "$log-probe.log" "$bin/qdp-bench" probe
+            probe=$pid
             spawn host "$log-server.log" "$bin/qdp" serve --source gnome --token bench \
                 --listen 127.0.0.1:4433 --identity "$state/host/qdp" \
                 --advertise off --pairing off
-            local server=$pid
+            server=$pid
             wait_for grep -q 'pin="' "$log-server.log"
             local pin
             pin=$(grep -o 'pin="[0-9a-f]*"' "$log-server.log" | head -1 | cut -d'"' -f2)
             QDP_TOKEN=bench spawn client "$log-viewer.log" "$bin/qdp" connect 127.0.0.1:4433 \
                 --pin "$pin" --full-screen --identity "$state/client/qdp"
-            processes=(--process "server=$server" --process "viewer=$pid")
-            pids=("$pid" "$server")
+            viewer=$pid
+            ;;
+        rdp | vnc)
+            # The server's monitor appears once the viewer connects, and
+            # the probe goes on it.
+            start_session host none no-x11
+            start_gnome_remote_desktop "$1"
+            server=$pid
+            # FreeRDP's Wayland viewer, full screen; its SDL viewer leaves
+            # its window's input unread here. TigerVNC's viewer runs through
+            # Xwayland in a window: full screen, it never shows. The
+            # measurer finds the probe in either. Neither shares the
+            # clipboard, as GNOME's RDP server would need FUSE for it.
+            if [ "$1" = rdp ]; then
+                spawn client "$log-viewer.log" wlfreerdp3 /v:127.0.0.1 \
+                    "/u:$user" "/p:$password" /cert:ignore /f -clipboard
+            else
+                vncpasswd -f <<< "$password" > "$state/client/vncpasswd"
+                spawn client "$log-viewer.log" vncviewer \
+                    -PasswordFile "$state/client/vncpasswd" 127.0.0.1::5900
+            fi
+            viewer=$pid
+            wait_for has_monitor host
+            spawn host "$log-probe.log" "$bin/qdp-bench" probe
+            probe=$pid
             ;;
         *)
             echo "unknown protocol $1" >&2
             return 1
             ;;
     esac
+    processes=(--process "server=$server" --process "viewer=$viewer")
+    pids=("$viewer" "$server" "$probe")
 }
 
-start_session host
-start_session client
-spawn host "$logs/probe.log" "$bin/qdp-bench" probe
+# Stops what protocol $1 started.
+stop_protocol() {
+    stop "${pids[@]}"
+    if [ "$1" != local ]; then
+        stop_session host
+    fi
+}
+
+start_session client monitor x11
 
 for round in $(seq "$rounds"); do
     for profile in "${profiles[@]}"; do
-        apply_profile "$profile"
+        if ! apply_profile "$profile"; then
+            echo "skipping the $profile profile" >&2
+            continue
+        fi
         # Each round starts one protocol later, so that none always runs
         # first or last.
         count=${#protocols[@]}
         for index in $(seq 0 $((count - 1))); do
             protocol=${protocols[$(((index + round - 1) % count))]}
             echo "round $round, $profile: $protocol"
-            start_protocol "$protocol"
             measured=0
-            # shellcheck disable=SC2046
-            env $(session_env client) "$bin/qdp-bench" measure \
-                --protocol "$protocol" --profile "$profile" --round "$round" \
-                --seconds "$seconds" "${processes[@]}" \
-                --out "$runs/$profile-$protocol-$round.toml" \
-                &> "$logs/$profile-$protocol-$round-measure.log" || measured=$?
-            stop "${pids[@]}"
+            if start_protocol "$protocol"; then
+                in_session client "$bin/qdp-bench" measure \
+                    --protocol "$protocol" --profile "$profile" --round "$round" \
+                    --seconds "$seconds" "${processes[@]}" \
+                    --out "$runs/$profile-$protocol-$round.toml" \
+                    &> "$log-measure.log" || measured=$?
+            else
+                measured=1
+            fi
+            stop_protocol "$protocol"
             if [ "$measured" != 0 ]; then
                 echo "measuring $protocol over $profile failed; see $logs" >&2
             fi
@@ -158,6 +295,8 @@ apply_profile lan
     echo "- CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ //')"
     echo "- GPU: $(cat /sys/class/drm/renderD*/device/uevent 2> /dev/null \
         | grep -m1 PCI_ID | cut -d= -f2 || echo none)"
+    echo "- QDP's encoder: $(grep -ho 'encoder="[^"]*"' "$logs"/*-qdp-*-server.log 2> /dev/null \
+        | head -1 | cut -d'"' -f2 || echo unknown)"
     echo "- Screen: $size, $seconds seconds a run, $rounds rounds"
     echo "- Packages: $(pacman -Q mutter gnome-remote-desktop freerdp tigervnc mesa \
         | tr '\n' ',' | sed 's/,$//; s/,/, /g')"

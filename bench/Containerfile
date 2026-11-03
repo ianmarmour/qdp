@@ -14,6 +14,7 @@ RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT}/\$repo/os/\$a
         clang \
         freerdp \
         gnome-remote-desktop \
+        intel-media-driver \
         iproute2 \
         mesa \
         mutter \
@@ -22,6 +23,8 @@ RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT}/\$repo/os/\$a
         rustup \
         tigervnc \
         ttf-dejavu \
+        vulkan-intel \
+        vulkan-radeon \
         wireplumber \
         xorg-xwayland \
     && pacman -Scc --noconfirm \
