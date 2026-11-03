@@ -38,9 +38,9 @@ use qdp_runtime::{
     Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
     ClipboardDirections, DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource,
     GatewayFailure, GatewayRoute, GatewayTrust, HostAudio, HostAuthenticator, HostDesktop,
-    HostOptions, InputQueue, OpenedDesktop, Pairing, PairingEvent, PairingOutcome, PairingPrompt,
-    ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt, TestPattern, Tunnel,
-    gateway_verification, open_tunnel,
+    HostOptions, InputInjector, InputQueue, OpenedDesktop, Pairing, PairingEvent, PairingOutcome,
+    PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt, TestPattern,
+    Tunnel, gateway_verification, open_tunnel,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -361,8 +361,16 @@ async fn serve(args: ServeArgs) -> CliResult {
     // so that no input device exists for a client that has not
     // authenticated; each session opens its own injector once its client
     // has (Section 11.2).
-    let input_classes =
-        qdp_runtime::input_classes(&*qdp_desktop::input_injector(1, 1), args.passthrough);
+    let input_classes = {
+        let probe = match args.source {
+            SourceKind::Gnome => qdp_desktop::gnome_probe_injector(),
+            SourceKind::Auto
+            | SourceKind::Screen
+            | SourceKind::Console
+            | SourceKind::TestPattern => qdp_desktop::input_injector(1, 1),
+        };
+        qdp_runtime::input_classes(&*probe, args.passthrough)
+    };
 
     let admission = Admission::default();
     let mut sessions = JoinSet::new();
@@ -537,7 +545,11 @@ async fn open_desktop(
     local: LocalUser,
     peer: SocketAddr,
 ) -> Result<OpenedDesktop, RuntimeError> {
-    let (source, streamed) = open_source(kind, size, state_directory, screen)
+    let OpenedSource {
+        source,
+        streamed,
+        injector,
+    } = open_source(kind, size, state_directory, screen)
         .await
         .map_err(RuntimeError::Capture)?;
     if streamed == Streamed::Screen {
@@ -546,8 +558,10 @@ async fn open_desktop(
             .await
             .map_err(|error| RuntimeError::Capture(format!("privacy was asked for: {error}")))?;
     }
-    let (width, height) = source.size();
-    let injector = qdp_desktop::input_injector(width as u32, height as u32);
+    let injector = injector.unwrap_or_else(|| {
+        let (width, height) = source.size();
+        qdp_desktop::input_injector(width as u32, height as u32)
+    });
     let lock = match (streamed, lock) {
         (Streamed::Screen, LockPolicy::Lock) => Some(Box::new(lock_desktop) as DesktopLock),
         (Streamed::TestPattern, _) | (_, LockPolicy::Leave) => None,
@@ -696,36 +710,71 @@ enum Streamed {
     TestPattern,
 }
 
+/// What a session streams, opened.
+struct OpenedSource {
+    /// Its frames.
+    source: Box<dyn FrameSource>,
+    /// What they show.
+    streamed: Streamed,
+    /// The injector that performs input on it, for a source that comes with
+    /// one; the platform's otherwise.
+    injector: Option<Box<dyn InputInjector>>,
+}
+
+impl OpenedSource {
+    /// Returns `source`, showing `streamed`, which the platform's injector
+    /// performs input on.
+    fn new(source: Box<dyn FrameSource>, streamed: Streamed) -> Self {
+        Self {
+            source,
+            streamed,
+            injector: None,
+        }
+    }
+}
+
 /// Opens what a session streams: the screen, which takes the client's
-/// display and delivers frames as `screen` says, the console, or a `size`
-/// test pattern. Capturing the screen can wait for the user to choose a
-/// monitor, and the console for a display to show a picture, so they open
-/// on a blocking thread.
+/// display and delivers frames as `screen` says, the console, a GNOME
+/// desktop with its input, or a `size` test pattern. Capturing the screen
+/// can wait for the user to choose a monitor, and the console for a display
+/// to show a picture, so they open on a blocking thread.
 async fn open_source(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
     screen: ScreenOptions,
-) -> Result<(Box<dyn FrameSource>, Streamed), String> {
+) -> Result<OpenedSource, String> {
     let test_pattern = || {
         let pattern = Box::new(TestPattern::new(size.0, size.1)) as Box<dyn FrameSource>;
-        (pattern, Streamed::TestPattern)
+        OpenedSource::new(pattern, Streamed::TestPattern)
     };
-    if kind == SourceKind::TestPattern {
-        return Ok(test_pattern());
-    }
-    if kind == SourceKind::Console {
-        let console = tokio::task::spawn_blocking(move || qdp_desktop::open_console(screen))
-            .await
-            .map_err(|error| error.to_string())??;
-        return Ok((console, Streamed::Screen));
+    match kind {
+        SourceKind::TestPattern => return Ok(test_pattern()),
+        SourceKind::Console => {
+            let console = tokio::task::spawn_blocking(move || qdp_desktop::open_console(screen))
+                .await
+                .map_err(|error| error.to_string())??;
+            return Ok(OpenedSource::new(console, Streamed::Screen));
+        }
+        SourceKind::Gnome => {
+            let (source, injector) =
+                tokio::task::spawn_blocking(move || qdp_desktop::open_gnome(screen))
+                    .await
+                    .map_err(|error| error.to_string())??;
+            return Ok(OpenedSource {
+                source,
+                streamed: Streamed::Screen,
+                injector: Some(injector),
+            });
+        }
+        SourceKind::Auto | SourceKind::Screen => {}
     }
     let screen =
         tokio::task::spawn_blocking(move || qdp_desktop::open_screen(&state_directory, screen))
             .await
             .map_err(|error| error.to_string())?;
     match (screen, kind) {
-        (Ok(screen), _) => Ok((screen, Streamed::Screen)),
+        (Ok(screen), _) => Ok(OpenedSource::new(screen, Streamed::Screen)),
         (Err(error), SourceKind::Auto) => {
             warn!(%error, "streaming a test pattern instead of the screen");
             Ok(test_pattern())

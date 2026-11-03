@@ -25,10 +25,12 @@ notifications = ["dep:tokio", "dep:zbus"]
 # Captures the client's gamepads. On Linux it needs libudev's development
 # files to build.
 gamepad = ["dep:gilrs"]
-# Captures the screen on Linux through the ScreenCast portal and PipeWire.
-# Building it needs PipeWire's development files and libclang.
+# Captures the screen on Linux through the ScreenCast portal and PipeWire,
+# or Mutter's remote desktop interface. Building it needs PipeWire's
+# development files and libclang.
 screen-capture = [
     "dep:ashpd",
+    "dep:futures-lite",
     "dep:pipewire",
     "dep:tokio",
     "dep:wayland-client",
@@ -36,6 +38,7 @@ screen-capture = [
     "dep:wayland-scanner",
     "dep:bitflags",
     "dep:wayland-protocols-wlr",
+    "dep:zbus",
 ]
 
 [dependencies]

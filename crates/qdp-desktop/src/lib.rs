@@ -7,7 +7,9 @@
 //!   and PipeWire, and can change its mode and interface scale to the
 //!   client's display, and `UinputInjector` creates virtual keyboard, mouse
 //!   and pointer devices through uinput, which works under every Wayland
-//!   compositor and X11 server.
+//!   compositor and X11 server. [`open_gnome`] shares a GNOME desktop,
+//!   headless ones included, through Mutter's remote desktop interface,
+//!   without asking anybody.
 //! - macOS: `MacScreenCapture` captures the main display with
 //!   ScreenCaptureKit, and `QuartzInjector` posts Quartz events.
 //! - Windows: `DesktopDuplication` captures the primary monitor with DXGI
@@ -185,6 +187,10 @@ pub struct ScreenOptions {
     pub frames: FrameMemory,
 }
 
+/// A desktop shared together with its input: its frames, and an injector
+/// performing the client's input on it.
+pub type SharedDesktop = (Box<dyn FrameSource>, Box<dyn InputInjector>);
+
 /// Puts back the monitor settings that an earlier host, which stopped
 /// without putting them back, saved in `state_directory`.
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
@@ -272,6 +278,40 @@ pub fn open_console(options: ScreenOptions) -> Result<Box<dyn FrameSource>, Stri
 #[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
 pub fn open_console(_options: ScreenOptions) -> Result<Box<dyn FrameSource>, String> {
     Err("console capture is only available on Linux".to_owned())
+}
+
+/// Starts sharing a GNOME desktop through Mutter's remote desktop
+/// interface, which asks nobody, so a headless one can be shared: its
+/// primary monitor, delivering frames as `options` asks, and an injector
+/// performing the client's input there. The monitor keeps its own display.
+/// Blocks until the first frame arrives.
+#[cfg(all(target_os = "linux", feature = "screen-capture"))]
+pub fn open_gnome(options: ScreenOptions) -> Result<SharedDesktop, String> {
+    if options.matching == DisplayMatching::On {
+        warn!("a GNOME desktop shared this way keeps its own display");
+    }
+    linux::open_gnome(options)
+}
+
+/// Starts sharing a GNOME desktop; only Linux hosts can.
+#[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
+pub fn open_gnome(_options: ScreenOptions) -> Result<SharedDesktop, String> {
+    Err("sharing a GNOME desktop is only available on Linux".to_owned())
+}
+
+/// Returns an injector accepting what [`open_gnome`]'s does, which performs
+/// nothing, so that a host finds out what input it accepts before any
+/// session opens one.
+#[cfg(all(target_os = "linux", feature = "screen-capture"))]
+pub fn gnome_probe_injector() -> Box<dyn InputInjector> {
+    Box::new(linux::gnome_probe_injector())
+}
+
+/// Returns an injector accepting what [`open_gnome`]'s does; only Linux
+/// hosts have one, so it accepts nothing beyond the basics.
+#[cfg(not(all(target_os = "linux", feature = "screen-capture")))]
+pub fn gnome_probe_injector() -> Box<dyn InputInjector> {
+    Box::new(NoInput)
 }
 
 /// Starts capturing the screen; this platform cannot yet.

@@ -59,10 +59,12 @@ Serve options:
                        in the identity directory (default on)
   --advertise on|off   Advertise this host on the local network with DNS-SD,
                        so that clients list it (default on)
-  --source KIND        auto, screen, console or test-pattern (default auto: the
-                       screen, or the test pattern if it cannot be captured);
-                       console streams what the graphics card shows, the
-                       login and lock screens included (Linux, as root)
+  --source KIND        auto, screen, console, gnome or test-pattern (default
+                       auto: the screen, or the test pattern if it cannot be
+                       captured); console streams what the graphics card
+                       shows, the login and lock screens included (Linux, as
+                       root); gnome shares a GNOME desktop, headless ones
+                       included, without asking anyone to allow it (Linux)
   --size WIDTHxHEIGHT  Size of the test pattern (default 1280x720)
   --match-display on|off
                        Change the streamed monitor's resolution and scale to

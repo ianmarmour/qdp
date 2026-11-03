@@ -4,7 +4,8 @@
 //!   uses `unsafe`: each block states the contract it relies on.
 //! - Screen capture: the ScreenCast portal and PipeWire, or, for a host
 //!   running as root, the console's framebuffers through DRM, an `ioctl`
-//!   interface too.
+//!   interface too. A GNOME desktop can also be shared, input included,
+//!   through Mutter's own remote desktop interface, which asks nobody.
 //! - Audio: PipeWire.
 
 #![allow(unsafe_code)]
@@ -30,6 +31,8 @@ mod keycodes;
 mod kms;
 #[cfg(feature = "screen-capture")]
 mod monitor_matching;
+#[cfg(feature = "screen-capture")]
+mod mutter;
 #[cfg(feature = "notifications")]
 pub(crate) mod notifications;
 mod pen;
@@ -50,6 +53,8 @@ mod wlr_displays;
 pub use audio::{PipeWireInput, PipeWireOutput};
 #[cfg(feature = "screen-capture")]
 pub use kms::ConsoleCapture;
+#[cfg(feature = "screen-capture")]
+pub use mutter::{open_gnome, probe_injector as gnome_probe_injector};
 #[cfg(feature = "screen-capture")]
 pub use screencast::ScreenCapture;
 pub use uinput::UinputInjector;
