@@ -151,11 +151,10 @@ jobs:
 
       - name: Package as an RPM and a Debian package
         if: github.event_name == 'push'
-        # A version tag is the version's first release; a build of main is
-        # numbered by its run, so that each upgrades the last.
+        # A version's packages are its first release.
         run: |
           sudo apt-get install -y --no-install-recommends rpm
-          if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
+          release=1
           packaging/linux/build-rpm.sh target/release/qdp "$release" qdp-linux-x86_64.rpm
           packaging/linux/build-deb.sh qdp target/release/qdp "$release" qdp-linux-x86_64.deb
 
@@ -177,7 +176,7 @@ jobs:
           cargo build --release --locked -p qdp-gtk
           packaging/linux/stage-gtk.sh target/release/qdp-gtk qdp-gtk-stage
           tar -czf qdp-gtk-linux-x86_64.tar.gz -C qdp-gtk-stage bin share
-          if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
+          release=1
           packaging/linux/build-gtk-rpm.sh target/release/qdp-gtk "$release" qdp-gtk-linux-x86_64.rpm
 
       - uses: actions/upload-artifact@v4
@@ -194,7 +193,7 @@ jobs:
         run: |
           cargo build --release --locked -p qdp-gateway
           tar -czf qdp-gateway-linux-x86_64.tar.gz -C target/release qdp-gateway
-          if [ "$GITHUB_REF_TYPE" = tag ]; then release=1; else release="$GITHUB_RUN_NUMBER"; fi
+          release=1
           packaging/linux/build-gateway-rpm.sh target/release/qdp-gateway "$release" \
             qdp-gateway-linux-x86_64.rpm
           packaging/linux/build-deb.sh qdp-gateway target/release/qdp-gateway "$release" \
@@ -404,17 +403,13 @@ jobs:
 
   release:
     name: Release
-    # Every version tag is released once all the builds passed; runs started
-    # by hand are not. While main's pushes start no run, the numbered builds
-    # below are not made; adding main back to the push trigger restores them.
+    # Every version tag is released, titled by its version, once all the
+    # builds passed; runs started by hand are not.
     if: github.event_name == 'push'
     needs: [linux, windows, macos, android, apple, windows-app, windows-gateway]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    env:
-      # How many numbered builds are kept; versions are all kept.
-      KEPT_BUILDS: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -428,32 +423,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          tag="$GITHUB_REF_NAME"
+          # The tag's annotation is the release's description, above the
+          # changelog GitHub writes. Checkout fetches the tag without its
+          # annotation, so fetch the tag itself.
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           : > notes.md
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            tag="$GITHUB_REF_NAME"
-            title="QDP ${GITHUB_REF_NAME#v}"
-            # The tag's annotation is the release's description, above the
-            # changelog GitHub writes. Checkout fetches the tag without its
-            # annotation, so fetch the tag itself.
-            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
-            if [ "$(git cat-file -t "refs/tags/$tag")" = tag ]; then
-              git for-each-ref "refs/tags/$tag" \
-                --format='%(contents:subject)%0a%0a%(contents:body)' > notes.md
-            fi
-          else
-            tag="build-$GITHUB_RUN_NUMBER"
-            title="QDP $version, build $GITHUB_RUN_NUMBER"
+          if [ "$(git cat-file -t "refs/tags/$tag")" = tag ]; then
+            git for-each-ref "refs/tags/$tag" \
+              --format='%(contents:subject)%0a%0a%(contents:body)' > notes.md
           fi
           gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$title" --notes-file notes.md --generate-notes
-
-      - name: Remove old builds
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' \
-            | grep '^build-[0-9]*$' | sort -t- -k2 -n -r | tail -n +$((KEPT_BUILDS + 1)) \
-            | while read -r old; do
-                gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-              done
+            --title "QDP ${tag#v}" --notes-file notes.md --generate-notes
