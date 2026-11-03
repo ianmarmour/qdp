@@ -81,7 +81,7 @@ The host streams a test pattern when it can't capture the screen:
 - **Linux:** the host needs a desktop with the ScreenCast portal (GNOME, KDE
   Plasma and wlroots compositors provide it), and the monitor chosen in the
   portal's dialog. To stream outside a desktop session, as at the login
-  screen, use [`--source console`](hosting.md#streaming-the-login-screen).
+  screen, use [`--source console`](setup/hosting.md#streaming-the-login-screen).
 - **macOS:** allow Screen Recording for the terminal or app running `qdp`,
   under System Settings, Privacy & Security.
 - **Windows:** unless the host runs as SYSTEM, it holds the last image while
@@ -91,7 +91,7 @@ The host streams a test pattern when it can't capture the screen:
 
 - **Linux:** the host needs write access to `/dev/uinput`, and logs a warning
   without it. The packages grant it; otherwise follow
-  [the manual setup](install/linux.md#input-without-the-packages), then log
+  [the manual setup](setup/linux.md#input-without-the-packages), then log
   out and in again.
 - **macOS:** allow Accessibility for the terminal or app running `qdp`, under
   System Settings, Privacy & Security.
@@ -99,7 +99,7 @@ The host streams a test pattern when it can't capture the screen:
   runs as administrator too, nor the sign-in and lock screens unless it runs
   as SYSTEM in the console's session.
 - **Gamepads and touch** reach only the hosts that accept them: see
-  [Hosting](hosting.md#input).
+  [Sharing a computer](setup/hosting.md#input).
 
 ## Video is slow or uses too much processor
 
@@ -126,6 +126,6 @@ The host streams a test pattern when it can't capture the screen:
 - **Mac:** the app and the `qdp` command aren't notarized yet. Open the app
   once from System Settings, Privacy & Security, and run
   `xattr -d com.apple.quarantine qdp` before running `qdp`. See
-  [Installing on a Mac](install/macos.md).
+  [Installing on a Mac](setup/macos.md).
 - **Android:** if a newer APK won't install over the old one, it's signed with
   a different key: uninstall the app first.

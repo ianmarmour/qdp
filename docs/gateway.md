@@ -1,4 +1,4 @@
-# The QDP gateway
+# Gateway Setup
 
 `qdp-gateway` lets people outside an organization's network reach the QDP
 hosts inside it through one public endpoint. Most people don't need it: it's
@@ -132,7 +132,7 @@ in `directory-password` beside it, and start the service.
 
 In the apps, set the gateway in their settings and add computers by their ID
 on the gateway or their name inside the network: see
-[Connecting](connecting.md#through-your-organizations-gateway).
+[Using the apps](setup/apps.md#through-your-organizations-gateway).
 
 With the `qdp` command, name the host and the gateway:
 

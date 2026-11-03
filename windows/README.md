@@ -7,8 +7,8 @@ x86-64. It's a WinUI 3 app in C#, around a Rust core,
 the core's render thread with a flip-model swap chain, so that in full screen
 the system hands it to the display without composing it.
 
-To install and use it, see [Installing on Windows](../docs/install/windows.md)
-and [Connecting](../docs/connecting.md#windows).
+To install and use it, see [Installing on Windows](../docs/setup/windows.md)
+and [Using the apps](../docs/setup/apps.md#windows).
 
 ## Building
 

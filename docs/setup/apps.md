@@ -1,4 +1,4 @@
-# Connecting to a computer
+# Using the apps
 
 A **client** shows a host's desktop and sends it your keyboard, mouse, touch
 and controllers. QDP has an app for each platform, and the `qdp connect`
@@ -29,7 +29,7 @@ To forget a paired computer, use its menu in the list.
 A computer that isn't on the local network, such as one reached over a VPN,
 can be added by its address. Apps also accept a host's key pin and a token
 instead of pairing, for hosts set up that way (see
-[Hosting](hosting.md#other-ways-to-sign-in)).
+[Sharing a computer](hosting.md#other-ways-to-sign-in)).
 
 ## The apps
 
@@ -123,7 +123,7 @@ so the [command line's](#the-command-line) keys and options apply.
 ## Through your organization's gateway
 
 An organization can let you reach computers inside its network through a
-[QDP gateway](gateway.md). To use one:
+[QDP gateway](../gateway.md). To use one:
 
 1. In the app's settings, enter the gateway's address and your user name, as
    your administrator gives them, and its key pin if they give one.
@@ -233,7 +233,7 @@ A Linux client can pass a HID device through to the host as it is, with
 `--passthrough VENDOR:PRODUCT`, the IDs `lsusb` shows, such as `054c:09cc`.
 It needs read and write access to the device's `/dev/hidraw*` node, as the
 udev rules for game controllers grant. The host decides which devices it
-accepts: see [Hosting](hosting.md#input).
+accepts: see [Sharing a computer](hosting.md#input).
 
 ### Without a window
 
@@ -249,7 +249,7 @@ and most players open. `--frames N` disconnects after N frames.
 | `--token TOKEN` | Authenticate with a token; without it, a token in `QDP_TOKEN`, which other users can't read as they can a command line |
 | `--user NAME` | Authenticate as NAME with the password in `QDP_PASSWORD` |
 | `--identity DIR` | Directory holding this client's key, paired hosts and gateway sign-ins (default `./qdp-client-identity`) |
-| `--gateway ADDRESS` | Reach the host through a gateway: see [the gateway guide](gateway.md#connecting-through-it) |
+| `--gateway ADDRESS` | Reach the host through a gateway: see [the gateway guide](../gateway.md#connecting-through-it) |
 | `--gateway-pin PIN` | The gateway's key pin, where its certificate isn't from a trusted certificate authority |
 | `--server-name NAME` | Name sent in the TLS handshake (default `qdp-host`) |
 
@@ -258,9 +258,9 @@ and most players open. `--frames N` disconnects after N frames.
 - `qdp discover` lists the hosts advertising on the local network, with their
   addresses and whether they offer pairing. With `--watch`, it writes a line
   as each comes and goes, until its standard input closes, for an app to
-  follow ([the lines](../crates/qdp-cli/src/discover.rs)).
+  follow ([the lines](../../crates/qdp-cli/src/discover.rs)).
 - `qdp connect --events` reports the session's progress on standard output,
   as lines such as `connected`, `pair first`, `paired PIN` and
-  `failed ERROR` ([the events](../crates/qdp-app/src/events.rs)), and reads
+  `failed ERROR` ([the events](../../crates/qdp-app/src/events.rs)), and reads
   the code the host shows from standard input after each `pair` line. The
   Linux app drives `qdp connect` this way.

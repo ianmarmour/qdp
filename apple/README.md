@@ -6,9 +6,9 @@ later. On iPhone and iPad the app is called Quick Desktop. Both apps share
 one Rust core, [`qdp-apple`](../crates/qdp-apple/README.md), which they call
 through C.
 
-To install and use them, see [Installing on a Mac](../docs/install/macos.md),
-[Installing on iPhone and iPad](../docs/install/iphone-ipad.md) and
-[Connecting](../docs/connecting.md#the-apps).
+To install and use them, see [Installing on a Mac](../docs/setup/macos.md),
+[Installing on iPhone and iPad](../docs/setup/iphone-ipad.md) and
+[Using the apps](../docs/setup/apps.md#the-apps).
 
 ## Setting up
 

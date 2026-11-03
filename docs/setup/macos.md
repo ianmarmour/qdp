@@ -35,7 +35,7 @@ Move `qdp` to a folder on your `PATH`, such as `/usr/local/bin`.
 
 The first time a device connects, macOS asks to allow **Screen Recording**
 and **Accessibility** for the terminal or app running `qdp`, under System
-Settings, Privacy & Security. [Hosting](../hosting.md#macos) explains why.
+Settings, Privacy & Security. [Sharing a computer](hosting.md#macos) explains why.
 
 ## Hardware
 
@@ -50,5 +50,5 @@ On an Intel Mac, or to try changes, build QDP from source:
 
 ## Next steps
 
-- [Connect to a computer](../connecting.md#mac) from the app.
-- [Share this Mac](../hosting.md) with `qdp serve`.
+- [Connect to a computer](apps.md#mac) from the app.
+- [Share this Mac](hosting.md) with `qdp serve`.

@@ -44,21 +44,19 @@ Install QDP as a **host** on the computer you want to reach, and as a
 
 Every download is on the
 [latest release](https://github.com/ianmarmour/qdp/releases/latest), and our
-[installation guides](docs/README.md#installing) walk through the installation
+[installation guides](docs/setup/README.md) walk through the installation
 on each platform step by step.
 
 ## Documentation
 
-- [Sharing a computer](docs/hosting.md): pairing, platform setup, video,
-  sound, input, security, and running as a service.
-- [Connecting](docs/connecting.md): each app, and the `qdp connect` command.
-- [The gateway](docs/gateway.md): reaching computers inside an organization.
-- [Troubleshooting](docs/troubleshooting.md): logs, and what to check when
-  something doesn't work.
-- [The specification](docs/spec/README.md) and its
-  [design rationale](docs/design-rationale.md).
-
-[The documentation's index](docs/README.md) lists everything.
+- **[Initial Setup](docs/setup/README.md)**: install QDP, share a computer, and
+  connect your devices to it.
+- **[Troubleshooting](docs/troubleshooting.md)**: fixes for common problems,
+  and how to collect logs.
+- **[Gateway Setup](docs/gateway.md)**: install QDP Gateway, expose it to the
+  internet, and grant access to endpoints.
+- **[Specification](docs/spec/README.md)**: the Quick Desktop Protocol, and
+  the reasoning behind its design.
 
 ## Building from source
 

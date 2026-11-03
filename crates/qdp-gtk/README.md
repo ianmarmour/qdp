@@ -6,8 +6,8 @@ network, which it follows with `qdp discover --watch`, and those it paired
 with; it pairs with the code a host shows, and runs `qdp connect --events`
 for each stream, following its progress.
 
-[Installing on Linux](../../docs/install/linux.md#the-qdp-app) and
-[Connecting](../../docs/connecting.md#linux) cover using it.
+[Installing on Linux](../../docs/setup/linux.md#the-qdp-app) and
+[Using the apps](../../docs/setup/apps.md#linux) cover using it.
 
 ## Requirements
 
