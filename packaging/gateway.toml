@@ -1,25 +1,45 @@
 # The QDP gateway's configuration: edit it for your organization, then start
 # the service. `qdp-gateway check` tests it and the directory account, and
 # `qdp-gateway login USER [HOST]` a user's sign-in. Every setting is described
-# in the gateway's documentation.
+# here; those commented out show their defaults.
 
 # The name users see when signing in.
 name = "Example Corp"
 # Where it listens: UDP port 443, which networks allowing HTTP/3 let through.
 listen = "0.0.0.0:443"
+# Where the gateway keeps its keys and TOTP secrets: /var/lib/qdp-gateway on
+# Linux, and a folder beside this file on Windows.
+# state_directory = "/var/lib/qdp-gateway"
+
+# A certificate from your organization's certificate authority, in PEM, in
+# place of the self-signed one the gateway makes. Clients then need no pin.
+# [tls]
+# certificate = "gateway.crt"
+# private_key = "gateway.key"
 
 [directory]
 # The organization's directory, over TLS: ldaps://, or ldap:// with
 # starttls = true.
 url = "ldaps://dc1.corp.example.com"
+# starttls = false
+# The certificate authority the directory's certificate chains to, in PEM, if
+# the system doesn't trust it.
+# ca_certificate = "directory-ca.pem"
 # The account the gateway finds users with, and the file holding its
 # password, which only the gateway may read: here, one beside this file.
 bind_dn = "CN=qdp-gateway,OU=Service Accounts,DC=corp,DC=example,DC=com"
 bind_password_file = "directory-password"
 base_dn = "DC=corp,DC=example,DC=com"
-# For OpenLDAP rather than Active Directory:
+# How users are found, and which attributes hold their name, full name and
+# groups. The defaults suit Active Directory; for OpenLDAP:
 # user_filter = "(&(objectClass=inetOrgPerson)(uid={user}))"
 # name_attribute = "uid"
+# user_filter = "(&(objectClass=user)(sAMAccountName={user}))"
+# name_attribute = "sAMAccountName"
+# display_name_attribute = "displayName"
+# group_attribute = "memberOf"
+# How long to wait for the directory, in seconds.
+# timeout_seconds = 10
 
 [totp]
 # Who enrolls TOTP secrets. "first-login": a user without one signs in with
@@ -29,6 +49,13 @@ base_dn = "DC=corp,DC=example,DC=com"
 # "admin-only": only `qdp-gateway totp enroll USER` enrolls, for organizations
 # that will not let a password alone choose the second factor.
 enrollment = "first-login"
+# The name authenticator apps show beside the codes: the gateway's name by
+# default.
+# issuer = "Example Corp"
+
+# How long a sign-in lasts, in hours, up to a week.
+# [sessions]
+# token_lifetime_hours = 12
 
 [assertions]
 # The groups hosts are told users are in.
@@ -37,20 +64,40 @@ groups = ["QDP Users"]
 # its pin, by a handshake with it inside the network, to vouch for users to
 # it; false vouches only for hosts listed with their pins.
 # learn_host_keys = true
+# Whether the gateway vouches for users to hosts at all, and how long each
+# assertion lasts, in seconds, up to five minutes.
+# enabled = true
+# lifetime_seconds = 120
+
+# Failed sign-ins allowed for one user name, and from one address, within the
+# window, in minutes, before the gateway stops trying them. Keep them below
+# your directory's own lockout threshold.
+# [limits]
+# user_failures = 5
+# address_failures = 20
+# window_minutes = 15
 
 # Hosts users may open by their names inside the network, such as
 # desk-12.desktops.corp.example.com. Hosts need only trust the gateway's key,
 # the same on every host: `qdp serve --gateway-key KEY`, with the key
-# `qdp-gateway keys` prints.
+# `qdp-gateway keys` prints. Empty names allow any name that resolves into
+# the networks, and empty networks any address. Users may also be listed by
+# name, besides the groups.
 [[route]]
 names = ["*.desktops.corp.example.com"]
 networks = ["10.20.0.0/16"]
 groups = ["QDP Users"]
+# ports = [4433]
+# users = []
 
 # Hosts listed to users by ID, optionally with the pin `qdp pin` prints on
 # each, which the gateway then verifies them by instead of learning it.
 # [[host]]
 # id = "build-01"
 # name = "Build machine"
+# description = "The build farm's desktop"
 # address = "10.0.4.20:4433"
+# pin = "PIN"
+# server_name = "qdp-host"
 # groups = ["QDP Users"]
+# users = []
