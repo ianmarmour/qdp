@@ -6,9 +6,9 @@
 
 QDP streams a computer's desktop to your other devices with very low latency.
 It's suitable for doing remote work and ultra low latency applications like
-gaming. QDP supports native apps for Linux, Windows, macOS, Android, iPhone and
-iPad. It leverages cutting edge codecs and techniques to provide the lowest
-latency smoothest streaming possible.
+gaming. It leverages cutting edge codecs and techniques to provide the lowest
+latency smoothest streaming possible. QDP offers native apps for Linux,
+Windows, macOS, Android, iPhone and iPad.
 
 QDP is in active development. Its protocol is draft 00 of an
 [open specification](docs/spec/README.md), and may change before version 1.
