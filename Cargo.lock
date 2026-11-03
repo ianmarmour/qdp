@@ -3004,6 +3004,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "qdp-bench"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "qdp-desktop",
+ "qdp-runtime",
+ "serde",
+ "softbuffer",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "winit",
+]
+
+[[package]]
 name = "qdp-cli"
 version = "0.1.0"
 dependencies = [

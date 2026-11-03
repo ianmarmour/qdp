@@ -1,0 +1,25 @@
+[package]
+name = "qdp-bench"
+description = "Measures how quickly QDP, RDP and VNC show a host's screen and answer a client's input, between headless GNOME sessions"
+readme = "README.md"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+qdp-desktop = { workspace = true, features = ["screen-capture"] }
+qdp-runtime.workspace = true
+serde.workspace = true
+softbuffer.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+toml = { workspace = true, features = ["display"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true
