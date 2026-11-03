@@ -1,24 +1,24 @@
-# Installing QDP on iPhone and iPad
+# Installing on iPhone and iPad
 
-The app runs on iPhone and iPad with iOS or iPadOS 26 or later. On the home
-screen it's called **Quick Desktop**.
+On the home screen, the app is called Quick Desktop.
 
-It isn't in the App Store yet. Install it one of two ways:
+## Requirements
 
-- **Build it with Xcode** on a Mac, signed with your own Apple account:
-  [`apple`](../../apple/README.md) says how. Apps signed with
-  a free Apple account must be signed again every seven days.
-- **Sideload the release's unsigned app**,
-  [`qdp-ios-unsigned.ipa`](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa),
-  with a tool that signs apps with your Apple account, such as AltStore or
-  Sideloadly.
+- iOS or iPadOS 26 or later
 
-## Hardware
+## Install
 
-The app decodes video on the GPU on devices with an AV1 decoder: iPhone 15
-Pro and later, and iPads with an M4 or A17 Pro. Other devices decode in
-software.
+The app isn't in the App Store yet. Either:
+
+- sideload [`qdp-ios-unsigned.ipa`](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa) with a tool
+  that signs apps with your Apple account, such as AltStore or Sideloadly; or
+- build it with Xcode, as [`apple`](../../apple/README.md) describes.
+
+## Upgrade and remove
+
+Install a newer build the same way to upgrade. To remove QDP, delete it from
+the home screen.
 
 ## Next steps
 
-[Connect to a computer](apps.md#iphone-and-ipad) from the app.
+- [Use the app](apps.md)
