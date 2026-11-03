@@ -58,7 +58,12 @@ mod monitor_modes;
 mod notification;
 mod passthrough;
 mod touchpad;
-#[cfg(any(target_os = "macos", target_os = "ios", windows))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    windows,
+    all(target_os = "linux", feature = "wayland-video")
+))]
 mod video_scene;
 #[cfg(windows)]
 mod win32;
@@ -87,6 +92,8 @@ pub use notification::{Notification, Urgency, notify};
 pub use passthrough::{DeviceSelector, PassthroughCapture};
 pub use touchpad::TouchpadCapture;
 
+#[cfg(all(target_os = "linux", feature = "wayland-video"))]
+pub use linux::WaylandVideo;
 #[cfg(all(target_os = "linux", feature = "notifications"))]
 pub use linux::run_session_helper;
 #[cfg(all(target_os = "linux", feature = "screen-capture"))]
@@ -130,7 +137,14 @@ pub use macos::{MacScreenCapture, QuartzInjector, mac_key_usage};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use metal_video::{MetalVideo, Submitter};
 #[cfg(any(target_os = "macos", target_os = "ios", windows))]
-pub use video_scene::{Fate, Overlay, PixelRect, Scene};
+pub use video_scene::Fate;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    windows,
+    all(target_os = "linux", feature = "wayland-video")
+))]
+pub use video_scene::{Overlay, PixelRect, Scene};
 #[cfg(windows)]
 pub use win32::{
     D3d11Video, DesktopDuplication, SendInputInjector, Submitter, SyncMode, SystemKeys, WindowPen,

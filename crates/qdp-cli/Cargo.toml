@@ -31,7 +31,14 @@ notifications = ["qdp-desktop/notifications"]
 screen-capture = ["qdp-desktop/screen-capture"]
 # Shows the stream in a window. Without it, `qdp connect` runs headless only,
 # for hosts and servers that need no windowing libraries.
-window = ["dep:softbuffer", "dep:winit", "qdp-app/winit", "tokio/sync", "tokio/time"]
+window = [
+    "dep:softbuffer",
+    "dep:winit",
+    "qdp-app/winit",
+    "qdp-desktop/wayland-video",
+    "tokio/sync",
+    "tokio/time",
+]
 
 [dependencies]
 qdp.workspace = true

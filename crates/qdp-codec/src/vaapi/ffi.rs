@@ -167,6 +167,13 @@ pub(super) const GENERIC_VALUE_POINTER: c_int = 3;
 /// [`DrmPrimeSurfaceDescriptor`] describes.
 pub(super) const MEM_TYPE_DRM_PRIME_2: u32 = 0x4000_0000;
 
+/// `VA_EXPORT_SURFACE_READ_ONLY`: the exported buffers are only read.
+pub(super) const EXPORT_READ_ONLY: u32 = 0x1;
+
+/// `VA_EXPORT_SURFACE_COMPOSED_LAYERS`: the surface is exported as one
+/// layer, its planes together.
+pub(super) const EXPORT_COMPOSED_LAYERS: u32 = 0x8;
+
 /// `VAProcPipelineParameterBufferType`.
 pub(super) const BUFFER_PROC_PIPELINE_PARAMETERS: c_int = 41;
 
@@ -867,6 +874,9 @@ pub(super) struct LibVa {
     /// `vaQuerySurfaceAttributes`.
     pub(super) query_surface_attributes:
         unsafe extern "C" fn(VaDisplay, VaId, *mut SurfaceAttrib, *mut c_uint) -> VaStatus,
+    /// `vaExportSurfaceHandle`.
+    pub(super) export_surface_handle:
+        unsafe extern "C" fn(VaDisplay, VaId, u32, u32, *mut c_void) -> VaStatus,
 }
 
 /// The file name of libva.
@@ -973,6 +983,7 @@ fn load() -> Result<LibVa, String> {
             get_image: symbol(va, c"vaGetImage")?,
             destroy_image: symbol(va, c"vaDestroyImage")?,
             query_surface_attributes: symbol(va, c"vaQuerySurfaceAttributes")?,
+            export_surface_handle: symbol(va, c"vaExportSurfaceHandle")?,
         })
     }
 }

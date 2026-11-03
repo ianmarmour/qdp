@@ -41,6 +41,14 @@ screen-capture = [
     "dep:zbus",
 ]
 
+# Shows decoded pictures that the GPU holds in Wayland windows, without
+# copying them.
+wayland-video = [
+    "dep:wayland-backend",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+]
+
 [dependencies]
 gilrs = { workspace = true, optional = true }
 qdp.workspace = true
@@ -59,8 +67,9 @@ futures-lite = { workspace = true, optional = true }
 libc.workspace = true
 pipewire = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "sync"] }
+wayland-backend = { workspace = true, optional = true }
 wayland-client = { workspace = true, optional = true }
-wayland-protocols = { workspace = true, optional = true }
+wayland-protocols = { workspace = true, optional = true, features = ["staging"] }
 wayland-scanner = { workspace = true, optional = true }
 bitflags = { workspace = true, optional = true }
 wayland-protocols-wlr = { workspace = true, optional = true }

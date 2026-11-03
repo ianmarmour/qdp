@@ -286,6 +286,10 @@ struct Display {
     /// The pen over the window, read until dropped, before the window is.
     #[cfg(windows)]
     _pen: Option<qdp_desktop::WindowPen>,
+    /// The compositor, showing pictures the GPU decoded over the window
+    /// where it can, dropped before the window.
+    #[cfg(target_os = "linux")]
+    compositor: Option<qdp_desktop::WaylandVideo>,
     /// What draws the window's picture, dropped before the window.
     painter: Painter,
     /// The window.
@@ -333,6 +337,10 @@ pub struct WindowApp {
     current: Option<RgbFrame>,
     /// The size of the newest frame, once one arrived.
     picture: Option<(usize, usize)>,
+    /// The size the processor last drew the background around the
+    /// compositor's picture at, while the compositor shows the pictures.
+    #[cfg(target_os = "linux")]
+    composited: Option<(u32, u32)>,
     /// Raised when the window closes.
     close: Arc<CloseSignal>,
     /// Why the window could not be shown, if it could not.
@@ -499,6 +507,8 @@ impl WindowApp {
             slot,
             current: None,
             picture: None,
+            #[cfg(target_os = "linux")]
+            composited: None,
             close,
             error: None,
             scroller: Scroller::default(),
@@ -957,6 +967,8 @@ impl WindowApp {
         Ok(Display {
             #[cfg(windows)]
             _pen: attach_pen(&window, self.proxy.clone()),
+            #[cfg(target_os = "linux")]
+            compositor: attach_wayland(&window),
             window,
             painter: Painter::Processor(surface),
         })
@@ -1008,6 +1020,11 @@ impl WindowApp {
             self.slot.set_display_timing(qdp_desktop::display_timing());
             return;
         }
+        #[cfg(target_os = "linux")]
+        let Some(newest) = self.show_on_compositor(newest, started) else {
+            self.slot.set_display_timing(qdp_desktop::display_timing());
+            return;
+        };
         let newest = newest.map(|(frame, id)| {
             match frame.with_memory(yuv420_to_rgb) {
                 Ok(rgb) => self.current = Some(rgb),
@@ -1027,6 +1044,73 @@ impl WindowApp {
             }
         }
         self.slot.set_display_timing(qdp_desktop::display_timing());
+    }
+
+    /// Hands `newest`, a picture the GPU decoded, to the compositor to show
+    /// over the window, along with the cursor where the window draws it,
+    /// while the compositor shows such pictures. Returns `None` once it is
+    /// shown, or the picture, for the processor to draw, otherwise.
+    #[cfg(target_os = "linux")]
+    fn show_on_compositor(
+        &mut self,
+        newest: Option<(DecodedPicture, FrameId)>,
+        started: Instant,
+    ) -> Option<Option<(DecodedPicture, FrameId)>> {
+        let follow = self.followed_cursor();
+        let placement = self.placement().map(|(placement, _, _)| placement);
+        let display = self.display.as_mut()?;
+        let Some(compositor) = display.compositor.as_mut() else {
+            return Some(newest);
+        };
+        let (picture, id) = match newest {
+            Some((DecodedPicture::Vaapi(picture), id)) => (Some(picture), Some(id)),
+            None if self.composited.is_some() => (None, None),
+            other => {
+                // A picture in memory, as software decodes: the processor
+                // draws it, over the window's own surface.
+                if self.composited.take().is_some() {
+                    compositor.hide();
+                }
+                return Some(other);
+            }
+        };
+        let size = display.window.inner_size();
+        // The window's own surface shows the background around the picture,
+        // drawn again, before the compositor's commit, as the window's size
+        // changes.
+        if self.composited != Some((size.width, size.height))
+            && let (Some(width), Some(height)) =
+                (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+        {
+            let Painter::Processor(surface) = &mut display.painter;
+            draw_on_processor(surface, None, (width, height), None);
+            self.composited = Some((size.width, size.height));
+        }
+        let scene = gpu_scene((size.width, size.height), placement, follow);
+        match compositor.show(picture, &scene, display.window.scale_factor()) {
+            Ok(shown) => {
+                if let Some(id) = id {
+                    self.slot.shown(id, shown);
+                }
+                if let Some(shown) = shown {
+                    self.draw_stats.drew(
+                        shown.saturating_duration_since(started),
+                        Duration::ZERO,
+                        shown,
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(%error, "the processor draws the pictures instead of the compositor");
+                display.compositor = None;
+                self.composited = None;
+                if let Some(id) = id {
+                    self.slot.shown(id, None);
+                }
+                return None;
+            }
+        }
+        None
     }
 
     /// Returns where the cursor the window draws goes, in the window's
@@ -1131,7 +1215,7 @@ fn draw_on_processor(
 
 /// Returns what the GPU draws in a drawable of `size` pixels: the picture
 /// at `picture`, and `follow`'s cursor at its position.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 fn gpu_scene(
     size: (u32, u32),
     picture: Option<Placement>,
@@ -1179,6 +1263,34 @@ fn attach_metal(window: &Window, slot: FrameSlot) -> Option<qdp_desktop::MetalVi
         }
         Err(error) => {
             warn!(%error, "drawing the video on the processor instead of with Metal");
+            None
+        }
+    }
+}
+
+/// Has the compositor show the pictures the GPU decodes over the window, if
+/// the window is a Wayland one and the compositor can, or returns `None`,
+/// saying why, so that the processor draws them instead.
+#[cfg(target_os = "linux")]
+fn attach_wayland(window: &Window) -> Option<qdp_desktop::WaylandVideo> {
+    use winit::raw_window_handle::{
+        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    };
+
+    let RawDisplayHandle::Wayland(display) = window.display_handle().ok()?.as_raw() else {
+        return None;
+    };
+    let RawWindowHandle::Wayland(surface) = window.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    // SAFETY: the display and surface are the window's, and the presenter
+    // is dropped before the window.
+    #[allow(unsafe_code)]
+    let attached = unsafe { qdp_desktop::WaylandVideo::attach(display.display, surface.surface) };
+    match attached {
+        Ok(video) => Some(video),
+        Err(error) => {
+            info!(%error, "the processor draws the pictures; the compositor cannot");
             None
         }
     }

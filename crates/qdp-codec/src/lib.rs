@@ -89,7 +89,9 @@ pub use picture::DecodedPicture;
 pub use process_decoder::{DecoderCommand, ProcessDecoder, serve_decoder, serve_decoder_on_stdio};
 pub use sequence::{ColorDescription, SequenceHeader};
 #[cfg(target_os = "linux")]
-pub use vaapi::{VaapiDecoder, VaapiEncoder, VaapiPicture};
+pub use vaapi::{
+    ExportedPlane, ExportedSurface, SurfaceKey, VaapiDecoder, VaapiEncoder, VaapiPicture,
+};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use videotoolbox::PixelBufferPicture;
 

@@ -100,7 +100,7 @@ const RT_FORMAT: u32 = ffi::RT_FORMAT_YUV420;
 const TIMING_INTERVAL: Duration = Duration::from_secs(1);
 
 pub use decoder::VaapiDecoder;
-pub use picture::VaapiPicture;
+pub use picture::{ExportedPlane, ExportedSurface, SurfaceKey, VaapiPicture};
 
 /// An initialized VA display on one GPU.
 struct Display {
