@@ -85,6 +85,10 @@ const PREFERRED_FRAME_RATE: u32 = 60;
 /// The highest frame rate offered to PipeWire.
 const MAX_FRAME_RATE: u32 = 360;
 
+/// The maximum frame rate asked of the compositor: none, which Mutter
+/// takes as no limit. A compositor allowing no such value keeps its own.
+const NO_MAX_FRAME_RATE: spa::utils::Fraction = spa::utils::Fraction { num: 0, denom: 1 };
+
 /// The bytes of one 32-bit pixel.
 const PIXEL_BYTES: u32 = 4;
 
@@ -1133,6 +1137,23 @@ fn video_format(kind: BufferKind) -> Result<Vec<u8>, String> {
             spa::utils::Fraction { num: 0, denom: 1 },
             spa::utils::Fraction {
                 num: MAX_FRAME_RATE,
+                denom: 1
+            }
+        ),
+        // Mutter limits a stream to its maximum frame rate by dropping the
+        // frames that come sooner than one period after the last, and it
+        // times frames in memory as they are read, a moment late or early:
+        // at the screen's own rate, it drops every other frame. Up to any
+        // maximum the compositor offers, none is asked for.
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoMaxFramerate,
+            Choice,
+            Range,
+            Fraction,
+            NO_MAX_FRAME_RATE,
+            NO_MAX_FRAME_RATE,
+            spa::utils::Fraction {
+                num: u32::MAX,
                 denom: 1
             }
         ),
