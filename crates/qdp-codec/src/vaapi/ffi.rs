@@ -1,13 +1,13 @@
-//! The parts of VA-API (libva 2, API 1.16 or later) the AV1 encoder uses,
-//! loaded at run time so that `qdp` neither needs libva to build nor fails to
-//! start without it.
+//! The parts of VA-API (libva 2, API 1.16 or later) the AV1 encoder and
+//! decoder use, loaded at run time so that `qdp` neither needs libva to build
+//! nor fails to start without it.
 //!
 //! The structures mirror `va.h`, `va_enc_av1.h`, `va_vpp.h` and
-//! `va_drmcommon.h`. Each C union of bit fields
-//! is a plain integer here, whose bits the encoder sets with the shifts below;
-//! C compilers on Linux allocate bit fields from the least significant bit.
-//! The tests check every size and the offsets the encoder relies on against
-//! values from the C headers.
+//! `va_drmcommon.h`; the decoder's own are in `av1_parameters`. Each C union
+//! of bit fields is a plain integer here, whose bits are set with the shifts
+//! below; C compilers on Linux allocate bit fields from the least significant
+//! bit. The tests check every size and the offsets relied on against values
+//! from the C headers.
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::sync::OnceLock;
@@ -21,6 +21,9 @@ pub(super) type VaStatus = c_int;
 /// The identifier of a VA object.
 pub(super) type VaId = c_uint;
 
+/// `VAMessageCallback`: receives a message libva or its driver logs.
+pub(super) type MessageCallback = unsafe extern "C" fn(*mut c_void, *const c_char);
+
 /// The status of a call that succeeded.
 pub(super) const VA_STATUS_SUCCESS: VaStatus = 0;
 
@@ -32,6 +35,10 @@ pub(super) const VA_ATTRIB_NOT_SUPPORTED: u32 = 0x8000_0000;
 
 /// `VAProfileAV1Profile0`.
 pub(super) const PROFILE_AV1_MAIN: c_int = 32;
+
+/// `VAEntrypointVLD`: the decoder that reads each frame's data itself,
+/// given its parameters.
+pub(super) const ENTRYPOINT_DECODE: c_int = 1;
 
 /// `VAEntrypointEncSlice`: the full-featured encoder.
 pub(super) const ENTRYPOINT_ENCODE: c_int = 6;
@@ -74,6 +81,15 @@ pub(super) const LSB_FIRST: u32 = 1;
 
 /// The bits per pixel of NV12.
 pub(super) const NV12_BITS_PER_PIXEL: u32 = 12;
+
+/// `VAPictureParameterBufferType`.
+pub(super) const BUFFER_DECODE_PICTURE_PARAMETERS: c_int = 0;
+
+/// `VASliceParameterBufferType`, which carries an AV1 tile group's tiles.
+pub(super) const BUFFER_DECODE_TILE_PARAMETERS: c_int = 4;
+
+/// `VASliceDataBufferType`, which carries a tile group's data.
+pub(super) const BUFFER_DECODE_TILE_DATA: c_int = 5;
 
 /// `VAEncCodedBufferType`.
 pub(super) const BUFFER_CODED: c_int = 21;
@@ -730,13 +746,25 @@ impl Zeroed for DrmPrimeSurfaceDescriptor {}
 impl Zeroed for ProcColorProperties {}
 impl Zeroed for ProcPipelineParameters {}
 
-/// The libva functions the encoder calls.
+/// The libva functions the encoder and decoder call.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LibVa {
     /// `vaGetDisplayDRM`, from libva-drm.
     pub(super) get_display_drm: unsafe extern "C" fn(c_int) -> VaDisplay,
     /// `vaInitialize`.
     pub(super) initialize: unsafe extern "C" fn(VaDisplay, *mut c_int, *mut c_int) -> VaStatus,
+    /// `vaSetErrorCallback`.
+    pub(super) set_error_callback: unsafe extern "C" fn(
+        VaDisplay,
+        Option<MessageCallback>,
+        *mut c_void,
+    ) -> Option<MessageCallback>,
+    /// `vaSetInfoCallback`.
+    pub(super) set_info_callback: unsafe extern "C" fn(
+        VaDisplay,
+        Option<MessageCallback>,
+        *mut c_void,
+    ) -> Option<MessageCallback>,
     /// `vaTerminate`.
     pub(super) terminate: unsafe extern "C" fn(VaDisplay) -> VaStatus,
     /// `vaErrorStr`.
@@ -831,6 +859,9 @@ pub(super) struct LibVa {
         c_uint,
         c_uint,
     ) -> VaStatus,
+    /// `vaGetImage`.
+    pub(super) get_image:
+        unsafe extern "C" fn(VaDisplay, VaId, c_int, c_int, c_uint, c_uint, VaId) -> VaStatus,
     /// `vaDestroyImage`.
     pub(super) destroy_image: unsafe extern "C" fn(VaDisplay, VaId) -> VaStatus,
     /// `vaQuerySurfaceAttributes`.
@@ -905,7 +936,7 @@ unsafe fn symbol<T: Copy>(library: *mut c_void, name: &CStr) -> Result<T, String
     Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&address) })
 }
 
-/// Loads libva and looks up every function the encoder calls.
+/// Loads libva and looks up every function the encoder and decoder call.
 fn load() -> Result<LibVa, String> {
     let va = open_library(LIBVA_NAME)?;
     let drm = open_library(LIBVA_DRM_NAME)?;
@@ -914,6 +945,8 @@ fn load() -> Result<LibVa, String> {
         Ok(LibVa {
             get_display_drm: symbol(drm, c"vaGetDisplayDRM")?,
             initialize: symbol(va, c"vaInitialize")?,
+            set_error_callback: symbol(va, c"vaSetErrorCallback")?,
+            set_info_callback: symbol(va, c"vaSetInfoCallback")?,
             terminate: symbol(va, c"vaTerminate")?,
             error_str: symbol(va, c"vaErrorStr")?,
             query_vendor_string: symbol(va, c"vaQueryVendorString")?,
@@ -937,6 +970,7 @@ fn load() -> Result<LibVa, String> {
             derive_image: symbol(va, c"vaDeriveImage")?,
             create_image: symbol(va, c"vaCreateImage")?,
             put_image: symbol(va, c"vaPutImage")?,
+            get_image: symbol(va, c"vaGetImage")?,
             destroy_image: symbol(va, c"vaDestroyImage")?,
             query_surface_attributes: symbol(va, c"vaQuerySurfaceAttributes")?,
         })

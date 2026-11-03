@@ -225,8 +225,20 @@ fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
     Ok(Box::new(crate::D3d11Decoder::new()?))
 }
 
+/// Opens the platform's hardware decoder: VA-API on Linux.
+#[cfg(target_os = "linux")]
+fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
+    Ok(Box::new(crate::VaapiDecoder::new()?))
+}
+
 /// Opens the platform's hardware decoder; this platform has none yet.
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android", windows)))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android",
+    windows,
+    target_os = "linux"
+)))]
 fn open_hardware_decoder() -> Result<Box<dyn VideoDecoder>, CodecError> {
     Err(CodecError::HardwareUnavailable(
         "hardware decoding is not supported on this platform yet".to_owned(),

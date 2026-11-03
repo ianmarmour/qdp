@@ -8,7 +8,7 @@
 //!   built on rav1e in low-latency mode.
 //! - [`open_decoder`], which opens the platform's hardware decoder when it has
 //!   one (VideoToolbox on macOS, MediaCodec on Android, D3D11 video on
-//!   Windows) and falls back to software otherwise.
+//!   Windows, VA-API on Linux) and falls back to software otherwise.
 //! - [`Av1Decoder`], which decodes with rav1d, returning one picture per
 //!   temporal unit.
 //! - [`ProcessDecoder`], which decodes in a separate process running
@@ -32,9 +32,12 @@ mod decoder;
 mod dma_buf;
 mod encoder;
 mod frame;
-// The DXVA decoder is given frame headers parsed.
-#[cfg(any(windows, test))]
+// The DXVA and VA-API decoders are given frame headers parsed.
+#[cfg(any(windows, target_os = "linux", test))]
 mod frame_parser;
+// Hardware decoders are checked against rav1d before they are used.
+#[cfg(any(windows, target_os = "linux"))]
+mod hardware_check;
 #[cfg(target_os = "linux")]
 mod headers;
 mod level;
@@ -86,7 +89,7 @@ pub use picture::DecodedPicture;
 pub use process_decoder::{DecoderCommand, ProcessDecoder, serve_decoder, serve_decoder_on_stdio};
 pub use sequence::{ColorDescription, SequenceHeader};
 #[cfg(target_os = "linux")]
-pub use vaapi::VaapiEncoder;
+pub use vaapi::{VaapiDecoder, VaapiEncoder, VaapiPicture};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use videotoolbox::PixelBufferPicture;
 
