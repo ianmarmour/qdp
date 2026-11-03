@@ -4,22 +4,22 @@
 //! probe's marker takes to change on the client's screen.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use qdp_desktop::{FrameMemory, ScreenOptions};
 use qdp_runtime::{FrameArrivals, FrameSource, InputAction, InputInjector, PointerButton};
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::clock::{now_micros, ticks_per_second};
-use crate::layout::{self, CLICK};
+use crate::layout::{self, CLICK, Picture, Pixels};
 use crate::results::Run;
 use crate::system::{cpu_ticks, interface_bytes};
 
 /// How long the viewer may take to connect and show the probe.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the stream runs before it is measured, for the encoders and
 /// the network to settle.
@@ -103,6 +103,10 @@ struct Screen {
     wake: Arc<Notify>,
     /// The frames read so far.
     read: u64,
+    /// The latest frame's luma plane, with its width and height.
+    latest: Option<(Vec<u8>, usize, usize)>,
+    /// Where the screen last showed the probe.
+    probe: Option<Pixels>,
 }
 
 impl Screen {
@@ -118,12 +122,9 @@ impl Screen {
             arrivals,
             wake,
             read: 0,
+            latest: None,
+            probe: None,
         })
-    }
-
-    /// Returns the screen's size, in pixels.
-    fn size(&self) -> (usize, usize) {
-        self.source.size()
     }
 
     /// Waits up to `timeout` for the next frame, and returns what it shows.
@@ -142,11 +143,41 @@ impl Screen {
             return Err("the client's screen frames are not in memory".to_owned());
         };
         let (width, height) = (frame.width(), frame.height());
-        Ok(Some(Seen {
+        let picture = Picture {
+            luma: frame.y(),
+            blue: frame.u(),
+            red: frame.v(),
+            width,
+            height,
+        };
+        let probe = layout::locate(picture);
+        if probe.is_some() {
+            self.probe = probe;
+        }
+        let seen = Seen {
             at,
-            drawn: layout::read_time(frame.y(), width, width, height),
-            lit: layout::marker_lit(frame.y(), width, width, height),
-        }))
+            drawn: probe.and_then(|probe| layout::read_time(picture, probe)),
+            lit: probe.and_then(|probe| layout::marker_lit(picture, probe)),
+        };
+        if seen.drawn.is_none() {
+            self.latest = Some((frame.y().to_vec(), width, height));
+        }
+        Ok(Some(seen))
+    }
+
+    /// Writes the latest frame that did not show the probe to `path`, as a
+    /// greyscale PGM picture, for finding out what the viewer showed
+    /// instead.
+    fn save_latest(&self, path: &Path) {
+        let Some((luma, width, height)) = &self.latest else {
+            return;
+        };
+        let mut picture = format!("P5\n{width} {height}\n255\n").into_bytes();
+        picture.extend_from_slice(luma);
+        match std::fs::write(path, picture) {
+            Ok(()) => info!(path = %path.display(), "the client's screen was saved"),
+            Err(error) => warn!(%error, "the client's screen cannot be saved"),
+        }
     }
 }
 
@@ -170,12 +201,15 @@ async fn measure(
     mut screen: Screen,
     mut injector: Box<dyn InputInjector>,
 ) -> Result<Run, String> {
-    wait_for_probe(&mut screen).await?;
+    if let Err(error) = wait_for_probe(&mut screen).await {
+        screen.save_latest(&args.out.with_extension("pgm"));
+        return Err(error);
+    }
     // The pointer moves twice before the clicks, so that the viewer, and the
     // window under the host's pointer, know where it is.
-    let mut clicks = Clicks::new(screen.size());
+    let mut clicks = Clicks::default();
     for _ in 0..2 {
-        clicks.point(&mut *injector)?;
+        clicks.point(screen.probe, &mut *injector)?;
         let warmed = now_micros() + micros(WARMUP) / 2;
         while now_micros() < warmed {
             screen.next(POLL).await?;
@@ -194,7 +228,7 @@ async fn measure(
         if let Some(seen) = seen {
             frames.add(seen);
         }
-        click = clicks.advance(click, seen, now_micros(), &mut *injector)?;
+        click = clicks.advance(click, seen, now_micros(), screen.probe, &mut *injector)?;
     }
     let elapsed = (now_micros() - start) as f64 / 1_000_000.0;
     if matches!(click, Click::Pressed(_) | Click::Holding(_)) {
@@ -252,7 +286,15 @@ async fn wait_for_probe(screen: &mut Screen) -> Result<(), String> {
         match first {
             None => first = Some(drawn),
             Some(first) if drawn != first => {
-                info!("the viewer shows the probe");
+                if let Some(probe) = screen.probe {
+                    info!(
+                        x = probe.x,
+                        y = probe.y,
+                        width = probe.width,
+                        height = probe.height,
+                        "the viewer shows the probe"
+                    );
+                }
                 return Ok(());
             }
             Some(_) => {}
@@ -312,10 +354,8 @@ impl Frames {
 }
 
 /// The clicks measured.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Clicks {
-    /// The size of the client's screen, in pixels.
-    screen: (usize, usize),
     /// Each press's and release's latency, from the input to the marker
     /// changing on the client's screen, in milliseconds.
     latencies: Vec<f64>,
@@ -328,42 +368,40 @@ struct Clicks {
 }
 
 impl Clicks {
-    /// Returns no clicks yet, on a `screen`-sized screen.
-    fn new(screen: (usize, usize)) -> Self {
-        Self {
-            screen,
-            latencies: Vec::new(),
-            missed: 0,
-            made: 0,
-            moves: 0,
-        }
-    }
-
-    /// Moves the pointer to where the clicks go. It moves by a pixel each
-    /// time, so that the window there sees motion, and the pointer, if it
-    /// lost it.
-    fn point(&mut self, injector: &mut dyn InputInjector) -> Result<(), String> {
-        let (width, height) = self.screen;
+    /// Moves the pointer to where the clicks go on the `probe` the screen
+    /// shows. It moves by a pixel each time, so that the window there sees
+    /// motion, and the pointer, if it lost it.
+    fn point(
+        &mut self,
+        probe: Option<Pixels>,
+        injector: &mut dyn InputInjector,
+    ) -> Result<(), String> {
+        let Some(probe) = probe else {
+            return Ok(());
+        };
+        let (x, y) = probe.point(CLICK);
         let nudge = (self.moves % 2) as f64;
         self.moves += 1;
         injector.inject(&InputAction::PointerMoveTo {
-            x: ((CLICK.0 * width as f64 + nudge) * UNITS_PER_PIXEL) as i32,
-            y: (CLICK.1 * height as f64 * UNITS_PER_PIXEL) as i32,
+            x: ((x + nudge) * UNITS_PER_PIXEL) as i32,
+            y: (y * UNITS_PER_PIXEL) as i32,
         })
     }
 
-    /// Moves `click` on at `now`, given the frame `seen` if one arrived.
+    /// Moves `click` on at `now`, given the frame `seen` if one arrived,
+    /// clicking where the screen last showed the `probe`.
     fn advance(
         &mut self,
         click: Click,
         seen: Option<Seen>,
         now: u64,
+        probe: Option<Pixels>,
         injector: &mut dyn InputInjector,
     ) -> Result<Click, String> {
         let lit = seen.and_then(|seen| seen.lit.map(|lit| (seen.at, lit)));
         Ok(match click {
             Click::Waiting(at) if now >= at => {
-                self.point(injector)?;
+                self.point(probe, injector)?;
                 let pressed = now_micros();
                 injector.inject(&InputAction::ButtonDown(PointerButton::Left))?;
                 Click::Pressed(pressed)

@@ -1,9 +1,11 @@
 //! What the probe shows, where, and how the measurer reads it back: the time
 //! the probe drew each frame, as a grid of black and white cells, and a
-//! marker that is white while the pointer's button is held.
+//! marker that is white while the pointer's button is held, on a green
+//! background no desktop has.
 //!
-//! Positions are fractions of the screen, so the measurer reads a viewer
-//! that shows the host's screen scaled, as long as it fills its own.
+//! Positions are fractions of the probe's picture, which the measurer finds
+//! by its green on the client's screen, wherever a viewer shows it and at
+//! whatever size.
 
 /// The bits of the time, in microseconds, that the grid carries.
 const TIME_BITS: u32 = 48;
@@ -24,7 +26,15 @@ const CHECK_SALT: u64 = 0xA5A5;
 /// The luma that separates black cells from white ones.
 const LUMA_THRESHOLD: u32 = 128;
 
-/// The grid's area of the screen.
+/// The chroma below which, in both planes, a pixel is the probe's green:
+/// greys, black and white sit at 128.
+const GREEN_CHROMA: u8 = 90;
+
+/// The share of the screen's pixels, in thousandths, that must be green for
+/// the probe to be taken as shown.
+const MIN_GREEN_PER_MILLE: usize = 20;
+
+/// The grid's area of the probe.
 pub const GRID: Area = Area {
     left: 0.025,
     top: 0.05,
@@ -32,7 +42,7 @@ pub const GRID: Area = Area {
     height: 0.177_777_8,
 };
 
-/// The marker's area of the screen.
+/// The marker's area of the probe.
 pub const MARKER: Area = Area {
     left: 0.5,
     top: 0.05,
@@ -40,11 +50,11 @@ pub const MARKER: Area = Area {
     height: 0.4,
 };
 
-/// Where the measurer clicks: the middle of the screen, away from the grid
-/// and the marker, which the pointer would cover.
+/// Where the measurer clicks: low in the middle of the probe, away from the
+/// grid and the marker, which the pointer would cover.
 pub const CLICK: (f64, f64) = (0.5, 0.75);
 
-/// A rectangle of the screen, in fractions of its width and height.
+/// A rectangle of the probe, in fractions of its width and height.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Area {
     /// The left edge.
@@ -70,18 +80,29 @@ pub struct Pixels {
     pub height: usize,
 }
 
+impl Pixels {
+    /// Returns the point `(x, y)`, in fractions of this rectangle, in pixels.
+    pub fn point(self, (x, y): (f64, f64)) -> (f64, f64) {
+        (
+            self.x as f64 + x * self.width as f64,
+            self.y as f64 + y * self.height as f64,
+        )
+    }
+}
+
 impl Area {
-    /// Returns the area in a `width × height` picture.
-    pub fn in_picture(self, width: usize, height: usize) -> Pixels {
-        let x = (self.left * width as f64).round() as usize;
-        let y = (self.top * height as f64).round() as usize;
-        let right = ((self.left + self.width) * width as f64).round() as usize;
-        let bottom = ((self.top + self.height) * height as f64).round() as usize;
+    /// Returns the area within `probe`, the probe's picture.
+    pub fn within(self, probe: Pixels) -> Pixels {
+        let (left, top) = probe.point((self.left, self.top));
+        let (right, bottom) = probe.point((self.left + self.width, self.top + self.height));
+        let (left, top) = (left.round() as usize, top.round() as usize);
+        let right = (right.round() as usize).min(probe.x + probe.width);
+        let bottom = (bottom.round() as usize).min(probe.y + probe.height);
         Pixels {
-            x,
-            y,
-            width: right.min(width) - x,
-            height: bottom.min(height) - y,
+            x: left,
+            y: top,
+            width: right.saturating_sub(left),
+            height: bottom.saturating_sub(top),
         }
     }
 
@@ -109,6 +130,21 @@ impl Area {
     }
 }
 
+/// A picture of the client's screen, as 4:2:0 planes.
+#[derive(Debug, Clone, Copy)]
+pub struct Picture<'a> {
+    /// The luma plane, `width` bytes a row.
+    pub luma: &'a [u8],
+    /// The blue-difference plane, `(width + 1) / 2` bytes a row.
+    pub blue: &'a [u8],
+    /// The red-difference plane, as wide.
+    pub red: &'a [u8],
+    /// The width, in pixels.
+    pub width: usize,
+    /// The height, in pixels.
+    pub height: usize,
+}
+
 /// Returns the grid's cells, left to right then top to bottom, each with
 /// whether it is white, for a frame drawn at `time` microseconds.
 pub fn cells(time: u64) -> impl Iterator<Item = (Area, bool)> {
@@ -121,15 +157,49 @@ pub fn cells(time: u64) -> impl Iterator<Item = (Area, bool)> {
     })
 }
 
-/// Returns the time a frame was drawn, in microseconds, read from its
-/// `width × height` luma plane `luma`, with `stride` bytes a row, or `None`
-/// if the grid is not there whole.
-pub fn read_time(luma: &[u8], stride: usize, width: usize, height: usize) -> Option<u64> {
+/// Returns where `picture` shows the probe: the box around its green, if
+/// enough of the picture is green.
+pub fn locate(picture: Picture<'_>) -> Option<Pixels> {
+    let chroma_width = picture.width.div_ceil(2);
+    let chroma_height = picture.height.div_ceil(2);
+    let (mut left, mut top, mut right, mut bottom) = (usize::MAX, usize::MAX, 0, 0);
+    let mut green = 0;
+    for y in 0..chroma_height {
+        let row = y * chroma_width;
+        let blue = picture.blue.get(row..row + chroma_width)?;
+        let red = picture.red.get(row..row + chroma_width)?;
+        for (x, (&blue, &red)) in blue.iter().zip(red).enumerate() {
+            if blue < GREEN_CHROMA && red < GREEN_CHROMA {
+                green += 1;
+                left = left.min(x);
+                right = right.max(x);
+                top = top.min(y);
+                bottom = bottom.max(y);
+            }
+        }
+    }
+    if green * 1000 < chroma_width * chroma_height * MIN_GREEN_PER_MILLE {
+        return None;
+    }
+    let x = left * 2;
+    let y = top * 2;
+    Some(Pixels {
+        x,
+        y,
+        width: ((right + 1) * 2).min(picture.width) - x,
+        height: ((bottom + 1) * 2).min(picture.height) - y,
+    })
+}
+
+/// Returns the time a frame was drawn, in microseconds, read from the probe
+/// that `picture` shows at `probe`, or `None` if the grid is not there
+/// whole.
+pub fn read_time(picture: Picture<'_>, probe: Pixels) -> Option<u64> {
     let mut word = 0_u64;
     for row in 0..ROWS {
         for column in 0..COLUMNS {
-            let cell = GRID.cell(column, row).middle().in_picture(width, height);
-            if average_luma(luma, stride, cell)? >= LUMA_THRESHOLD {
+            let cell = GRID.cell(column, row).middle().within(probe);
+            if average_luma(picture, cell)? >= LUMA_THRESHOLD {
                 word |= 1 << (row * COLUMNS + column);
             }
         }
@@ -137,23 +207,23 @@ pub fn read_time(luma: &[u8], stride: usize, width: usize, height: usize) -> Opt
     decode(word)
 }
 
-/// Returns whether the marker is white in a `width × height` luma plane.
-pub fn marker_lit(luma: &[u8], stride: usize, width: usize, height: usize) -> Option<bool> {
-    let area = MARKER.middle().in_picture(width, height);
-    Some(average_luma(luma, stride, area)? >= LUMA_THRESHOLD)
+/// Returns whether the marker of the probe that `picture` shows at `probe`
+/// is white.
+pub fn marker_lit(picture: Picture<'_>, probe: Pixels) -> Option<bool> {
+    Some(average_luma(picture, MARKER.middle().within(probe))? >= LUMA_THRESHOLD)
 }
 
 /// Returns the average luma of `area`, or `None` if it is empty or lies
-/// outside `luma`.
-fn average_luma(luma: &[u8], stride: usize, area: Pixels) -> Option<u32> {
+/// outside the picture.
+fn average_luma(picture: Picture<'_>, area: Pixels) -> Option<u32> {
     let count = area.width * area.height;
     if count == 0 {
         return None;
     }
     let mut sum = 0_u64;
     for y in area.y..area.y + area.height {
-        let start = y * stride + area.x;
-        let row = luma.get(start..start + area.width)?;
+        let start = y * picture.width + area.x;
+        let row = picture.luma.get(start..start + area.width)?;
         sum += row.iter().map(|&value| u64::from(value)).sum::<u64>();
     }
     u32::try_from(sum / count as u64).ok()
@@ -180,47 +250,108 @@ fn check(time: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// The width of the pictures the tests draw.
+    /// The width of the screens the tests draw.
     const WIDTH: usize = 640;
 
-    /// The height of the pictures the tests draw.
+    /// The height of the screens the tests draw.
     const HEIGHT: usize = 360;
 
-    /// Returns a luma plane showing the grid for `time`, and the marker if
-    /// `lit`.
-    fn picture(time: u64, lit: bool) -> Vec<u8> {
-        let mut luma = vec![16; WIDTH * HEIGHT];
-        let mut fill = |area: Area| {
-            let area = area.in_picture(WIDTH, HEIGHT);
-            for y in area.y..area.y + area.height {
-                luma[y * WIDTH + area.x..y * WIDTH + area.x + area.width].fill(235);
-            }
-        };
-        for (cell, white) in cells(time) {
-            if white {
-                fill(cell);
-            }
-        }
-        if lit {
-            fill(MARKER);
-        }
-        luma
+    /// Where the tests' screens show the probe: smaller than the screen, and
+    /// away from its corner, as a viewer in a window would.
+    const PROBE: Pixels = Pixels {
+        x: 40,
+        y: 30,
+        width: 480,
+        height: 270,
+    };
+
+    /// A screen's planes.
+    struct Screen {
+        /// The luma plane.
+        luma: Vec<u8>,
+        /// The blue-difference plane.
+        blue: Vec<u8>,
+        /// The red-difference plane.
+        red: Vec<u8>,
     }
 
-    /// A drawn time reads back.
+    impl Screen {
+        /// Returns the screen as a picture.
+        fn picture(&self) -> Picture<'_> {
+            Picture {
+                luma: &self.luma,
+                blue: &self.blue,
+                red: &self.red,
+                width: WIDTH,
+                height: HEIGHT,
+            }
+        }
+    }
+
+    /// Returns a grey screen showing, at `PROBE`, the probe for `time`, with
+    /// the marker lit if `lit`.
+    fn screen(time: u64, lit: bool) -> Screen {
+        let chroma = WIDTH / 2 * (HEIGHT / 2);
+        let mut screen = Screen {
+            luma: vec![80; WIDTH * HEIGHT],
+            blue: vec![128; chroma],
+            red: vec![128; chroma],
+        };
+        for y in PROBE.y / 2..(PROBE.y + PROBE.height) / 2 {
+            for x in PROBE.x / 2..(PROBE.x + PROBE.width) / 2 {
+                screen.blue[y * WIDTH / 2 + x] = 42;
+                screen.red[y * WIDTH / 2 + x] = 26;
+            }
+        }
+        let mut fill = |area: Area, luma: u8| {
+            let area = area.within(PROBE);
+            for y in area.y..area.y + area.height {
+                screen.luma[y * WIDTH + area.x..y * WIDTH + area.x + area.width].fill(luma);
+            }
+        };
+        fill(
+            Area {
+                left: 0.0,
+                top: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            173,
+        );
+        for (cell, white) in cells(time) {
+            fill(cell, if white { 235 } else { 16 });
+        }
+        fill(MARKER, if lit { 235 } else { 16 });
+        screen
+    }
+
+    /// The probe is found where the screen shows it.
+    #[test]
+    fn locates_the_probe() {
+        let screen = screen(7, false);
+        assert_eq!(locate(screen.picture()), Some(PROBE));
+    }
+
+    /// A screen without the probe's green has no probe.
+    #[test]
+    fn finds_no_probe_without_green() {
+        let chroma = WIDTH / 2 * (HEIGHT / 2);
+        let blank = Screen {
+            luma: vec![80; WIDTH * HEIGHT],
+            blue: vec![128; chroma],
+            red: vec![128; chroma],
+        };
+        assert_eq!(locate(blank.picture()), None);
+    }
+
+    /// A drawn time reads back from where the probe is.
     #[test]
     fn reads_the_time_back() {
         for time in [1, 0x1234_5678_9abc, (1 << TIME_BITS) - 1] {
-            let luma = picture(time, false);
-            assert_eq!(read_time(&luma, WIDTH, WIDTH, HEIGHT), Some(time));
+            let screen = screen(time, false);
+            let probe = locate(screen.picture()).unwrap();
+            assert_eq!(read_time(screen.picture(), probe), Some(time));
         }
-    }
-
-    /// A picture without the grid has no time.
-    #[test]
-    fn finds_no_time_without_the_grid() {
-        let luma = vec![16; WIDTH * HEIGHT];
-        assert_eq!(read_time(&luma, WIDTH, WIDTH, HEIGHT), None);
     }
 
     /// A grid with one wrong cell fails its check.
@@ -234,14 +365,10 @@ mod tests {
     /// The marker reads as lit only while it is drawn.
     #[test]
     fn reads_the_marker() {
-        assert_eq!(
-            marker_lit(&picture(7, true), WIDTH, WIDTH, HEIGHT),
-            Some(true)
-        );
-        assert_eq!(
-            marker_lit(&picture(7, false), WIDTH, WIDTH, HEIGHT),
-            Some(false)
-        );
+        for lit in [true, false] {
+            let screen = screen(7, lit);
+            assert_eq!(marker_lit(screen.picture(), PROBE), Some(lit));
+        }
     }
 
     /// The click lands on neither the grid nor the marker.

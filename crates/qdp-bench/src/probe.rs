@@ -1,6 +1,6 @@
-//! The probe: a window filling the host's screen that shows, in every frame,
-//! the time it drew it, and a marker that is white while a pointer button is
-//! held over it. It redraws as often as the compositor shows frames, and
+//! The probe: a green window filling the host's screen that shows, in every
+//! frame, the time it drew it, and a marker that is white while a pointer
+//! button is held over it. It redraws as often as the compositor shows frames, and
 //! tells the compositor that only the grid and, when it changed, the marker
 //! changed, as an application drawing little would.
 
@@ -16,7 +16,10 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::clock::now_micros;
 use crate::layout::{self, Area, GRID, MARKER, Pixels};
 
-/// The colour of the background and of black cells.
+/// The colour of the background, which the measurer finds the probe by.
+const GREEN: u32 = 0x00_FF_00;
+
+/// The colour of black cells and of the dark marker.
 const BLACK: u32 = 0x00_00_00;
 
 /// The colour of white cells and of the lit marker.
@@ -83,15 +86,21 @@ impl Probe {
         let mut buffer = surface.buffer_mut().map_err(|error| error.to_string())?;
         let fresh = buffer.age() == 0;
         if fresh {
-            buffer.fill(BLACK);
+            buffer.fill(GREEN);
         }
+        let whole = Pixels {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
         let mut fill = |area: Area, colour: u32| {
             let Pixels {
                 x,
                 y,
                 width: w,
                 height: h,
-            } = area.in_picture(width, height);
+            } = area.within(whole);
             for row in y..y + h {
                 buffer[row * width + x..row * width + x + w].fill(colour);
             }
@@ -106,19 +115,11 @@ impl Probe {
         let marker_changed = self.shown_pressed != Some(self.pressed);
         self.shown_pressed = Some(self.pressed);
         let damage = if fresh {
-            vec![rect(Pixels {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            })]
+            vec![rect(whole)]
         } else if marker_changed {
-            vec![
-                rect(GRID.in_picture(width, height)),
-                rect(MARKER.in_picture(width, height)),
-            ]
+            vec![rect(GRID.within(whole)), rect(MARKER.within(whole))]
         } else {
-            vec![rect(GRID.in_picture(width, height))]
+            vec![rect(GRID.within(whole))]
         };
         window.pre_present_notify();
         buffer
