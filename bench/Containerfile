@@ -1,7 +1,8 @@
 # The benchmark environment: headless GNOME sessions for a host and a
 # client, with the servers and viewers of each protocol compared. Every
-# package comes from the Arch Linux archive's snapshot of one day, so the
-# environment is the same wherever and whenever it is built.
+# package comes from the Arch Linux archive's snapshot of one day, or, for
+# Sunshine, which Arch does not package, from the release its checksum
+# pins, so the environment is the same wherever and whenever it is built.
 FROM quay.io/archlinux/archlinux:base-devel-20261025.0.616225@sha256:26af427182e674e9fc914fc0f6d9e794d79ca302abea64a3526e371cfa90313d
 
 ARG SNAPSHOT=2026/10/25
@@ -30,6 +31,19 @@ RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT}/\$repo/os/\$a
     && pacman -Scc --noconfirm \
     && rustup toolchain install "${RUST}" --profile minimal \
     && rustup default "${RUST}"
+
+ARG SUNSHINE=2026.1103.235308
+ARG SUNSHINE_SHA256=96615f47144d3e18b177b83ec2e41ed7a286fc521aaee276fef435dc96223ed8
+
+# Sunshine and Moonlight, with the desktop portal Sunshine captures the
+# screen through.
+RUN pacman -S --noconfirm moonlight-qt xdg-desktop-portal xdg-desktop-portal-gnome \
+    && curl -fsSL -o /tmp/sunshine.pkg.tar.zst \
+        "https://github.com/LizardByte/Sunshine/releases/download/v${SUNSHINE}/sunshine-${SUNSHINE}-1-x86_64.pkg.tar.zst" \
+    && echo "${SUNSHINE_SHA256}  /tmp/sunshine.pkg.tar.zst" | sha256sum -c - \
+    && pacman -U --noconfirm /tmp/sunshine.pkg.tar.zst \
+    && rm /tmp/sunshine.pkg.tar.zst \
+    && pacman -Scc --noconfirm
 
 # Builds go to a volume kept between runs.
 ENV CARGO_HOME=/cargo/home CARGO_TARGET_DIR=/cargo/target

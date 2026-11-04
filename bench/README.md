@@ -1,8 +1,9 @@
 # Benchmarks
 
-Measures how quickly QDP, RDP and VNC show a host's screen and answer a
-client's input. Everything runs in one container on one Linux machine, with
-every package pinned, so that results compare across machines and over time.
+Measures how quickly QDP, Sunshine with Moonlight, RDP and VNC show a
+host's screen and answer a client's input. Everything runs in one container
+on one Linux machine, with every package pinned, so that results compare
+across machines and over time.
 
 ## Run
 
@@ -26,7 +27,7 @@ measurements and logs. Ctrl+C stops the benchmark at once.
 
 | Variable | Default | What it sets |
 |---|---|---|
-| `QDP_BENCH_PROTOCOLS` | `local qdp rdp vnc` | The protocols to measure |
+| `QDP_BENCH_PROTOCOLS` | `local qdp sunshine rdp vnc` | The protocols to measure |
 | `QDP_BENCH_PROFILES` | `lan wan` | The network profiles to measure them over |
 | `QDP_BENCH_ROUNDS` | `1` | How many times each is measured |
 | `QDP_BENCH_SECONDS` | `15` | How long each measurement lasts |
@@ -42,13 +43,16 @@ For example, `QDP_BENCH_ROUNDS=3 bench/run`.
 |---|---|---|
 | `local` | None | None |
 | `qdp` | `qdp serve` | `qdp connect`, full screen |
+| `sunshine` | Sunshine | Moonlight, full screen |
 | `rdp` | GNOME Remote Desktop | FreeRDP, full screen |
 | `vnc` | GNOME Remote Desktop | TigerVNC, in a window |
 
 `local` is the baseline: the probe on the client's own screen, with no
 protocol in between. RDP and VNC are measured only at refresh rates up to
 60 Hz, as GNOME Remote Desktop streams RDP at 60 frames a second at most,
-and VNC at 30.
+and VNC at 30. Sunshine's click to photon is not measured: it injects input
+as virtual devices, which a headless GNOME session does not read, so its
+clicks all count as missed.
 
 ## Scenes
 
