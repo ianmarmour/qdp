@@ -11,9 +11,9 @@
       -d Icon=C:\src\qdp\windows\QDP\Assets\qdp.ico -o qdp-windows-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="QDP" Manufacturer="Ian Armour" Version="$(Version)"
+  <Package Name="Quick Desktop" Manufacturer="Ian Armour" Version="$(Version)"
            UpgradeCode="5E1C4C0B-6F3A-4D8B-9E2C-1A7D3F9B6C21" Scope="perMachine">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of QDP is already installed." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Quick Desktop is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="qdp.ico" SourceFile="$(Icon)" />
@@ -44,7 +44,7 @@
       </Component>
 
       <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
-        <Shortcut Id="AppShortcut" Name="QDP"
+        <Shortcut Id="AppShortcut" Name="Quick Desktop"
                   Description="Stream the desktops of your computers"
                   Target="[INSTALLFOLDER]QDP.exe" WorkingDirectory="INSTALLFOLDER"
                   Icon="qdp.ico" />

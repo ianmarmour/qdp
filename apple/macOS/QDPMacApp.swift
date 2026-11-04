@@ -11,7 +11,7 @@ struct QDPMacApp: App {
     }
 
     var body: some Scene {
-        Window("QDP", id: WindowID.hosts) {
+        Window("Quick Desktop", id: WindowID.hosts) {
             HostBrowserView(store: store)
         }
         .defaultSize(width: 520, height: 560)
@@ -65,7 +65,7 @@ struct HostBrowserView: View {
                 open: { openWindow(id: WindowID.stream, value: $0) },
                 addByAddress: { adding = true }
             )
-            .navigationTitle("QDP")
+            .navigationTitle("Quick Desktop")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Add Computer", systemImage: "plus") { adding = true }

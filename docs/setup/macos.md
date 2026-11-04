@@ -1,7 +1,7 @@
 # Installing on a Mac
 
-QDP for the Mac has two parts: the QDP app, and the `qdp` command, which
-shares this Mac.
+QDP for the Mac has two parts: the Quick Desktop app, and the `qdp` command,
+which shares this Mac.
 
 ## Requirements
 
@@ -11,9 +11,10 @@ shares this Mac.
 ## Install
 
 1. Download [`qdp-macos-app.zip`](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-app.zip), open it, and move
-   QDP to your Applications folder.
-2. Open QDP. QDP isn't notarized yet, so macOS refuses the first time: choose
-   **Open Anyway** for it under System Settings, Privacy & Security.
+   Quick Desktop to your Applications folder.
+2. Open Quick Desktop. It isn't notarized yet, so macOS refuses the first
+   time: choose **Open Anyway** for it under System Settings, Privacy &
+   Security.
 
 To share this Mac, download
 [`qdp-macos-arm64.tar.gz`](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-arm64.tar.gz), then extract the

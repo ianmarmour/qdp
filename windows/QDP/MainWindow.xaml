@@ -8,7 +8,7 @@
     x:Class="Qdp.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="QDP">
+    Title="Quick Desktop">
     <Window.SystemBackdrop>
         <MicaBackdrop />
     </Window.SystemBackdrop>
@@ -27,7 +27,7 @@
             <Image Source="ms-appx:///Assets/qdp.png" Width="16" Height="16" VerticalAlignment="Center" />
             <TextBlock
                 Grid.Column="1"
-                Text="QDP"
+                Text="Quick Desktop"
                 VerticalAlignment="Center"
                 Style="{StaticResource CaptionTextBlockStyle}" />
         </Grid>

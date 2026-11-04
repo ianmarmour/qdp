@@ -34,12 +34,13 @@ targets:
     info:
       path: Generated/macOS-Info.plist
       properties:
-        CFBundleDisplayName: QDP
+        CFBundleDisplayName: Quick Desktop
+        CFBundleName: Quick Desktop
         CFBundleShortVersionString: $(MARKETING_VERSION)
         LSApplicationCategoryType: public.app-category.utilities
-        NSLocalNetworkUsageDescription: QDP finds the computers on your network you can stream from, and connects to them.
+        NSLocalNetworkUsageDescription: Quick Desktop finds the computers on your network you can stream from, and connects to them.
         NSBonjourServices: [_qdp._udp]
-        NSMicrophoneUsageDescription: QDP sends your microphone to the computer you stream from when you turn it on.
+        NSMicrophoneUsageDescription: Quick Desktop sends your microphone to the computer you stream from when you turn it on.
     entitlements:
       path: Generated/macOS.entitlements
       properties:

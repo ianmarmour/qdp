@@ -5,7 +5,7 @@ verbs; errors give one cause and one next step. The UI says "computer";
 "host", "pin" and "token" appear only in Advanced.
 -->
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <string name="app_name">QDP</string>
+    <string name="app_name">Quick Desktop</string>
 
     <!-- Shared actions. -->
     <string name="action_cancel">Cancel</string>

@@ -84,7 +84,7 @@ pub fn startup(application: &adw::Application) {
     let about = gio::ActionEntry::builder("about")
         .activate(|application: &adw::Application, _, _| {
             let about = adw::AboutDialog::builder()
-                .application_name("QDP")
+                .application_name("Quick Desktop")
                 .application_icon(APP_ID)
                 .developer_name("Ian Armour")
                 .version(env!("CARGO_PKG_VERSION"))
@@ -269,7 +269,7 @@ impl Window {
         toasts.set_child(Some(&view));
         let window = adw::ApplicationWindow::builder()
             .application(application)
-            .title("QDP")
+            .title("Quick Desktop")
             .default_width(DEFAULT_SIZE.0)
             .default_height(DEFAULT_SIZE.1)
             .content(&toasts)

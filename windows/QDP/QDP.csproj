@@ -13,7 +13,8 @@
     <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
     <RootNamespace>Qdp</RootNamespace>
     <AssemblyName>QDP</AssemblyName>
-    <Product>QDP</Product>
+    <Product>Quick Desktop</Product>
+    <AssemblyTitle>Quick Desktop</AssemblyTitle>
     <!-- The workspace's version, from the root Cargo.toml. -->
     <Version>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\Cargo.toml')), '(?m)^version = "([^"]+)"').Groups[1].Value)</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>

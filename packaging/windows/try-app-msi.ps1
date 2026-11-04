@@ -11,7 +11,7 @@ Import-Module (Join-Path $PSScriptRoot 'installer-test.psm1')
 $folder = Join-Path $env:ProgramFiles 'QDP'
 $bin = Join-Path $folder 'bin'
 $app = Join-Path $folder 'QDP.exe'
-$shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\QDP.lnk'
+$shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Quick Desktop.lnk'
 
 Invoke-Installer @('/i', $Installer) 'app-install.log'
 foreach ($file in @($app, (Join-Path $folder 'qdp_windows.dll'), (Join-Path $bin 'qdp.exe'))) {
