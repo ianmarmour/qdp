@@ -256,6 +256,19 @@ start_protocol() {
     pids=("$viewer" "$server")
 }
 
+# The highest refresh rate GNOME Remote Desktop streams at, in hertz: RDP
+# at 60 frames a second, VNC at 30. Above it, only QDP and the baseline are
+# measured.
+remote_desktop_max_refresh=60
+
+# Returns whether protocol $1 is measured at $refresh.
+measured_at_refresh() {
+    case $1 in
+        rdp | vnc) [ "$refresh" -le "$remote_desktop_max_refresh" ] ;;
+        *) return 0 ;;
+    esac
+}
+
 # Starts the probe showing $scene where protocol $1 shows it: on the
 # host's screen, or for the local baseline, the client's. Sets $probe to
 # it.
@@ -284,6 +297,9 @@ for refresh in "${refreshes[@]}"; do
         count=${#protocols[@]}
         for index in $(seq 0 $((count - 1))); do
             protocol=${protocols[$(((index + round - 1) % count))]}
+            if ! measured_at_refresh "$protocol"; then
+                continue
+            fi
             if ! start_protocol "$protocol"; then
                 echo "starting $protocol failed; see $logs" >&2
                 stop_protocol "$protocol"

@@ -45,7 +45,9 @@ For example, `QDP_BENCH_ROUNDS=3 bench/run`.
 | `vnc` | GNOME Remote Desktop | TigerVNC, in a window |
 
 `local` is the baseline: the probe on the client's own screen, with no
-protocol in between.
+protocol in between. RDP and VNC are measured only at refresh rates up to
+60 Hz, as GNOME Remote Desktop streams RDP at 60 frames a second at most,
+and VNC at 30.
 
 ## Scenes
 
