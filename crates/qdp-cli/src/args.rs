@@ -96,9 +96,8 @@ Serve options:
   --resume SECONDS     How long a client whose connection dropped may
                        reconnect without its credentials, 0 for never
                        (default 300)
-  --lock on|off        Lock this machine's desktop when a session ends other
-                       than by its client disconnecting, as when the network
-                       drops (default on)
+  --lock on|off        Lock this machine's desktop again when a session ends,
+                       if it was locked when the session began (default on)
   --privacy on|off     Cover this machine's displays and ignore its own
                        keyboard and mouse while a session streams the screen,
                        on Windows 10 version 2004 or later (default off)
@@ -379,8 +378,7 @@ pub struct ServeArgs {
     /// How long resumption tokens remain valid after their connection
     /// ends, or `None` to issue none.
     pub resumption: Option<Duration>,
-    /// What happens to the desktop when a session ends other than by its
-    /// client disconnecting.
+    /// What happens to the desktop when a session ends.
     pub lock: LockPolicy,
     /// Whether the host's displays are covered, and its own input held
     /// back, while a session streams the screen.
@@ -389,11 +387,11 @@ pub struct ServeArgs {
     pub gpu_capture: GpuCapture,
 }
 
-/// What a host does with its desktop when a session ends other than by its
-/// client disconnecting (Section 11.4).
+/// What a host does with its desktop when a session ends (Section 11.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LockPolicy {
-    /// The desktop is locked, so that it is not left unlocked.
+    /// The desktop is locked again if it was locked when the session began,
+    /// so that the session does not leave it unlocked.
     Lock,
     /// The desktop is left as it is.
     Leave,

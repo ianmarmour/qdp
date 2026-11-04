@@ -85,7 +85,7 @@ pub use gateway_route::{
 };
 pub use gateway_trust::{GatewayTrust, GatewayUser};
 pub use host::{
-    DesktopLock, DesktopOpener, EncoderTuning, HostDesktop, HostOptions, HostSummary,
+    DesktopLock, DesktopOpener, EncoderTuning, HostDesktop, HostOptions, HostSummary, LockWhen,
     OpenedDesktop, input_classes, serve,
 };
 pub use host_input::{

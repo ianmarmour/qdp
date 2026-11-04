@@ -82,7 +82,7 @@ pub use browse::{Discovery, FoundHost, browse};
 pub use clipboard::SystemClipboard;
 #[cfg(target_os = "linux")]
 pub use clipboard::adopt_wayland_display;
-pub use desktop_lock::lock_desktop;
+pub use desktop_lock::{desktop_locked, lock_desktop};
 #[cfg(feature = "gamepad")]
 pub use gamepad::GamepadCapture;
 pub use host_privacy::{HAS_PRIVACY, HostPrivacy, host_privacy};
