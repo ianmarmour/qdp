@@ -94,9 +94,6 @@ Serve options:
   --resume SECONDS     How long a client whose connection dropped may
                        reconnect without its credentials, 0 for never
                        (default 300)
-  --lock on|off        Lock this machine's desktop when a session ends other
-                       than by its client disconnecting, as when the network
-                       drops (default on)
   --privacy on|off     Cover this machine's displays and ignore its own
                        keyboard and mouse while a session streams the screen,
                        on Windows 10 version 2004 or later (default off)

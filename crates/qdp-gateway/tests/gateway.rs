@@ -781,7 +781,6 @@ async fn start_vouched_host(assertion_key: [u8; 32]) -> (SocketAddr, KeyPin) {
                         Ok(OpenedDesktop {
                             source: Box::new(TestPattern::new(320, 240)),
                             injector: Box::new(NoInput),
-                            lock: None,
                         })
                     })
                 }),
