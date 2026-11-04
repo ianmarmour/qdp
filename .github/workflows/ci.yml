@@ -273,6 +273,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.apple == 'true'
     runs-on: macos-15
+    env:
+      HAS_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -297,6 +299,33 @@ jobs:
       - name: Build the qdp command
         if: github.event_name == 'push'
         run: cargo build --release --locked -p qdp-cli
+
+      # Released commands are signed with the Developer ID and notarized,
+      # as the Apple workflow does the app.
+      - name: Check a release can be signed
+        if: github.event_name == 'push' && env.HAS_DEVELOPER_ID != 'true'
+        run: |
+          echo "::error::Releases need the Apple secrets docs/releasing.md lists."
+          exit 1
+
+      - name: Import the Developer ID certificate
+        if: github.event_name == 'push'
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: packaging/macos/import-certificate.sh
+
+      - name: Sign and notarize the qdp command
+        if: github.event_name == 'push'
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          codesign --force --options runtime --timestamp \
+            --entitlements packaging/macos/qdp.entitlements \
+            --sign "Developer ID Application" target/release/qdp
+          packaging/macos/notarize.sh target/release/qdp
 
       - name: Package
         if: github.event_name == 'push'
@@ -387,6 +416,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.apple == 'true'
     uses: ./.github/workflows/apple.yml
+    secrets: inherit
 
   windows-app:
     name: Windows app
