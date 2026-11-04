@@ -9,10 +9,10 @@ plugins {
 // A keystore named in the environment, as CI's secrets give it, signs
 // release builds, so that each one installs over the last and Google Play
 // takes them; without one they are signed with this machine's debug key.
-// Its key is the one aliased qdp, and has the keystore's password, as
-// PKCS12 keystores' keys do, unless the environment names others.
+// Its key is the one aliased qdp, and has the keystore's password, if it has
+// one, as PKCS12 keystores' keys do, unless the environment names others.
 val releaseKeystore = System.getenv("QDP_KEYSTORE")?.takeIf { it.isNotEmpty() }?.let(::file)
-val keystorePassword = System.getenv("QDP_KEYSTORE_PASSWORD")
+val keystorePassword = System.getenv("QDP_KEYSTORE_PASSWORD").orEmpty()
 
 // The workspace's version, from the root Cargo.toml.
 val workspaceVersion = rootProject.file("../Cargo.toml").readLines()

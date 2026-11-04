@@ -28,11 +28,13 @@ since the last release, with every build attached.
 
 Every Android build is signed with the same key, so that each installs over
 the last; Google Play knows the app by it. A release fails without it; other
-runs sign with a debug key. Create it once, and keep it and its password
-safe, as it can't be made again:
+runs sign with a debug key. Create it once, as a keystore without a password,
+and keep it safe, as it can't be made again:
 
 ```bash
-keytool -genkeypair -keystore qdp-upload.keystore -alias qdp -keyalg RSA -keysize 4096 -validity 10000 -storetype PKCS12
+openssl req -x509 -newkey rsa:4096 -nodes -keyout qdp-key.pem -out qdp-cert.pem -days 10000 -subj "/CN=Ian Armour"
+openssl pkcs12 -export -inkey qdp-key.pem -in qdp-cert.pem -name qdp -out qdp-upload.keystore -passout pass:
+rm qdp-key.pem qdp-cert.pem
 ```
 
 Give it to the repository as these secrets, under Settings, Secrets and
@@ -41,7 +43,7 @@ variables, Actions:
 | Secret | Value |
 |---|---|
 | `ANDROID_KEYSTORE_BASE64` | The keystore, base64-encoded |
-| `ANDROID_KEYSTORE_PASSWORD` | The keystore's password |
+| `ANDROID_KEYSTORE_PASSWORD` | The keystore's password, if it has one |
 
 Local builds read the same key from `QDP_KEYSTORE` and
 `QDP_KEYSTORE_PASSWORD`.
