@@ -257,29 +257,6 @@ pub struct OpenedDesktop {
     pub source: Box<dyn FrameSource>,
     /// Performs the client's input on the host's desktop.
     pub injector: Box<dyn InputInjector>,
-    /// Locks the desktop as the session ends, if it should be locked then
-    /// (Section 11.4).
-    pub lock: Option<DesktopLock>,
-}
-
-/// Locks a host's desktop as a session ends, so that the session leaves it
-/// locked if it found it locked (Section 11.4).
-pub struct DesktopLock {
-    /// Locks the desktop.
-    pub lock: Box<dyn FnOnce() + Send>,
-    /// When the session locks it.
-    pub when: LockWhen,
-}
-
-/// When a session locks its host's desktop as it ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LockWhen {
-    /// However the session ends: the desktop was locked when it began.
-    Always,
-    /// When the session ends other than by its client disconnecting, as
-    /// when the network drops: whether the desktop was locked when it began
-    /// is not known.
-    UnlessDisconnected,
 }
 
 /// Opens a host session's desktop.
@@ -409,7 +386,6 @@ async fn serve_session(
     let OpenedDesktop {
         mut source,
         mut injector,
-        lock,
     } = opened;
     let worker = clipboard
         .map(|shared| ClipboardWorker::spawn(shared.clipboard))
@@ -603,38 +579,7 @@ async fn serve_session(
     // Nothing the client held stays held on the host.
     let actions = active.devices.release_all();
     active.inject(&actions, active.display.layout());
-    // The desktop is left locked if the session found it locked; where
-    // that is not known, it is locked unless the client disconnected, so
-    // that a dropped network, a replaced session or a stopped host does not
-    // leave it unlocked (Section 11.4).
-    let quic = active.driver.connection().quic();
-    let lock =
-        lock.filter(|lock| lock.when == LockWhen::Always || !client_disconnected(&result, quic));
-    if let Some(lock) = lock {
-        match lock.when {
-            LockWhen::Always => info!("the session found the desktop locked; locking it again"),
-            LockWhen::UnlessDisconnected => {
-                info!("the session ended without its client disconnecting; locking the desktop");
-            }
-        }
-        (lock.lock)();
-    }
     result
-}
-
-/// Returns whether a session that ended with `result` on `connection` ended
-/// because its client disconnected, closing the connection with
-/// `QDP_NO_ERROR`.
-fn client_disconnected(
-    result: &Result<HostSummary, RuntimeError>,
-    connection: &quinn::Connection,
-) -> bool {
-    result.is_ok()
-        && matches!(
-            connection.close_reason(),
-            Some(quinn::ConnectionError::ApplicationClosed(close))
-                if close.error_code == quinn::VarInt::from_u32(0)
-        )
 }
 
 /// Returns the next event of a session being set up, or `None` once the

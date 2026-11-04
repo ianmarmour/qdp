@@ -143,7 +143,7 @@ $server = Start-Process -FilePath $qdp -PassThru -NoNewWindow `
     -RedirectStandardError (Join-Path $shots 'host.log') `
     -ArgumentList @('serve', '--listen', '127.0.0.1:4433', '--identity', $identity,
         '--token', $token, '--source', 'test-pattern', '--pairing', 'off',
-        '--advertise', 'off', '--lock', 'off', '--audio', 'off')
+        '--advertise', 'off', '--audio', 'off')
 Start-Sleep -Seconds 3
 
 # The app streams in a window, with its statistics, as its settings say.

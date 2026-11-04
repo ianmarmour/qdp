@@ -20,10 +20,9 @@
 //! [`host_audio`] and [`client_audio`] open the audio devices sessions play
 //! and capture through, `GamepadCapture` watches a client's gamepads,
 //! [`PassthroughCapture`] passes the devices the user chose through,
-//! [`TouchpadCapture`] sends the touchpad's raw contacts, and
-//! [`lock_desktop`] locks the desktop when a session ends unexpectedly,
-//! [`host_privacy`] covers its displays and holds back its own input during
-//! one, [`advertise`] advertises the host on the local network, and
+//! [`TouchpadCapture`] sends the touchpad's raw contacts,
+//! [`host_privacy`] covers the host's displays and holds back its own input
+//! during a session, [`advertise`] advertises the host on the local network, and
 //! [`notify`] shows the host's user a notification.
 
 mod advertise;
@@ -35,7 +34,6 @@ mod clipboard;
     any(target_os = "macos", target_os = "ios", windows, target_os = "android")
 ))]
 mod cpal_audio;
-mod desktop_lock;
 #[cfg(feature = "gamepad")]
 mod gamepad;
 mod host_privacy;
@@ -82,7 +80,6 @@ pub use browse::{Discovery, FoundHost, browse};
 pub use clipboard::SystemClipboard;
 #[cfg(target_os = "linux")]
 pub use clipboard::adopt_wayland_display;
-pub use desktop_lock::{desktop_locked, lock_desktop};
 #[cfg(feature = "gamepad")]
 pub use gamepad::GamepadCapture;
 pub use host_privacy::{HAS_PRIVACY, HostPrivacy, host_privacy};

@@ -36,11 +36,11 @@ use qdp_desktop::{
 use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdentity};
 use qdp_runtime::{
     Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
-    ClipboardDirections, DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource,
-    GatewayFailure, GatewayRoute, GatewayTrust, HostAudio, HostAuthenticator, HostDesktop,
-    HostOptions, InputInjector, InputQueue, LockWhen, OpenedDesktop, Pairing, PairingEvent,
-    PairingOutcome, PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt,
-    TestPattern, Tunnel, gateway_verification, open_tunnel,
+    ClipboardDirections, DisplaySize, EncoderTuning, FrameSink, FrameSource, GatewayFailure,
+    GatewayRoute, GatewayTrust, HostAudio, HostAuthenticator, HostDesktop, HostOptions,
+    InputInjector, InputQueue, OpenedDesktop, Pairing, PairingEvent, PairingOutcome, PairingPrompt,
+    ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt, TestPattern, Tunnel,
+    gateway_verification, open_tunnel,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -54,8 +54,8 @@ use qdp_app::events::{CodeRequest, Event};
 use crate::app_events::EventLines;
 use crate::args::{
     AdvertiseMode, Audio, Command, ConnectArgs, DECODER_COMMAND, DecoderPlacement, Destination,
-    GatewayArgs, GpuCapture, HostTrust, LockPolicy, PairedAction, PairingMode, Presentation,
-    Privacy, ServeArgs, SourceKind, USAGE, format_pin, parse_args,
+    GatewayArgs, GpuCapture, HostTrust, PairedAction, PairingMode, Presentation, Privacy,
+    ServeArgs, SourceKind, USAGE, format_pin, parse_args,
 };
 use crate::gateway::GatewaySessions;
 use crate::identity::Role;
@@ -341,7 +341,6 @@ async fn serve(args: ServeArgs) -> CliResult {
     let source_kind = args.source;
     let clipboard_directions = args.clipboard;
     let audio_setting = args.audio;
-    let lock_policy = args.lock;
     let privacy = args.privacy;
     let match_display = args.match_display;
     let screen = ScreenOptions {
@@ -421,7 +420,6 @@ async fn serve(args: ServeArgs) -> CliResult {
                                     source_kind,
                                     (width, height),
                                     state_directory,
-                                    lock_policy,
                                     screen,
                                     local,
                                     peer,
@@ -534,13 +532,12 @@ fn shared_clipboard(directions: Option<ClipboardDirections>) -> Option<SharedCli
 
 /// Opens a session's desktop once its client has authenticated: what it
 /// streams, as [`open_source`] opens it, an input injector for it, and,
-/// when it streams the screen, the lock that `lock` asks for, and what
-/// `local` shows the host's user of the client at `peer` streaming it.
+/// when it streams the screen, what `local` shows the host's user of the
+/// client at `peer` streaming it.
 async fn open_desktop(
     kind: SourceKind,
     size: (usize, usize),
     state_directory: Arc<PathBuf>,
-    lock: LockPolicy,
     screen: ScreenOptions,
     local: LocalUser,
     peer: SocketAddr,
@@ -562,31 +559,7 @@ async fn open_desktop(
         let (width, height) = source.size();
         qdp_desktop::input_injector(width as u32, height as u32)
     });
-    let lock = match (streamed, lock) {
-        // The session leaves the desktop as it finds it: locked again if it
-        // is locked now, and left alone if not (Section 11.4).
-        (Streamed::Screen, LockPolicy::Lock) => {
-            let locked = tokio::task::spawn_blocking(qdp_desktop::desktop_locked)
-                .await
-                .ok()
-                .flatten();
-            let when = match locked {
-                Some(true) => Some(LockWhen::Always),
-                Some(false) => None,
-                None => Some(LockWhen::UnlessDisconnected),
-            };
-            when.map(|when| DesktopLock {
-                lock: Box::new(lock_desktop),
-                when,
-            })
-        }
-        (Streamed::TestPattern, _) | (_, LockPolicy::Leave) => None,
-    };
-    Ok(OpenedDesktop {
-        source,
-        injector,
-        lock,
-    })
+    Ok(OpenedDesktop { source, injector })
 }
 
 /// How long the notice that a device streams this desktop may stay at
@@ -676,13 +649,6 @@ impl LocalUser {
     async fn ended(&self) {
         *self.covered.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.notice.close().await;
-    }
-}
-
-/// Locks this machine's desktop, or says why it cannot.
-fn lock_desktop() {
-    if let Err(error) = qdp_desktop::lock_desktop() {
-        warn!(%error, "cannot lock the desktop");
     }
 }
 

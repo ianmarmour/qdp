@@ -81,12 +81,6 @@ protected against replay by QUIC.
 - A host SHOULD tell its local user, where one may be present, that a remote session
   is active, for example with a visible indicator, and SHOULD offer to blank its
   local displays and suppress local input during a session.
-- When a session ends, the host SHOULD leave the desktop as locked as the session
-  found it: locked again if it was locked when the session began, and as it is if
-  not, or as an administrator's policy says. A host that cannot tell whether the
-  desktop was locked SHOULD lock it when the session ends other than by the user
-  disconnecting, for example because the network dropped or the session was
-  replaced, so that it is not left unlocked.
 - The client MUST always offer a local way to release keyboard and pointer capture
   ([Section 8.9](08-input.md#89-pointer_mode-0x33)), so that a host cannot trap the
   user's input, and applies the host's pointer warps and confinement only within the
