@@ -108,6 +108,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The tests' debug build, with the cache it starts from, and the release
+      # builds of qdp, the Linux app and the gateway outgrow the runner's free
+      # disk: the SDKs it comes with that this job does not use make room.
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+
       - name: Install system libraries
         # NASM for the codecs' assembly; PipeWire for screen capture and
         # audio, whose bindings libclang generates; libudev for gamepads;
@@ -133,13 +139,6 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --locked
-
-      # The release builds of qdp, the Linux app and the gateway, beside the
-      # tests' debug build, outgrow the runner's free disk: the SDKs it comes
-      # with that this job does not use make room.
-      - name: Free disk space
-        if: github.event_name == 'push'
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
 
       - name: Build the qdp command
         if: github.event_name == 'push'
