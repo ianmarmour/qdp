@@ -11,7 +11,12 @@ platforms the branch changes.
 
 ## Publishing a release
 
-1. Raise `version` in the root `Cargo.toml`, and merge that change.
+1. Raise `version` in the root `Cargo.toml`, then `cargo update --workspace`,
+   and the apps' own versions: `MARKETING_VERSION` in `apple/project.yml`,
+   `Version` in `windows/QDP/QDP.csproj` and its `app.manifest`, and a new
+   `release` in the Linux app's
+   `crates/qdp-gtk/data/io.github.ianmarmour.qdp.metainfo.xml`. Merge that
+   change.
 2. Write the release's description in a file, such as `release.md`:
 
    ```markdown

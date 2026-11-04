@@ -23,7 +23,7 @@ android {
         targetSdk = 35
         // CI numbers its builds, so that each installs over the one before.
         versionCode = System.getenv("QDP_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = System.getenv("QDP_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: "0.1.0"
+        versionName = System.getenv("QDP_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: "0.2.0"
         ndk {
             abiFilters += "arm64-v8a"
         }

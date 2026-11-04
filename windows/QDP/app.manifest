@@ -2,7 +2,7 @@
 <!-- The app's manifest: Windows 10 and 11, and sharp at every display scale,
      each monitor's own. -->
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="0.1.0.0" name="QDP.app" />
+  <assemblyIdentity version="0.2.0.0" name="QDP.app" />
 
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
