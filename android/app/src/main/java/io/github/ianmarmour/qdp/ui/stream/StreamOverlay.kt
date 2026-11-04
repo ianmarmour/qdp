@@ -12,10 +12,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -61,79 +64,83 @@ fun StreamOverlay(ui: StreamUiState, actions: StreamActions, gatewayUser: String
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        val stats = ui.stats
-        if (stats != null && ui.statsLevel != StatsLevel.HIDDEN && ui.phase != StreamPhase.CONNECTING) {
-            StatsPill(
-                stats = stats,
-                level = ui.statsLevel,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .windowInsetsPadding(WindowInsets.displayCutout)
-                    .padding(12.dp),
+    // Text and icons over the stream take the theme's color for them, as
+    // on a Material surface, rather than Compose's default black.
+    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            val stats = ui.stats
+            if (stats != null && ui.statsLevel != StatsLevel.HIDDEN && ui.phase != StreamPhase.CONNECTING) {
+                StatsPill(
+                    stats = stats,
+                    level = ui.statsLevel,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .windowInsetsPadding(WindowInsets.displayCutout)
+                        .padding(12.dp),
+                )
+            }
+            AnimatedVisibility(
+                visible = ui.phase == StreamPhase.RECONNECTING,
+                modifier = Modifier.align(Alignment.TopCenter),
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut(),
+            ) {
+                ReconnectingBanner(ui.reconnectAt, actions.disconnect)
+            }
+            // At the top, where the reconnecting banner shows only while the tip
+            // does not, so that the tip clears the "Paired" message below.
+            AnimatedVisibility(
+                visible = ui.coachmark == Visibility.SHOWN && ui.phase == StreamPhase.LIVE,
+                modifier = Modifier.align(Alignment.TopCenter),
+                enter = fadeIn(),
+                exit = fadeOut(),
+            ) {
+                MenuCoachmark(gamepad)
+            }
+            if (ui.controllerActive && ui.phase != StreamPhase.CONNECTING) {
+                OnScreenController(ui.controllerControls)
+            }
+            AnimatedVisibility(visible = ui.phase == StreamPhase.CONNECTING, enter = fadeIn(), exit = fadeOut()) {
+                ConnectingScreen(ui.hostName, ui.connectingStep, actions.disconnect)
+            }
+            StreamMenu(ui, actions)
+            SnackbarHost(
+                hostState = snackbar,
+                modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.safeDrawing),
             )
         }
-        AnimatedVisibility(
-            visible = ui.phase == StreamPhase.RECONNECTING,
-            modifier = Modifier.align(Alignment.TopCenter),
-            enter = slideInVertically { -it } + fadeIn(),
-            exit = slideOutVertically { -it } + fadeOut(),
-        ) {
-            ReconnectingBanner(ui.reconnectAt, actions.disconnect)
-        }
-        // At the top, where the reconnecting banner shows only while the tip
-        // does not, so that the tip clears the "Paired" message below.
-        AnimatedVisibility(
-            visible = ui.coachmark == Visibility.SHOWN && ui.phase == StreamPhase.LIVE,
-            modifier = Modifier.align(Alignment.TopCenter),
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            MenuCoachmark(gamepad)
-        }
-        if (ui.controllerActive && ui.phase != StreamPhase.CONNECTING) {
-            OnScreenController(ui.controllerControls)
-        }
-        AnimatedVisibility(visible = ui.phase == StreamPhase.CONNECTING, enter = fadeIn(), exit = fadeOut()) {
-            ConnectingScreen(ui.hostName, ui.connectingStep, actions.disconnect)
-        }
-        StreamMenu(ui, actions)
-        SnackbarHost(
-            hostState = snackbar,
-            modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.safeDrawing),
-        )
-    }
 
-    ui.pairing?.let { pairing ->
-        PairingDialog(
-            hostName = ui.hostName,
-            deviceName = ui.deviceName,
-            pairing = pairing,
-            layout = if (compactHeight) PairingLayout.SIDE_BY_SIDE else PairingLayout.STACKED,
-            onSubmit = actions.submitCode,
-            onCancel = actions.cancelPairing,
-            onTryAgain = actions.tryAgain,
-            onClose = actions.leave,
-        )
-    }
-    ui.gatewaySignIn?.let { signIn ->
-        if (signIn.code) {
-            GatewayCodeDialog(
-                gateway = signIn.gateway,
-                retry = signIn.retry,
-                enrollment = signIn.enrollment,
-                onSubmit = actions.submitSignInCode,
-                onCancel = actions.cancelSignIn,
-            )
-        } else {
-            GatewaySignInDialog(
-                gateway = signIn.gateway,
-                retry = signIn.retry,
-                user = gatewayUser,
-                onSubmit = actions.submitSignIn,
-                onCancel = actions.cancelSignIn,
+        ui.pairing?.let { pairing ->
+            PairingDialog(
+                hostName = ui.hostName,
+                deviceName = ui.deviceName,
+                pairing = pairing,
+                layout = if (compactHeight) PairingLayout.SIDE_BY_SIDE else PairingLayout.STACKED,
+                onSubmit = actions.submitCode,
+                onCancel = actions.cancelPairing,
+                onTryAgain = actions.tryAgain,
+                onClose = actions.leave,
             )
         }
+        ui.gatewaySignIn?.let { signIn ->
+            if (signIn.code) {
+                GatewayCodeDialog(
+                    gateway = signIn.gateway,
+                    retry = signIn.retry,
+                    enrollment = signIn.enrollment,
+                    onSubmit = actions.submitSignInCode,
+                    onCancel = actions.cancelSignIn,
+                )
+            } else {
+                GatewaySignInDialog(
+                    gateway = signIn.gateway,
+                    retry = signIn.retry,
+                    user = gatewayUser,
+                    onSubmit = actions.submitSignIn,
+                    onCancel = actions.cancelSignIn,
+                )
+            }
+        }
+        ui.error?.let { error -> ErrorDialog(error, ui.hostName, actions.tryAgain, actions.leave) }
     }
-    ui.error?.let { error -> ErrorDialog(error, ui.hostName, actions.tryAgain, actions.leave) }
 }
