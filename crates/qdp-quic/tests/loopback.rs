@@ -415,11 +415,20 @@ async fn host_answers_a_probe() {
         .unwrap();
     assert!(answered);
     drop(host);
-    let closed = tokio::task::spawn_blocking(move || qdp_quic::probe(address, wait))
+    // The endpoint's socket closes once its driver notices the drop, a
+    // moment later, so the port is probed until it goes quiet.
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while tokio::task::spawn_blocking(move || qdp_quic::probe(address, wait))
         .await
         .unwrap()
-        .unwrap();
-    assert!(!closed);
+        .unwrap()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "a host that is gone still answers"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// A client refuses a host whose key does not match its pin.
