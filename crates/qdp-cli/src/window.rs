@@ -776,13 +776,10 @@ impl WindowApp {
             .is_some_and(|display| display.painter.on_gpu())
     }
 
-    /// Returns when the pending warp may be applied.
-    fn warp_allowed_at(&self) -> Option<Instant> {
+    /// Returns when the pending warp may be applied, as of `now`.
+    fn warp_allowed_at(&self, now: Instant) -> Option<Instant> {
         self.pending_warp?;
-        Some(
-            self.last_warp
-                .map_or_else(Instant::now, |last| last + MIN_WARP_INTERVAL),
-        )
+        Some(warp_due(self.last_warp, now))
     }
 
     /// Applies the pending warp if the rate limit allows: the window's
@@ -790,7 +787,10 @@ impl WindowApp {
     /// the picture, and otherwise the window draws the cursor there itself,
     /// so that the drawn cursor always moves (Section 9.4).
     fn apply_pending_warp(&mut self, now: Instant) {
-        if self.warp_allowed_at().is_none_or(|allowed| now < allowed) {
+        if self
+            .warp_allowed_at(now)
+            .is_none_or(|allowed| now < allowed)
+        {
             return;
         }
         let Some((x, y)) = self.pending_warp.take() else {
@@ -1377,8 +1377,9 @@ impl ApplicationHandler<WindowMessage> for WindowApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.update_cursor(event_loop);
-        self.apply_pending_warp(Instant::now());
-        event_loop.set_control_flow(match self.warp_allowed_at() {
+        let now = Instant::now();
+        self.apply_pending_warp(now);
+        event_loop.set_control_flow(match self.warp_allowed_at(now) {
             Some(allowed) => ControlFlow::WaitUntil(allowed),
             None => ControlFlow::Wait,
         });
@@ -1517,10 +1518,31 @@ fn attach_pen(
     .ok()
 }
 
+/// Returns when a warp may be applied, as of `now`, after the one applied
+/// at `last`: at once if none was, and the rate limit's interval after it
+/// otherwise (Section 9.4).
+fn warp_due(last: Option<Instant>, now: Instant) -> Instant {
+    last.map_or(now, |last| last + MIN_WARP_INTERVAL)
+}
+
 /// Creates the event loop the window runs on. It must be created on the main
 /// thread.
 pub fn event_loop() -> Result<EventLoop<WindowMessage>, String> {
     EventLoop::with_user_event()
         .build()
         .map_err(|error| format!("cannot start the window system: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first warp applies at once, and each after it once the rate
+    /// limit's interval since the last has passed.
+    #[test]
+    fn warps_are_due_at_once_then_at_the_rate_limit() {
+        let now = Instant::now();
+        assert_eq!(warp_due(None, now), now);
+        assert_eq!(warp_due(Some(now), now), now + MIN_WARP_INTERVAL);
+    }
 }
