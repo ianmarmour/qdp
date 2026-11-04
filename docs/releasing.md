@@ -54,8 +54,7 @@ A release fails without these secrets; other runs sign ad hoc.
 
 | Secret | Value |
 |---|---|
-| `APPLE_DEVELOPER_ID_P12_BASE64` | The Developer ID Application certificate with its private key, exported from Keychain Access as a `.p12`, base64-encoded |
-| `APPLE_DEVELOPER_ID_P12_PASSWORD` | The `.p12`'s password |
+| `APPLE_DEVELOPER_ID_P12_BASE64` | The Developer ID Application certificate with its private key, exported from Keychain Access as a `.p12` without a password, base64-encoded |
 | `APPLE_API_KEY_P8_BASE64` | A team API key from App Store Connect, under Users and Access, Integrations, base64-encoded |
 | `APPLE_API_KEY_ID` | The API key's ID |
 | `APPLE_API_ISSUER_ID` | The issuer ID above the list of API keys |
