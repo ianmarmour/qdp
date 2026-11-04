@@ -42,13 +42,13 @@ Windows, macOS, Android, iPhone and iPad.
 Install QDP as a **host** on the computer you want to reach, and as a
 **client** on each device you'll connect from.
 
-| Platform | Host | Client | Download |
-|---|:---:|:---:|---|
-| Linux | ✅ | ✅ | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) |
-| Windows | ✅ | ✅ | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) |
-| macOS (Apple silicon) | ✅ | ✅ | [APP](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-app.zip) / [BIN](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-arm64.tar.gz) |
-| Android | | ✅ | [APK](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-android-arm64.apk) |
-| iPhone and iPad | | ✅ | [IPA](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa) |
+| Platform | Host | Client |
+|---|---|---|
+| Linux | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) | The host's download, and the app: [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.rpm), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.tar.gz) |
+| Windows | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) | The same [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) |
+| macOS (Apple silicon) | [BIN](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-arm64.tar.gz) | [APP](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-app.zip) |
+| Android | | [APK](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-android-arm64.apk) |
+| iPhone and iPad | | [IPA](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-ios-unsigned.ipa) |
 
 Every download is on the
 [latest release](https://github.com/ianmarmour/qdp/releases/latest), and our
