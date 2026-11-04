@@ -467,6 +467,8 @@ apply_profile lan
         | grep -m1 PCI_ID | cut -d= -f2 || echo none)"
     echo "- QDP's encoder: $(grep -ho 'encoder="[^"]*"' "$logs"/*-qdp-*-server.log 2> /dev/null \
         | head -1 | cut -d'"' -f2 || echo unknown)"
+    echo "- QDP's decoder: $(grep -ho 'decoder="[^"]*"' "$logs"/*-qdp-*-viewer.log 2> /dev/null \
+        | head -1 | cut -d'"' -f2 || echo unknown)"
     rounds_measured="$rounds rounds"
     if [ "$rounds" = 1 ]; then
         rounds_measured="1 round"
