@@ -46,16 +46,17 @@ variables, Actions:
 Local builds read the same key from `QDP_KEYSTORE`, `QDP_KEYSTORE_PASSWORD`,
 `QDP_KEY_ALIAS` and `QDP_KEY_PASSWORD`.
 
-## Signing the Mac apps
+## Signing the Apple apps
 
 Releases sign the Mac app and the `qdp` command with the project's Developer
 ID, and have Apple notarize them, so that macOS opens them without a warning.
-A release fails without these secrets; other runs sign ad hoc.
+They also upload the iPhone and iPad app to TestFlight. A release fails
+without these secrets; other runs sign ad hoc.
 
 | Secret | Value |
 |---|---|
 | `APPLE_DEVELOPER_ID_P12_BASE64` | The Developer ID Application certificate with its private key, exported from Keychain Access as a `.p12` without a password, base64-encoded |
-| `APPLE_API_KEY_P8_BASE64` | A team API key from App Store Connect, under Users and Access, Integrations, base64-encoded |
+| `APPLE_API_KEY_P8_BASE64` | A team API key with Admin access from App Store Connect, under Users and Access, Integrations, base64-encoded |
 | `APPLE_API_KEY_ID` | The API key's ID |
 | `APPLE_API_ISSUER_ID` | The issuer ID above the list of API keys |
 
