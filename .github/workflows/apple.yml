@@ -19,6 +19,8 @@ jobs:
   apple:
     name: Apple apps
     runs-on: macos-latest
+    env:
+      HAS_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,16 +50,45 @@ jobs:
           brew install xcodegen
           xcodegen generate
 
+      # Releases are signed with the Developer ID and notarized; runs
+      # without the secrets docs/releasing.md lists sign ad hoc.
+      - name: Check a release can be signed
+        if: github.event_name == 'push' && env.HAS_DEVELOPER_ID != 'true'
+        run: |
+          echo "::error::Releases need the Apple secrets docs/releasing.md lists."
+          exit 1
+
+      - name: Import the Developer ID certificate
+        if: env.HAS_DEVELOPER_ID == 'true'
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: packaging/macos/import-certificate.sh
+
       - name: Build the Mac app
         working-directory: apple
-        # Signed ad hoc until a Developer ID is set up; testers allow it in
-        # Privacy & Security settings the first time.
         run: |
           xcodebuild -project QDP.xcodeproj -scheme QDP-macOS -configuration Release \
             -destination 'generic/platform=macOS' -derivedDataPath build \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
           ditto build/Build/Products/Release/QDP.app "build/Quick Desktop.app"
-          ditto -c -k --keepParent "build/Quick Desktop.app" ../qdp-macos-app.zip
+
+      - name: Sign and notarize the Mac app
+        if: env.HAS_DEVELOPER_ID == 'true'
+        working-directory: apple
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          codesign --force --options runtime --timestamp \
+            --entitlements Generated/macOS.entitlements \
+            --sign "Developer ID Application" "build/Quick Desktop.app"
+          ../packaging/macos/notarize.sh "build/Quick Desktop.app"
+
+      - name: Package the Mac app
+        working-directory: apple
+        run: ditto -c -k --keepParent "build/Quick Desktop.app" ../qdp-macos-app.zip
 
       - name: Build the iPhone and iPad app
         working-directory: apple
