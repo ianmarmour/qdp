@@ -9,7 +9,7 @@ set -euo pipefail
 size=${QDP_BENCH_SIZE:-1920x1080}
 seconds=${QDP_BENCH_SECONDS:-15}
 rounds=${QDP_BENCH_ROUNDS:-1}
-read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp rdp vnc}"
+read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp sunshine rdp vnc}"
 read -ra profiles <<< "${QDP_BENCH_PROFILES:-lan wan}"
 read -ra refreshes <<< "${QDP_BENCH_REFRESH:-60 120}"
 read -ra scenes <<< "${QDP_BENCH_SCENES:-low scroll full}"
@@ -38,12 +38,14 @@ bin=$CARGO_TARGET_DIR/release
 # The X11 display of the client's session, once it has one.
 client_x11=""
 
-# Prints the environment of session $1. Its pointer has GNOME's cursors, as
-# a desktop's does: a host takes a pointer kept hidden over an application
-# for one the application captured, as a game's.
+# Prints the environment of session $1: a GNOME Wayland session's, which the
+# desktop portal serves only when it says so. Its pointer has GNOME's
+# cursors, as a desktop's does: a host takes a pointer kept hidden over an
+# application for one the application captured, as a game's.
 session_env() {
     echo "HOME=$state/$1 XDG_RUNTIME_DIR=$state/$1" \
         "DBUS_SESSION_BUS_ADDRESS=unix:path=$state/$1/bus WAYLAND_DISPLAY=wayland-0" \
+        "XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome XDG_SESSION_TYPE=wayland" \
         "XCURSOR_THEME=Adwaita XCURSOR_SIZE=24"
     if [ "$1" = client ]; then
         echo "$client_x11"
@@ -196,6 +198,120 @@ start_gnome_remote_desktop() {
     pid=$server
 }
 
+# The restore token Sunshine shows the desktop portal, which lets it share
+# the screen without asking, once start_sunshine stores the approval.
+sunshine_token=00000000-0000-4000-8000-000000000001
+
+# The monitor the approval names, as GNOME's portal matches it: the
+# headless session's virtual monitor.
+sunshine_monitor=MetaVendor:MetaVirtualMonitor:0x00
+
+# Starts Sunshine in the host's session, sharing its screen through the
+# desktop portal, and sets $pid to it. The portal asks the user to approve
+# a new request, and no one is there to, so the approval it keeps for a
+# remembered one is stored first: for any application, for the keyboard
+# and pointer, and for the monitor.
+start_sunshine() {
+    in_session host gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
+        --object-path /org/freedesktop/impl/portal/PermissionStore \
+        --method org.freedesktop.impl.portal.PermissionStore.Set \
+        remote-desktop true "$sunshine_token" "{'': ['yes']}" \
+        "<('GNOME', uint32 1, <(int64 0, int64 0, uint32 3, false,
+            [(uint32 0, uint32 1, <'$sunshine_monitor'>)])>)>" > /dev/null
+    local config=$state/host/.config/sunshine
+    mkdir -p "$config"
+    printf '%s' "$sunshine_token" > "$config/portal_token.gnome"
+    printf '%s\n' 'capture = portal' 'system_tray = disabled' > "$config/sunshine.conf"
+    in_session host sunshine --creds "$user" "$password" &> /dev/null
+    spawn host "$log-server.log" sunshine
+    # Its web interface, which pairing goes through, comes up first, and
+    # the server Moonlight pairs with once Sunshine has found an encoder.
+    wait_for sunshine_api apps && wait_for bash -c "ss -ltn | grep -q ':47989 '"
+}
+
+# Starts Sunshine, and Moonlight streaming from it full screen on the
+# client's screen, and sets $server and $viewer to them. Sunshine asks the
+# desktop portal for the screen many times as it starts, and again as a
+# stream does, and listens for each answer only once it has asked: now and
+# then, mostly on a busy machine, the answer comes first and is missed, and
+# Sunshine waits on the portal for good. So it is started again, up to
+# three times.
+start_sunshine_stream() {
+    for _ in 1 2 3; do
+        local started=0
+        start_sunshine || started=1
+        server=$pid
+        if [ "$started" = 0 ] && pair_moonlight && start_moonlight; then
+            return 0
+        fi
+        stop "$server"
+    done
+    return 1
+}
+
+# Starts Moonlight streaming Sunshine's desktop full screen in the client's
+# session, sets $viewer to it, and waits for the stream's first picture.
+start_moonlight() {
+    spawn client "$log-viewer.log" moonlight stream 127.0.0.1 Desktop \
+        --resolution "$size" --fps "$refresh" --display-mode fullscreen --absolute-mouse
+    viewer=$pid
+    if wait_for grep -q "Received first video packet" "$log-viewer.log"; then
+        return 0
+    fi
+    stop "$viewer"
+    return 1
+}
+
+# Calls Sunshine's web interface at path $1 under /api, signed in, with the
+# options to curl after it.
+sunshine_api() {
+    local path=$1
+    shift
+    curl -sfk -u "$user:$password" "$@" "https://127.0.0.1:47990/api/$path"
+}
+
+# Returns whether Sunshine's web interface at path $1 lists $2.
+sunshine_lists() {
+    sunshine_api "$1" | grep -q "$2"
+}
+
+# Pairs Moonlight in the client's session with Sunshine. Now and then
+# Moonlight says the PIN was wrong when it was not, as it can for a user,
+# and pairing is tried again.
+pair_moonlight() {
+    if sunshine_lists clients/list '"uuid"'; then
+        return 0
+    fi
+    for _ in 1 2 3; do
+        if try_pairing; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Tries pairing Moonlight with Sunshine once, entering the PIN Moonlight
+# pairs with in Sunshine's web interface, as a user would.
+try_pairing() {
+    local pin=1234 paired=1
+    rm -rf "$state/client/.config/Moonlight Game Streaming Project"
+    spawn client "$log-pair.log" moonlight pair 127.0.0.1 --pin "$pin"
+    local pairing=$pid
+    if wait_for sunshine_lists pin '"id"'; then
+        local id
+        id=$(sunshine_api pin | grep -o '"id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+        sunshine_api pin -X POST -H 'Content-Type: application/json' \
+            -d "{\"pairing_id\":\"$id\",\"pin\":\"$pin\",\"name\":\"bench\"}" > /dev/null
+        # Moonlight says it paired until someone closes it, so Sunshine's
+        # list of paired clients says when it has.
+        if wait_for sunshine_lists clients/list '"uuid"'; then
+            paired=0
+        fi
+    fi
+    stop "$pairing"
+    return "$paired"
+}
+
 # Starts what protocol $1 needs: a host's session, the protocol's server
 # there, and its viewer full screen on the client's screen, which stay up
 # while the probe shows each scene over each network profile. Sets
@@ -224,6 +340,10 @@ start_protocol() {
             QDP_TOKEN=bench spawn client "$log-viewer.log" "$bin/qdp" connect 127.0.0.1:4433 \
                 --pin "$pin" --full-screen --identity "$state/client/qdp"
             viewer=$pid
+            ;;
+        sunshine)
+            start_session host monitor no-x11
+            start_sunshine_stream || return 1
             ;;
         rdp | vnc)
             # The server's monitor appears once the viewer connects, and
@@ -353,7 +473,8 @@ apply_profile lan
     fi
     echo "- Screen: $size at $(echo "${refreshes[*]}" | sed 's/ /, /g') Hz," \
         "$seconds seconds a run, $rounds_measured"
-    echo "- Packages: $(pacman -Q mutter gnome-remote-desktop freerdp tigervnc mesa \
+    echo "- Packages: $(pacman -Q mutter gnome-remote-desktop freerdp tigervnc sunshine \
+        moonlight-qt mesa \
         | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
 } > "$results/report.md"
 cat "$results/report.md"
