@@ -26,11 +26,15 @@ since the last release, with every build attached.
 
 ## Signing the Android app
 
-So that each Android build installs over the last, every build is signed with
-the same key. Create one and keep it safe:
+Every Android build is signed with the same key, so that each installs over
+the last; Google Play knows the app by it. A release fails without it; other
+runs sign with a debug key. Create it once, as a keystore without a password,
+and keep it safe, as it can't be made again:
 
 ```bash
-keytool -genkeypair -keystore qdp-release.keystore -alias qdp -keyalg RSA -keysize 4096 -validity 10000
+openssl req -x509 -newkey rsa:4096 -nodes -keyout qdp-key.pem -out qdp-cert.pem -days 10000 -subj "/CN=Ian Armour"
+openssl pkcs12 -export -inkey qdp-key.pem -in qdp-cert.pem -name qdp -out qdp-upload.keystore -passout pass:
+rm qdp-key.pem qdp-cert.pem
 ```
 
 Give it to the repository as these secrets, under Settings, Secrets and
@@ -39,12 +43,28 @@ variables, Actions:
 | Secret | Value |
 |---|---|
 | `ANDROID_KEYSTORE_BASE64` | The keystore, base64-encoded |
-| `ANDROID_KEYSTORE_PASSWORD` | The keystore's password |
-| `ANDROID_KEY_ALIAS` | The key's alias, `qdp` above |
-| `ANDROID_KEY_PASSWORD` | The key's password |
+| `ANDROID_KEYSTORE_PASSWORD` | The keystore's password, if it has one |
 
-Local builds read the same key from `QDP_KEYSTORE`, `QDP_KEYSTORE_PASSWORD`,
-`QDP_KEY_ALIAS` and `QDP_KEY_PASSWORD`.
+Local builds read the same key from `QDP_KEYSTORE` and
+`QDP_KEYSTORE_PASSWORD`.
+
+## Publishing to Google Play
+
+Releases upload the Android app to Google Play's closed testing track, as a
+Google Cloud service account; without its key, they skip the upload.
+
+1. Upload the first App Bundle by hand in Play Console, from a CI run's
+   `play-bundle` artifact: Google takes uploads through its API only once an
+   app has one.
+2. In Google Cloud, enable the Google Play Android Developer API, and create a
+   service account and a JSON key for it.
+3. In Play Console, under Users and permissions, invite the service account's
+   email, with permission to release the app to testing tracks.
+4. Add the JSON key, as it is, as the `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`
+   secret.
+
+Until the app is first published, Google takes only draft releases: roll each
+one out from Play Console.
 
 ## Signing the Apple apps
 

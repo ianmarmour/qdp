@@ -82,7 +82,7 @@ jobs:
             [windows-app]="$app"
             [windows-gateway]="$installers|^(crates/qdp-gateway/|packaging/gateway\.toml|\.github/workflows/windows-gateway\.yml)"
             [apple]='^(apple/|crates/qdp-apple/|\.github/workflows/apple\.yml)|/macos/|metal_video|videotoolbox'
-            [android]='^(android/|crates/qdp-android/)|mediacodec'
+            [android]='^(android/|crates/qdp-android/|packaging/android/)|mediacodec'
           )
           # Lines of shared code that name a platform; the Windows app and
           # gateway have none.
@@ -347,6 +347,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Releases are signed with the project's key, which Google Play knows
+      # the app by; runs without it sign with the debug key below.
+      - name: Check a release can be signed
+        if: github.event_name == 'push' && env.HAS_KEYSTORE != 'true'
+        run: |
+          echo "::error::Releases need the Android signing secrets docs/releasing.md lists."
+          exit 1
+
       - name: Install Rust
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy \
@@ -387,8 +395,6 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           QDP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          QDP_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          QDP_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           QDP_VERSION_CODE: ${{ github.run_number }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
@@ -401,14 +407,33 @@ jobs:
             version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -n 1)
             export QDP_VERSION_NAME="$version-ci.$GITHUB_RUN_NUMBER"
           fi
-          ./gradlew assembleRelease lintRelease
+          ./gradlew assembleRelease bundleRelease lintRelease
           mv app/build/outputs/apk/release/app-release.apk ../qdp-android-arm64.apk
+          mv app/build/outputs/bundle/release/app-release.aab ../qdp-android.aab
 
       - uses: actions/upload-artifact@v4
         with:
           name: qdp-android-arm64
           path: qdp-android-arm64.apk
           if-no-files-found: error
+
+      # The App Bundle is for Google Play, so the release leaves it out.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: play-bundle
+          path: qdp-android.aab
+          if-no-files-found: error
+
+      - name: Upload the app to Google Play's closed testing
+        if: github.event_name == 'push'
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::warning::Not uploaded to Google Play: GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not set."
+            exit 0
+          fi
+          packaging/android/upload-play.sh qdp-android.aab io.github.ianmarmour.qdp alpha "${GITHUB_REF_NAME#v}"
 
   apple:
     name: Apple

@@ -7,9 +7,12 @@ plugins {
 }
 
 // A keystore named in the environment, as CI's secrets give it, signs
-// release builds, so that each one installs over the last; without one they
-// are signed with this machine's debug key.
+// release builds, so that each one installs over the last and Google Play
+// takes them; without one they are signed with this machine's debug key.
+// Its key is the one aliased qdp, and has the keystore's password, if it has
+// one, as PKCS12 keystores' keys do, unless the environment names others.
 val releaseKeystore = System.getenv("QDP_KEYSTORE")?.takeIf { it.isNotEmpty() }?.let(::file)
+val keystorePassword = System.getenv("QDP_KEYSTORE_PASSWORD").orEmpty()
 
 // The workspace's version, from the root Cargo.toml.
 val workspaceVersion = rootProject.file("../Cargo.toml").readLines()
@@ -19,14 +22,16 @@ val workspaceVersion = rootProject.file("../Cargo.toml").readLines()
 
 android {
     namespace = "io.github.ianmarmour.qdp"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "io.github.ianmarmour.qdp"
         // Android 10: MediaCodec decodes AV1 on devices with an AV1
         // decoder, and AAudio plays with low latency.
         minSdk = 29
-        targetSdk = 35
+        // Google Play takes new apps and updates only if they target
+        // Android 16.
+        targetSdk = 36
         // CI numbers its builds, so that each installs over the one before.
         versionCode = System.getenv("QDP_VERSION_CODE")?.toIntOrNull() ?: 1
         versionName = System.getenv("QDP_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: workspaceVersion
@@ -39,9 +44,9 @@ android {
         if (releaseKeystore != null) {
             create("release") {
                 storeFile = releaseKeystore
-                storePassword = System.getenv("QDP_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("QDP_KEY_ALIAS")
-                keyPassword = System.getenv("QDP_KEY_PASSWORD")
+                storePassword = keystorePassword
+                keyAlias = System.getenv("QDP_KEY_ALIAS")?.takeIf { it.isNotEmpty() } ?: "qdp"
+                keyPassword = System.getenv("QDP_KEY_PASSWORD")?.takeIf { it.isNotEmpty() } ?: keystorePassword
             }
         }
     }
@@ -74,10 +79,10 @@ kotlin {
     }
 }
 
-// These are the newest releases that build with compileSdk 35 and AGP 8
-// (Compose UI 1.11 and Material 3 1.4); newer ones need compileSdk 36 or 37
-// and AGP 9, a toolchain change of its own, so lint's reminders of them are
-// silenced here.
+// These are the newest releases that build with AGP 8 (Compose UI 1.11 and
+// Material 3 1.4); newer ones need AGP 9, and some compileSdk 37, a
+// toolchain change of its own, so lint's reminders of them are silenced
+// here.
 dependencies {
     //noinspection GradleDependency
     implementation(platform("androidx.compose:compose-bom:2026.06.01"))

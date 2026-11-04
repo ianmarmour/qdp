@@ -14,6 +14,7 @@ connection in three steps. In depth:
 | [Installing on iPhone and iPad](setup/iphone-ipad.md) | The Quick Desktop app |
 | [Sharing a computer](setup/hosting.md) | `qdp serve`: pairing, platform notes, running as a service, the login screen, security |
 | [Using the apps](setup/apps.md) | Each app, connecting through a gateway, and `qdp connect` |
+| [Privacy](privacy.md) | What the apps keep and send, and to whom |
 
 ## Troubleshooting
 
