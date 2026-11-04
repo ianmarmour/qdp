@@ -35,6 +35,7 @@ targets:
       path: Generated/macOS-Info.plist
       properties:
         CFBundleDisplayName: QDP
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: QDP finds the computers on your network you can stream from, and connects to them.
         NSBonjourServices: [_qdp._udp]
@@ -68,6 +69,7 @@ targets:
         # The name under the icon and in the App Store; the code and the
         # project stay QDP.
         CFBundleDisplayName: Quick Desktop
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         CADisableMinimumFrameDurationOnPhone: true
