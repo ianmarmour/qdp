@@ -14,30 +14,15 @@ platforms the branch changes.
 1. Raise `version` in the root `Cargo.toml`, which every package and app
    takes its version from, then `cargo update --workspace`, and merge that
    change.
-2. Write the release's description in a file, such as `release.md`:
-
-   ```markdown
-   A paragraph on what this release brings to the people who use QDP.
-
-   ## Highlights
-
-   - Each change people will notice, in a sentence, newest features first.
-
-   ## Upgrading
-
-   - Anything existing installs must do, such as pairing again. Leave this
-     section out when there's nothing.
-   ```
-
-3. Tag the release with the description as its annotation, and push the tag:
+2. Tag the release, and push the tag:
 
    ```bash
-   git tag -a v0.2.0 --cleanup=verbatim -F release.md
+   git tag v0.2.0
    git push origin v0.2.0
    ```
 
-Once every build passes, CI publishes the release: the description, then the
-pull requests merged since the last release, with every build attached.
+Once every build passes, CI publishes the release: the pull requests merged
+since the last release, with every build attached.
 
 ## Signing the Android app
 
