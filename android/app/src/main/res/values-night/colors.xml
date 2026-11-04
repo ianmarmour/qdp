@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Ember's dark surface, matching EmberColors.kt. -->
-    <color name="window_background">#FF1D100D</color>
+    <!-- The neutral palette's dark surface, matching NeutralColors.kt. -->
+    <color name="window_background">#FF131313</color>
 </resources>
