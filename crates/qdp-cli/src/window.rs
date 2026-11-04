@@ -550,6 +550,16 @@ impl WindowApp {
         let Some(display) = &self.display else {
             return;
         };
+        // The captured pointer waits at the window's centre: the host
+        // captures a moment after an application hides its pointer, and in a
+        // drag this one may have left the window by then. On macOS a captured
+        // pointer stays where it is, where every click would go to whatever
+        // is under it. Where the pointer can't be moved, it stays put.
+        let size = display.window.inner_size();
+        let centre = PhysicalPosition::new(size.width / 2, size.height / 2);
+        if let Err(error) = display.window.set_cursor_position(centre) {
+            debug!(%error, "the pointer cannot be moved to the window's centre");
+        }
         let grabbed = display
             .window
             .set_cursor_grab(CursorGrabMode::Locked)
