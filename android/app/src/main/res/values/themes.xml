@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-    The window behind Compose, which shows while an activity starts: Ember's
-    surface, so that nothing flashes white or black before the first frame.
+    The window behind Compose, which shows while an activity starts: the
+    neutral palette's surface, so that nothing flashes before the first frame.
     -->
     <style name="Theme.Qdp" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/window_background</item>

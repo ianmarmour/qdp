@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Ember's light surface, matching EmberColors.kt. -->
-    <color name="window_background">#FFFFF8F6</color>
+    <!-- The neutral palette's light surface, matching NeutralColors.kt. -->
+    <color name="window_background">#FFF9F9F9</color>
     <!-- The launcher icon's background: the deep teal of branding/qdp-orbit-q.svg. -->
     <color name="launcher_background">#FF025559</color>
 </resources>

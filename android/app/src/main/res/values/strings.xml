@@ -128,7 +128,7 @@ verbs; errors give one cause and one next step. The UI says "computer";
     <string name="settings_stats_supporting">Show frame rate and latency while you stream</string>
     <string name="settings_appearance">Appearance</string>
     <string name="settings_wallpaper_colors">Match wallpaper colors</string>
-    <string name="settings_wallpaper_colors_supporting">Use colors from your wallpaper instead of QDP\'s</string>
+    <string name="settings_wallpaper_colors_supporting">Use colors from your wallpaper instead of black and white</string>
     <string name="settings_advanced">Advanced</string>
     <string name="settings_decoder">Decoder</string>
     <string name="decoder_auto">Auto</string>

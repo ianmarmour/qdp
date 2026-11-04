@@ -34,11 +34,11 @@ enum class TouchMode(@param:StringRes val label: Int, @param:StringRes val descr
 
 /** Where the app's colors come from. */
 enum class ColorSource {
-    /** The wallpaper's colors, on Android 12 and later; Ember before. */
+    /** The wallpaper's colors, on Android 12 and later; neutral ones before. */
     WALLPAPER,
 
-    /** QDP's own Ember palette. */
-    EMBER,
+    /** QDP's own palette: black, white and grays. */
+    NEUTRAL,
 }
 
 /** What the app connects with, kept between launches. */

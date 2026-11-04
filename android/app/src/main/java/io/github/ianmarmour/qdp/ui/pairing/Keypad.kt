@@ -99,11 +99,11 @@ private fun Key(onClick: () -> Unit, modifier: Modifier = Modifier, content: @Co
     }
 }
 
-/** The keypad in Ember's dark theme, as the stream shows it. */
+/** The keypad in the neutral dark theme, as the stream shows it. */
 @Preview
 @Composable
 private fun KeypadPreview() {
-    QdpTheme(ColorSource.EMBER, dark = true) {
+    QdpTheme(ColorSource.NEUTRAL, dark = true) {
         Keypad(onDigit = {}, onDelete = {}, firstKey = remember { FocusRequester() })
     }
 }

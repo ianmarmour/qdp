@@ -290,11 +290,11 @@ private fun PairPill() {
     )
 }
 
-/** The cards in each state, in Ember's light theme. */
+/** The cards in each state, in the neutral light theme. */
 @Preview(widthDp = 280)
 @Composable
 private fun HostCardPreview() {
-    QdpTheme(ColorSource.EMBER, dark = false) {
+    QdpTheme(ColorSource.NEUTRAL, dark = false) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             for (status in HostStatus.entries) {
                 HostCardView(

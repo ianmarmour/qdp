@@ -130,7 +130,7 @@ fun SettingsScreen(
                         title = stringResource(R.string.settings_wallpaper_colors),
                         supporting = stringResource(R.string.settings_wallpaper_colors_supporting),
                         checked = settings.colorSource == ColorSource.WALLPAPER,
-                    ) { on -> onChange(settings.copy(colorSource = if (on) ColorSource.WALLPAPER else ColorSource.EMBER)) }
+                    ) { on -> onChange(settings.copy(colorSource = if (on) ColorSource.WALLPAPER else ColorSource.NEUTRAL)) }
                 }
                 SectionHeader(R.string.settings_advanced)
                 ChoiceRow(

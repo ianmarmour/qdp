@@ -1,6 +1,5 @@
 package io.github.ianmarmour.qdp.ui.theme
 
-import android.app.UiModeManager
 import android.content.Context
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -30,16 +29,10 @@ private val QdpShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp),
 )
 
-/** The system contrast setting, from -1 to 1, from which the medium-contrast scheme is used. */
-private const val MEDIUM_CONTRAST_FROM = 1f / 3
-
-/** The system contrast setting from which the high-contrast scheme is used. */
-private const val HIGH_CONTRAST_FROM = 2f / 3
-
 /**
  * QDP's Material 3 theme: the wallpaper's colors on Android 12 and later
- * when [colorSource] asks for them, Ember otherwise, in [dark] or light
- * theme; the system font's type scale; and rounded shapes.
+ * when [colorSource] asks for them, neutral ones otherwise, in [dark] or
+ * light theme; the system font's type scale; and rounded shapes.
  */
 @Composable
 fun QdpTheme(colorSource: ColorSource, dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
@@ -55,18 +48,5 @@ private fun colorScheme(context: Context, source: ColorSource, dark: Boolean): C
         // The system's dynamic schemes follow its contrast setting themselves.
         return if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     }
-    return emberColorScheme(dark, systemContrast(context))
-}
-
-/** Returns the contrast the system asks for, which Android 14 and later let the user raise. */
-private fun systemContrast(context: Context): Contrast {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-        return Contrast.STANDARD
-    }
-    val level = context.getSystemService(UiModeManager::class.java)?.contrast ?: return Contrast.STANDARD
-    return when {
-        level >= HIGH_CONTRAST_FROM -> Contrast.HIGH
-        level >= MEDIUM_CONTRAST_FROM -> Contrast.MEDIUM
-        else -> Contrast.STANDARD
-    }
+    return neutralColorScheme(dark)
 }
