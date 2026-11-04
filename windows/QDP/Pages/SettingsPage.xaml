@@ -214,7 +214,7 @@
                     </Grid.ColumnDefinitions>
                     <Image Source="ms-appx:///Assets/qdp.png" Width="32" Height="32" VerticalAlignment="Center" />
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="QDP" />
+                        <TextBlock Text="Quick Desktop" />
                         <TextBlock x:Name="VersionText" Style="{StaticResource DescriptionStyle}" />
                     </StackPanel>
                     <Button Grid.Column="2" Content="Open the log folder" VerticalAlignment="Center" Click="OnOpenLogsClicked" />

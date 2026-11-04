@@ -7,10 +7,10 @@ connection in three steps. In depth:
 
 | Guide | What it covers |
 |---|---|
-| [Installing on Linux](setup/linux.md) | The `qdp` command and the QDP app |
-| [Installing on Windows](setup/windows.md) | The QDP app and the `qdp` command |
-| [Installing on a Mac](setup/macos.md) | The QDP app and the `qdp` command |
-| [Installing on Android](setup/android.md) | The QDP app |
+| [Installing on Linux](setup/linux.md) | The `qdp` command and the Quick Desktop app |
+| [Installing on Windows](setup/windows.md) | The Quick Desktop app and the `qdp` command |
+| [Installing on a Mac](setup/macos.md) | The Quick Desktop app and the `qdp` command |
+| [Installing on Android](setup/android.md) | The Quick Desktop app |
 | [Installing on iPhone and iPad](setup/iphone-ipad.md) | The Quick Desktop app |
 | [Sharing a computer](setup/hosting.md) | `qdp serve`: pairing, platform notes, running as a service, the login screen, security |
 | [Using the apps](setup/apps.md) | Each app, connecting through a gateway, and `qdp connect` |

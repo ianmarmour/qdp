@@ -5,7 +5,7 @@
   <id>io.github.ianmarmour.qdp</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
-  <name>QDP</name>
+  <name>Quick Desktop</name>
   <summary>Stream the desktops of your computers</summary>
   <developer id="io.github.ianmarmour">
     <name>Ian Armour</name>

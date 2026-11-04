@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=QDP
+Name=Quick Desktop
 GenericName=Remote Desktop
 Comment=Stream the desktops of your computers
 Exec=qdp-gtk

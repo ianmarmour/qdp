@@ -1,6 +1,6 @@
 # Using the apps
 
-Every QDP app lists **your computers**, the ones this device paired with, and
+Every Quick Desktop app lists **your computers**, the ones this device paired with, and
 **nearby computers** on the local network. Choose a nearby computer, or add
 one by its address, and type the four-digit code it shows; from then on, one
 tap connects. A computer's menu in the list forgets it.

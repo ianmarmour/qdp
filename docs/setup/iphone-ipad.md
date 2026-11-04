@@ -16,8 +16,8 @@ The app isn't in the App Store yet. Either:
 
 ## Upgrade and remove
 
-Install a newer build the same way to upgrade. To remove QDP, delete it from
-the home screen.
+Install a newer build the same way to upgrade. To remove Quick Desktop,
+delete it from the home screen.
 
 ## Next steps
 

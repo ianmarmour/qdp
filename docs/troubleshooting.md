@@ -53,9 +53,9 @@ The host couldn't capture the screen:
 
 ## An app won't install or open
 
-- **Mac:** QDP isn't notarized yet. Open the app once from System Settings,
-  Privacy & Security, and run `xattr -d com.apple.quarantine qdp` before
-  running the command.
+- **Mac:** Quick Desktop and the command aren't notarized yet. Open the app
+  once from System Settings, Privacy & Security, and run
+  `xattr -d com.apple.quarantine qdp` before running the command.
 - **Android:** if a new APK won't install over the old one, uninstall the app
   first.
 

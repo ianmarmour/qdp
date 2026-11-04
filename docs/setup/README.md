@@ -33,7 +33,7 @@ such as allowing Screen Recording on a Mac: see
 
 ## 3. Pair and connect
 
-1. On your device, open the QDP app and choose the computer. Linux computers
+1. On your device, open the Quick Desktop app and choose the computer. Linux computers
    show up on their own; add Windows and Mac computers by their address.
 2. Type the four-digit code the computer shows.
 

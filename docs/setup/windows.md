@@ -1,6 +1,7 @@
 # Installing on Windows
 
-The installer adds the QDP app, and the `qdp` command for sharing this PC.
+The installer adds the Quick Desktop app, and the `qdp` command for sharing
+this PC.
 
 ## Requirements
 
@@ -14,7 +15,8 @@ installed first.
 
 ## Upgrade and remove
 
-Run a newer installer to upgrade. To remove QDP, use Settings, Apps.
+Run a newer installer to upgrade. To remove Quick Desktop and the command,
+use Settings, Apps.
 
 ## Next steps
 

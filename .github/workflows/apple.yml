@@ -56,7 +56,8 @@ jobs:
           xcodebuild -project QDP.xcodeproj -scheme QDP-macOS -configuration Release \
             -destination 'generic/platform=macOS' -derivedDataPath build \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
-          ditto -c -k --keepParent build/Build/Products/Release/QDP.app ../qdp-macos-app.zip
+          ditto build/Build/Products/Release/QDP.app "build/Quick Desktop.app"
+          ditto -c -k --keepParent "build/Quick Desktop.app" ../qdp-macos-app.zip
 
       - name: Build the iPhone and iPad app
         working-directory: apple

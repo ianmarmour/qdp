@@ -13,7 +13,7 @@ file manager; allow it, then install.
 ## Upgrade and remove
 
 Install a newer APK over the old one to upgrade; if Android refuses, uninstall
-the app first. To remove QDP, uninstall it as any other app.
+the app first. To remove Quick Desktop, uninstall it as any other app.
 
 ## Next steps
 

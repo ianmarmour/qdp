@@ -1,8 +1,8 @@
 # Installing on Linux
 
 QDP for Linux has two parts: the `qdp` command, which shares this computer
-and connects to others, and the QDP app, which runs the command for each
-stream.
+and connects to others, and the Quick Desktop app, which runs the command
+for each stream.
 
 ## Requirements
 
