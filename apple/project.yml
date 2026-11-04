@@ -3,8 +3,8 @@
 #   ./build-core.sh && xcodegen generate
 #
 # Both apps link the Rust core, Generated/QDPCore.xcframework, with the
-# system libraries Generated/QDPCore.xcconfig lists, and share the code in
-# Shared/.
+# system libraries Generated/QDPCore.xcconfig lists, take their version from
+# it too, and share the code in Shared/.
 name: QDP
 options:
   bundleIdPrefix: io.github.ianmarmour
@@ -17,7 +17,6 @@ configFiles:
   Release: Generated/QDPCore.xcconfig
 settings:
   base:
-    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     PRODUCT_NAME: QDP

@@ -22,7 +22,13 @@ id=io.github.ianmarmour.qdp
 
 install -Dm0755 "$binary" "$stage/bin/qdp-gtk"
 install -Dm0644 "$data/$id.desktop" "$stage/share/applications/$id.desktop"
-install -Dm0644 "$data/$id.metainfo.xml" "$stage/share/metainfo/$id.metainfo.xml"
+# The metadata names the release: the workspace's version, from Cargo.toml,
+# built today.
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
+mkdir -p "$stage/share/metainfo"
+sed -e "s/@VERSION@/$version/" -e "s/@DATE@/$(date -u +%F)/" "$data/$id.metainfo.xml" \
+  > "$stage/share/metainfo/$id.metainfo.xml"
+chmod 0644 "$stage/share/metainfo/$id.metainfo.xml"
 (cd "$data/icons" && find hicolor -type f) | while read -r icon; do
   install -Dm0644 "$data/icons/$icon" "$stage/share/icons/$icon"
 done

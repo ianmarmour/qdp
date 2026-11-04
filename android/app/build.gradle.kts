@@ -11,6 +11,12 @@ plugins {
 // are signed with this machine's debug key.
 val releaseKeystore = System.getenv("QDP_KEYSTORE")?.takeIf { it.isNotEmpty() }?.let(::file)
 
+// The workspace's version, from the root Cargo.toml.
+val workspaceVersion = rootProject.file("../Cargo.toml").readLines()
+    .first { it.startsWith("version = \"") }
+    .substringAfter('"')
+    .substringBefore('"')
+
 android {
     namespace = "io.github.ianmarmour.qdp"
     compileSdk = 35
@@ -23,7 +29,7 @@ android {
         targetSdk = 35
         // CI numbers its builds, so that each installs over the one before.
         versionCode = System.getenv("QDP_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = System.getenv("QDP_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: "0.2.0"
+        versionName = System.getenv("QDP_VERSION_NAME")?.takeIf { it.isNotEmpty() } ?: workspaceVersion
         ndk {
             abiFilters += "arm64-v8a"
         }

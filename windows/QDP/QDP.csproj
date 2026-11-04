@@ -14,7 +14,8 @@
     <RootNamespace>Qdp</RootNamespace>
     <AssemblyName>QDP</AssemblyName>
     <Product>QDP</Product>
-    <Version>0.2.0</Version>
+    <!-- The workspace's version, from the root Cargo.toml. -->
+    <Version>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\Cargo.toml')), '(?m)^version = "([^"]+)"').Groups[1].Value)</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\qdp.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
