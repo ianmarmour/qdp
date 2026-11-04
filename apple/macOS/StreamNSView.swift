@@ -330,17 +330,33 @@ final class StreamNSView: NSView {
     }()
 
     /// Captures the mouse while the host's pointer is relative, so that it
-    /// moves the host's pointer and not the Mac's, or releases it.
+    /// moves the host's pointer and not the Mac's, or releases it. The
+    /// captured pointer waits at the view's centre: the host captures a
+    /// moment after an application hides its pointer, and in a drag the
+    /// Mac's may have left the window by then, where every click would go to
+    /// whatever is under it.
     private func setCaptured(_ capture: Bool) {
         let capture = capture && window?.isKeyWindow == true
         guard capture != captured else { return }
         captured = capture
+        if capture, let centre = screenCentre {
+            CGWarpMouseCursorPosition(centre)
+        }
         CGAssociateMouseAndMouseCursorPosition(capture ? 0 : 1)
         if capture {
             NSCursor.hide()
         } else {
             NSCursor.unhide()
         }
+    }
+
+    /// The view's centre on the screen, in the coordinates the pointer is
+    /// moved in, which run down from the top of the main display.
+    private var screenCentre: CGPoint? {
+        guard let window, let main = NSScreen.screens.first else { return nil }
+        let inWindow = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil)
+        let onScreen = window.convertPoint(toScreen: inWindow)
+        return CGPoint(x: onScreen.x, y: main.frame.maxY - onScreen.y)
     }
 
     private func focusChanged(_ focused: Bool) {
