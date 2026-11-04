@@ -40,6 +40,7 @@ internet, and grant access to endpoints.
 | [Building from source](building.md) | Setting up Linux, macOS and Windows to build and test |
 | [Architecture](architecture.md) | How the crates and apps fit together |
 | [Benchmarks](../bench/README.md) | Measuring QDP's, RDP's and VNC's latency |
+| [Benchmark results](benchmarks.md) | A run of the benchmarks, on one machine |
 | [Releasing](releasing.md) | Continuous integration, releases, signing |
 | [Packaging](../packaging/README.md) | The RPMs, Debian packages and Windows installers |
 
