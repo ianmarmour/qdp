@@ -33,6 +33,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
@@ -55,6 +56,7 @@ import io.github.ianmarmour.qdp.HostStatus
 import io.github.ianmarmour.qdp.R
 import io.github.ianmarmour.qdp.StreamTarget
 import io.github.ianmarmour.qdp.ui.components.GamepadButton
+import io.github.ianmarmour.qdp.ui.components.EDGE_ICON_BUTTON_PADDING
 import io.github.ianmarmour.qdp.ui.components.QdpIconButton
 import io.github.ianmarmour.qdp.ui.components.gamepadButtons
 import io.github.ianmarmour.qdp.ui.components.rememberGamepadConnected
@@ -116,6 +118,8 @@ fun HomeScreen(
     var menuKey by remember { mutableStateOf<String?>(null) }
     val focused = state.cards.firstOrNull { it.key == focusedKey }
     val addHost = { viewModel.addHost(advanced = false) }
+    // The computers' grid, which Settings' button leads back to.
+    val grid = remember { FocusRequester() }
 
     fun open(card: HostCard) {
         when (card.status) {
@@ -147,7 +151,7 @@ fun HomeScreen(
                 }
                 shortcut
             },
-        topBar = { HomeTopBar(collapsing, scrollBehavior, addHost, onOpenSettings) },
+        topBar = { HomeTopBar(collapsing, scrollBehavior, grid.takeIf { state.cards.isNotEmpty() }, onOpenSettings) },
         bottomBar = {
             if (gamepad) {
                 GamepadHintBar(stringResource(focused?.let { actionLabelOf(it.status) } ?: R.string.hint_select))
@@ -166,6 +170,7 @@ fun HomeScreen(
             HostGrid(
                 state = state,
                 padding = padding,
+                focus = grid,
                 menuKey = menuKey,
                 onMenuKeyChange = { menuKey = it },
                 onFocusedKeyChange = { key, hasFocus ->
@@ -212,26 +217,32 @@ fun HomeScreen(
     }
 }
 
-/** The screen's title bar, large and collapsing when [collapsing], with Add by address and Settings. */
+/**
+ * The screen's title bar, large and collapsing when [collapsing], with
+ * Settings, from which left and down lead back to [grid] while it shows.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomeTopBar(
     collapsing: Boolean,
     scrollBehavior: TopAppBarScrollBehavior,
-    onAdd: () -> Unit,
+    grid: FocusRequester?,
     onOpenSettings: () -> Unit,
 ) {
     val title = stringResource(R.string.home_title)
     val actions: @Composable RowScope.() -> Unit = {
         QdpIconButton(
-            onClick = onAdd,
-            icon = R.drawable.ic_add,
-            description = stringResource(R.string.action_add_by_address),
-        )
-        QdpIconButton(
             onClick = onOpenSettings,
             icon = R.drawable.ic_settings,
             description = stringResource(R.string.action_settings),
+            modifier = Modifier
+                .padding(end = EDGE_ICON_BUTTON_PADDING)
+                .focusProperties {
+                    if (grid != null) {
+                        left = grid
+                        down = grid
+                    }
+                },
         )
     }
     if (collapsing) {
@@ -248,12 +259,14 @@ private fun HomeTopBar(
 /**
  * The computers' cards, as many columns as fit, then "Add by address".
  * Focus returns to the card focused last, as when coming back from a
- * stream, and starts on the first card when keys drive the screen.
+ * stream or from Settings' button through [focus], and starts on the first
+ * card when keys drive the screen.
  */
 @Composable
 private fun HostGrid(
     state: HomeState,
     padding: PaddingValues,
+    focus: FocusRequester,
     menuKey: String?,
     onMenuKeyChange: (String?) -> Unit,
     onFocusedKeyChange: (key: String, hasFocus: Boolean) -> Unit,
@@ -278,6 +291,7 @@ private fun HostGrid(
             modifier = Modifier
                 .widthIn(max = MAX_GRID_WIDTH)
                 .fillMaxWidth()
+                .focusRequester(focus)
                 .focusRestorer(firstCard)
                 .onFocusChanged { anyFocused = it.hasFocus },
             contentPadding = padding.plus(GRID_SPACING),

@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.dp
 
 /** How much a button stands out, from Material's button styles. */
 enum class Emphasis {
@@ -31,6 +32,12 @@ enum class Emphasis {
     /** A text button, for dismissive actions. */
     LOWEST,
 }
+
+/**
+ * The space an icon button at the screen's edge of a top app bar needs
+ * beyond the bar's own 4dp, so that its focus ring is not cut off.
+ */
+val EDGE_ICON_BUTTON_PADDING = 4.dp
 
 /**
  * An icon button showing the drawable [icon], described to accessibility
