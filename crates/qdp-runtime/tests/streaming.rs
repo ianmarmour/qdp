@@ -22,15 +22,15 @@ use qdp_quic::{ClientEndpoint, HostEndpoint, HostVerification, KeyPin, TlsIdenti
 use qdp_runtime::{
     ActiveDevice, Admission, AudioInput, AudioOutput, CaptureSink, CapturedFrame, ClientAudio,
     ClientCredentials, ClientOptions, Clipboard, ClipboardDirections, CursorShape, CursorState,
-    CursorWarp, DesktopScale, DisplaySize, DisplayTiming, EncoderTuning, FeatureRequest,
-    FrameArrivals, FrameInfo, FrameSink, FrameSource, GamepadFeedback, HostAudio,
+    CursorWarp, DesktopLock, DesktopScale, DisplaySize, DisplayTiming, EncoderTuning,
+    FeatureRequest, FrameArrivals, FrameInfo, FrameSink, FrameSource, GamepadFeedback, HostAudio,
     HostAuthenticator, HostDesktop, HostOptions, InputAction, InputHandle, InputInjector,
-    InputQueue, Microphone, NoInput, OpenedDesktop, Pairing, PairingEvent, PairingOutcome,
-    PairingPrompt, PassthroughDevice, PassthroughFeedback, PassthroughPolicy, PenInput, PixelRect,
-    Playout, PointerButton, PointerPosition, Presentation, PresentationTiming, RefreshMode,
-    ResumptionSlot, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl, TestPattern,
-    TouchPhase, TouchPoint, UserInput, WantedDisplay, WarpKind, input_channel, input_classes, run,
-    serve,
+    InputQueue, LockWhen, Microphone, NoInput, OpenedDesktop, Pairing, PairingEvent,
+    PairingOutcome, PairingPrompt, PassthroughDevice, PassthroughFeedback, PassthroughPolicy,
+    PenInput, PixelRect, Playout, PointerButton, PointerPosition, Presentation, PresentationTiming,
+    RefreshMode, ResumptionSlot, RuntimeError, SAMPLE_RATE, SharedClipboard, SinkControl,
+    TestPattern, TouchPhase, TouchPoint, UserInput, WantedDisplay, WarpKind, input_channel,
+    input_classes, run, serve,
 };
 
 /// The width of the streamed frames.
@@ -2666,9 +2666,27 @@ async fn deferred_presentations_are_reported() {
 /// A client that authenticates replaces the desktop's current session,
 /// which the host closes with `QDP_SESSION_REPLACED` (Section 2.1). The
 /// replaced session locks the desktop, and the one whose client
-/// disconnected does not (Section 11.4).
+/// disconnected does not, as neither knows whether it found it locked
+/// (Section 11.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_session_replaces_older() {
+    assert_eq!(
+        replace_then_disconnect(LockWhen::UnlessDisconnected).await,
+        1
+    );
+}
+
+/// A session that found the desktop locked locks it again even when its
+/// client disconnects (Section 11.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_desktop_found_locked_is_locked_again() {
+    assert_eq!(replace_then_disconnect(LockWhen::Always).await, 2);
+}
+
+/// Runs a session that a second replaces, whose client then disconnects,
+/// the second locking the desktop `second`, and returns how many times the
+/// desktop was locked.
+async fn replace_then_disconnect(second: LockWhen) -> usize {
     let identity = TlsIdentity::generate_self_signed(vec![SERVER_NAME.to_owned()]).unwrap();
     let pin = identity.key_pin().unwrap();
     let endpoint = HostEndpoint::bind(loopback(), identity).unwrap();
@@ -2681,7 +2699,7 @@ async fn newer_session_replaces_older() {
     let host_locks = Arc::clone(&locks);
     let host = tokio::spawn(async move {
         let mut sessions = Vec::new();
-        for _ in 0..2 {
+        for when in [LockWhen::UnlessDisconnected, second] {
             let incoming = endpoint.accept().await.expect("a client");
             let ticket = admission.admit(incoming.remote_address().ip()).unwrap();
             let options = Arc::clone(&options);
@@ -2694,9 +2712,12 @@ async fn newer_session_replaces_older() {
                             Ok(OpenedDesktop {
                                 source: test_pattern(),
                                 injector: Box::new(NoInput),
-                                lock: Some(Box::new(move || {
-                                    locks.fetch_add(1, Ordering::SeqCst);
-                                })),
+                                lock: Some(DesktopLock {
+                                    lock: Box::new(move || {
+                                        locks.fetch_add(1, Ordering::SeqCst);
+                                    }),
+                                    when,
+                                }),
                             })
                         })
                     }),
@@ -2761,7 +2782,7 @@ async fn newer_session_replaces_older() {
         .await
         .expect("the host's sessions end in time")
         .unwrap();
-    assert_eq!(locks.load(Ordering::SeqCst), 1);
+    locks.load(Ordering::SeqCst)
 }
 
 /// A client that authenticated once reconnects with the resumption token

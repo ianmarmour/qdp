@@ -75,8 +75,8 @@ A display must be connected and on; a dummy plug can stand in for one.
 ## Security
 
 - While a device is connected, the computer shows a notice saying so.
-- If a session ends unexpectedly, such as when the network drops, the host
-  locks the desktop. `--lock off` turns this off.
+- When a session ends, the host leaves the desktop as it found it: locked again
+  if it was locked when the device connected. `--lock off` never locks it.
 - If the connection drops, the device reconnects on its own for up to five
   minutes, without asking for credentials again. `--resume` changes how long.
 - On Windows, `--privacy on` covers the computer's displays and ignores its

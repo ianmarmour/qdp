@@ -38,9 +38,9 @@ use qdp_runtime::{
     Admission, CODE_LIFETIME, ClientAudio, ClientCredentials, ClientOptions, ClientSummary,
     ClipboardDirections, DesktopLock, DisplaySize, EncoderTuning, FrameSink, FrameSource,
     GatewayFailure, GatewayRoute, GatewayTrust, HostAudio, HostAuthenticator, HostDesktop,
-    HostOptions, InputInjector, InputQueue, OpenedDesktop, Pairing, PairingEvent, PairingOutcome,
-    PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt, TestPattern,
-    Tunnel, gateway_verification, open_tunnel,
+    HostOptions, InputInjector, InputQueue, LockWhen, OpenedDesktop, Pairing, PairingEvent,
+    PairingOutcome, PairingPrompt, ResumptionSlot, RuntimeError, SharedClipboard, SignInPrompt,
+    TestPattern, Tunnel, gateway_verification, open_tunnel,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -563,7 +563,23 @@ async fn open_desktop(
         qdp_desktop::input_injector(width as u32, height as u32)
     });
     let lock = match (streamed, lock) {
-        (Streamed::Screen, LockPolicy::Lock) => Some(Box::new(lock_desktop) as DesktopLock),
+        // The session leaves the desktop as it finds it: locked again if it
+        // is locked now, and left alone if not (Section 11.4).
+        (Streamed::Screen, LockPolicy::Lock) => {
+            let locked = tokio::task::spawn_blocking(qdp_desktop::desktop_locked)
+                .await
+                .ok()
+                .flatten();
+            let when = match locked {
+                Some(true) => Some(LockWhen::Always),
+                Some(false) => None,
+                None => Some(LockWhen::UnlessDisconnected),
+            };
+            when.map(|when| DesktopLock {
+                lock: Box::new(lock_desktop),
+                when,
+            })
+        }
         (Streamed::TestPattern, _) | (_, LockPolicy::Leave) => None,
     };
     Ok(OpenedDesktop {

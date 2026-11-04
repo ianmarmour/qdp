@@ -257,13 +257,30 @@ pub struct OpenedDesktop {
     pub source: Box<dyn FrameSource>,
     /// Performs the client's input on the host's desktop.
     pub injector: Box<dyn InputInjector>,
-    /// Locks the desktop, if it should be locked when the session ends
-    /// other than by its client disconnecting (Section 11.4).
+    /// Locks the desktop as the session ends, if it should be locked then
+    /// (Section 11.4).
     pub lock: Option<DesktopLock>,
 }
 
-/// Locks a host's desktop.
-pub type DesktopLock = Box<dyn FnOnce() + Send>;
+/// Locks a host's desktop as a session ends, so that the session leaves it
+/// locked if it found it locked (Section 11.4).
+pub struct DesktopLock {
+    /// Locks the desktop.
+    pub lock: Box<dyn FnOnce() + Send>,
+    /// When the session locks it.
+    pub when: LockWhen,
+}
+
+/// When a session locks its host's desktop as it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LockWhen {
+    /// However the session ends: the desktop was locked when it began.
+    Always,
+    /// When the session ends other than by its client disconnecting, as
+    /// when the network drops: whether the desktop was locked when it began
+    /// is not known.
+    UnlessDisconnected,
+}
 
 /// Opens a host session's desktop.
 pub type DesktopOpener = Box<
@@ -586,14 +603,21 @@ async fn serve_session(
     // Nothing the client held stays held on the host.
     let actions = active.devices.release_all();
     active.inject(&actions, active.display.layout());
-    // Unless the client disconnected, the desktop is not left unlocked:
-    // not when the network dropped, the session was replaced, or the host
-    // stopped (Section 11.4).
+    // The desktop is left locked if the session found it locked; where
+    // that is not known, it is locked unless the client disconnected, so
+    // that a dropped network, a replaced session or a stopped host does not
+    // leave it unlocked (Section 11.4).
     let quic = active.driver.connection().quic();
-    let lock = lock.filter(|_| !client_disconnected(&result, quic));
+    let lock =
+        lock.filter(|lock| lock.when == LockWhen::Always || !client_disconnected(&result, quic));
     if let Some(lock) = lock {
-        info!("the session ended without its client disconnecting; locking the desktop");
-        lock();
+        match lock.when {
+            LockWhen::Always => info!("the session found the desktop locked; locking it again"),
+            LockWhen::UnlessDisconnected => {
+                info!("the session ended without its client disconnecting; locking the desktop");
+            }
+        }
+        (lock.lock)();
     }
     result
 }
