@@ -7,9 +7,9 @@ tap connects. A computer's menu in the list forgets it.
 
 ## Android
 
-- Touch works as a trackpad: one finger moves the pointer, a tap clicks, two
-  fingers right-click or scroll, and a press held still drags. The stream's
-  menu switches to direct touch.
+- Touch works as the computer's touchscreen. Settings or the stream's menu
+  switch to trackpad, where one finger moves the pointer, a tap clicks, two
+  fingers right-click or scroll, and a press held still drags.
 - Controllers, a handheld's built-in controls, a mouse and a keyboard all work
   as on a computer. A controller also drives the app itself.
 - Back, or Select, Start and both bumpers together, opens the stream's menu,
@@ -18,8 +18,8 @@ tap connects. A computer's menu in the list forgets it.
 
 ## iPhone and iPad
 
-- Touch works as a trackpad or as the computer's touchscreen, as Settings or
-  the stream's menu choose.
+- Touch works as the computer's touchscreen, or as a trackpad, as Settings
+  or the stream's menu choose.
 - Controllers, and an iPad's keyboard, mouse or trackpad, work as on a
   computer.
 - The button in the top corner, or Select, Start and both shoulder buttons

@@ -26,12 +26,12 @@ verbs; errors give one cause and one next step. The UI says "computer";
     <string name="searching_inline">Looking for more computers on your Wi-Fi…</string>
 
     <!-- A computer's status, on its card and read aloud. -->
-    <string name="status_ready">Ready</string>
-    <string name="status_ready_spoken">ready, paired</string>
-    <string name="status_not_seen">Not on this network</string>
-    <string name="status_not_seen_spoken">paired, not on this network</string>
-    <string name="status_new">New</string>
-    <string name="status_new_spoken">new, ready to pair</string>
+    <string name="status_ready">Online</string>
+    <string name="status_ready_spoken">online</string>
+    <string name="status_not_seen">Offline</string>
+    <string name="status_not_seen_spoken">offline</string>
+    <string name="status_new">Not paired</string>
+    <string name="status_new_spoken">not paired</string>
     <string name="status_pairing_off">Pairing is off</string>
     <string name="status_pairing_off_spoken">new, pairing is off</string>
     <string name="status_key_mismatch">Not the computer you paired with</string>

@@ -14,7 +14,7 @@ struct StreamScreen: View {
     /// starts. It shows only while no controller is connected.
     @State private var controllerShown = false
     @AppStorage(SettingsKey.showStats) private var showStats = false
-    @AppStorage(SettingsKey.touchMode) private var touchMode = TouchMode.trackpad
+    @AppStorage(SettingsKey.touchMode) private var touchMode = TouchMode.direct
     @Environment(\.dismiss) private var dismiss
 
     init(target: StreamTarget, store: HostStore) {

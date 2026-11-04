@@ -40,7 +40,7 @@ class TouchInput(
     private val onPointer: (Float, Float) -> Unit,
 ) {
     /** What touching does. */
-    var mode = TouchMode.TRACKPAD
+    var mode = TouchMode.DIRECT
         set(value) {
             cancel()
             field = value

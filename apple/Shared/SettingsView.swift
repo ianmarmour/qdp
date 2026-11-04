@@ -4,7 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage(SettingsKey.resolution) private var resolution = Resolution.window
     @AppStorage(SettingsKey.decoder) private var decoder = DecoderChoice.automatic
-    @AppStorage(SettingsKey.touchMode) private var touchMode = TouchMode.trackpad
+    @AppStorage(SettingsKey.touchMode) private var touchMode = TouchMode.direct
     @AppStorage(SettingsKey.showStats) private var showStats = false
     @AppStorage(SettingsKey.microphone) private var microphone = false
     @AppStorage(SettingsKey.gatewayAddress) private var gatewayAddress = ""

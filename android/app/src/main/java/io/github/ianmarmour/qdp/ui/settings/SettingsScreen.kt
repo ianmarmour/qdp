@@ -143,7 +143,7 @@ fun SettingsScreen(
     }
 }
 
-/** The Stream section: resolution and microphone. */
+/** The Stream section: resolution, microphone and the performance overlay. */
 @Composable
 private fun StreamSection(
     settings: Settings,
@@ -178,18 +178,18 @@ private fun StreamSection(
         checked = settings.microphone,
         onCheckedChange = onMicrophoneChange,
     )
-}
-
-/** The Controls section: touch mode and the performance overlay. */
-@Composable
-private fun ControlsSection(settings: Settings, onChange: (Settings) -> Unit) {
-    SectionHeader(R.string.settings_controls)
-    TouchModePicker(settings.touchMode) { onChange(settings.copy(touchMode = it)) }
     SwitchRow(
         title = stringResource(R.string.settings_stats),
         supporting = stringResource(R.string.settings_stats_supporting),
         checked = settings.showStats,
     ) { onChange(settings.copy(showStats = it)) }
+}
+
+/** The Controls section: touch mode. */
+@Composable
+private fun ControlsSection(settings: Settings, onChange: (Settings) -> Unit) {
+    SectionHeader(R.string.settings_controls)
+    TouchModePicker(settings.touchMode) { onChange(settings.copy(touchMode = it)) }
 }
 
 /** About this device: its name, its pin with a Copy button, and the app's version. */
