@@ -48,7 +48,7 @@ data class Settings(
     val token: String = "",
     val resolution: Resolution = Resolution.SCREEN,
     val decoder: Decoder = Decoder.AUTO,
-    val touchMode: TouchMode = TouchMode.TRACKPAD,
+    val touchMode: TouchMode = TouchMode.DIRECT,
     val showStats: Boolean = false,
     val microphone: Boolean = false,
     val colorSource: ColorSource = ColorSource.WALLPAPER,

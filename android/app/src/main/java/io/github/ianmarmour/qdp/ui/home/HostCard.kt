@@ -55,12 +55,15 @@ private val CHIP_ICON_SIZE = 18.dp
 /** The padding inside a card. */
 private val CARD_PADDING = 16.dp
 
-/** How a status shows: its chip's words and icon, what tapping does, and how it is read aloud. */
+/**
+ * How a status shows: its chip's words and icon, if it has a chip, what
+ * tapping does, and how it is read aloud.
+ */
 private data class StatusLook(
     @param:StringRes val label: Int,
     @param:StringRes val spoken: Int,
     @param:StringRes val action: Int,
-    @param:DrawableRes val icon: Int,
+    @param:DrawableRes val icon: Int?,
 )
 
 /** Returns how [status] shows. */
@@ -77,7 +80,8 @@ private fun lookOf(status: HostStatus): StatusLook = when (status) {
         R.string.action_connect,
         R.drawable.ic_circle_fill1,
     )
-    HostStatus.NEW -> StatusLook(R.string.status_new, R.string.status_new_spoken, R.string.action_pair, R.drawable.ic_key)
+    // A computer to pair with shows Pair instead of a chip.
+    HostStatus.NEW -> StatusLook(R.string.status_new, R.string.status_new_spoken, R.string.action_pair, null)
     HostStatus.KEY_MISMATCH -> StatusLook(
         R.string.status_key_mismatch,
         R.string.status_key_mismatch_spoken,
@@ -102,7 +106,7 @@ private fun lookOf(status: HostStatus): StatusLook = when (status) {
 @StringRes
 fun actionLabelOf(status: HostStatus): Int = lookOf(status).action
 
-/** Returns the words naming [status], as its chip shows them. */
+/** Returns the words naming [status], as its chip and its details show them. */
 @StringRes
 fun statusLabelOf(status: HostStatus): Int = lookOf(status).label
 
@@ -115,11 +119,12 @@ private fun containerColor(status: HostStatus): Color = when (status) {
 }
 
 /**
- * A computer on the hosts screen, as one click target: its icon, name,
- * status chip and address, and an overflow menu of [onForget] (for paired
- * computers) and [onDetails], which a long press or the gamepad's Y opens
- * too. TalkBack reads it as one item ("Desk-PC, ready, paired. Double-tap
- * to connect.") with the menu's entries as custom actions.
+ * A computer on the hosts screen, as one click target: its icon, its name,
+ * and its status chip, or Pair for a computer to pair with, and an overflow
+ * menu of [onForget] (for paired computers) and [onDetails], which a long
+ * press or the gamepad's Y opens too. TalkBack reads it as one item
+ * ("Desk-PC, online. Double-tap to connect.") with the menu's entries as
+ * custom actions.
  */
 @Composable
 fun HostCardView(
@@ -176,16 +181,9 @@ fun HostCardView(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    AnimatedContent(targetState = card.status, label = "status") { status -> StatusChip(status) }
-                    Text(
-                        text = card.address,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (card.status == HostStatus.NEW) {
-                        PairPill()
+                    AnimatedContent(targetState = card.status, label = "status") { status ->
+                        val icon = lookOf(status).icon
+                        if (icon == null) PairPill() else StatusChip(status, icon)
                     }
                 }
                 Box {
@@ -249,9 +247,9 @@ private fun HostAvatar(status: HostStatus) {
     }
 }
 
-/** A pill naming [status] with an icon, so that status never rests on color alone. */
+/** A pill naming [status] with [icon], so that status never rests on color alone. */
 @Composable
-private fun StatusChip(status: HostStatus) {
+private fun StatusChip(status: HostStatus, @DrawableRes icon: Int) {
     val look = lookOf(status)
     val colors = MaterialTheme.colorScheme
     val (background, foreground) = when (status) {
@@ -269,7 +267,7 @@ private fun StatusChip(status: HostStatus) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            painter = painterResource(look.icon),
+            painter = painterResource(icon),
             contentDescription = null,
             tint = if (status.ready) colors.primary else foreground,
             modifier = Modifier.size(CHIP_ICON_SIZE),
@@ -286,7 +284,6 @@ private fun PairPill() {
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSecondaryContainer,
         modifier = Modifier
-            .padding(top = 4.dp)
             .clip(CircleShape)
             .background(MaterialTheme.colorScheme.secondaryContainer)
             .padding(horizontal = 16.dp, vertical = 8.dp),
