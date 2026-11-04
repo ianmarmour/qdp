@@ -19,7 +19,7 @@ integration turned on or Docker installed there. It measures QDP for Linux,
 which the container runs.
 
 The report is written to `bench/results/TIME/report.md`, beside each run's
-measurements and logs.
+measurements and logs. Ctrl+C stops the benchmark at once.
 
 ## Options
 
@@ -28,7 +28,7 @@ measurements and logs.
 | `QDP_BENCH_PROTOCOLS` | `local qdp rdp vnc` | The protocols to measure |
 | `QDP_BENCH_PROFILES` | `lan wan` | The network profiles to measure them over |
 | `QDP_BENCH_ROUNDS` | `1` | How many times each is measured |
-| `QDP_BENCH_SECONDS` | `30` | How long each measurement lasts |
+| `QDP_BENCH_SECONDS` | `15` | How long each measurement lasts |
 | `QDP_BENCH_SIZE` | `1920x1080` | The host's and the client's screen size |
 | `QDP_BENCH_REFRESH` | `60 120` | The screens' refresh rates, in hertz |
 | `QDP_BENCH_SCENES` | `low scroll full` | The scenes the host's screen shows |

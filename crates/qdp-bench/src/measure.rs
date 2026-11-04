@@ -33,12 +33,12 @@ const WARMUP: Duration = Duration::from_secs(3);
 const CLICK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long the button stays held after the marker lit.
-const HOLD: Duration = Duration::from_millis(200);
+const HOLD: Duration = Duration::from_millis(100);
 
 /// The shortest and longest waits between clicks, in milliseconds; each
 /// wait is chosen between them, so that clicks fall at any point of the
 /// host's and the client's frames.
-const CLICK_GAP_MILLIS: (u64, u64) = (400, 900);
+const CLICK_GAP_MILLIS: (u64, u64) = (200, 500);
 
 /// How long the measurer waits for a frame before looking at its clicks.
 const POLL: Duration = Duration::from_millis(20);
