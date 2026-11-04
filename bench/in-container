@@ -212,9 +212,11 @@ start_protocol() {
             ;;
         qdp)
             start_session host monitor no-x11
+            # The host streams as many frames a second as the screens
+            # refresh, rather than its default 60.
             spawn host "$log-server.log" "$bin/qdp" serve --source gnome --token bench \
                 --listen 127.0.0.1:4433 --identity "$state/host/qdp" \
-                --advertise off --pairing off
+                --advertise off --pairing off --fps "$refresh"
             server=$pid
             wait_for grep -q 'pin="' "$log-server.log"
             local pin
