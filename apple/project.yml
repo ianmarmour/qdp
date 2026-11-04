@@ -3,8 +3,8 @@
 #   ./build-core.sh && xcodegen generate
 #
 # Both apps link the Rust core, Generated/QDPCore.xcframework, with the
-# system libraries Generated/QDPCore.xcconfig lists, and share the code in
-# Shared/.
+# system libraries Generated/QDPCore.xcconfig lists, take their version from
+# it too, and share the code in Shared/.
 name: QDP
 options:
   bundleIdPrefix: io.github.ianmarmour
@@ -17,7 +17,6 @@ configFiles:
   Release: Generated/QDPCore.xcconfig
 settings:
   base:
-    MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     PRODUCT_NAME: QDP
@@ -36,6 +35,7 @@ targets:
       path: Generated/macOS-Info.plist
       properties:
         CFBundleDisplayName: QDP
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: QDP finds the computers on your network you can stream from, and connects to them.
         NSBonjourServices: [_qdp._udp]
@@ -69,6 +69,7 @@ targets:
         # The name under the icon and in the App Store; the code and the
         # project stay QDP.
         CFBundleDisplayName: Quick Desktop
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         CADisableMinimumFrameDurationOnPhone: true

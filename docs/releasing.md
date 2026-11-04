@@ -11,7 +11,9 @@ platforms the branch changes.
 
 ## Publishing a release
 
-1. Raise `version` in the root `Cargo.toml`, and merge that change.
+1. Raise `version` in the root `Cargo.toml`, which every package and app
+   takes its version from, then `cargo update --workspace`, and merge that
+   change.
 2. Write the release's description in a file, such as `release.md`:
 
    ```markdown
