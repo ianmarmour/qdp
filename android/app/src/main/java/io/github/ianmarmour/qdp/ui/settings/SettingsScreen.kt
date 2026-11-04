@@ -43,6 +43,7 @@ import io.github.ianmarmour.qdp.R
 import io.github.ianmarmour.qdp.Resolution
 import io.github.ianmarmour.qdp.Settings
 import io.github.ianmarmour.qdp.StreamSize
+import io.github.ianmarmour.qdp.ui.components.EDGE_ICON_BUTTON_PADDING
 import io.github.ianmarmour.qdp.ui.components.QdpIconButton
 import io.github.ianmarmour.qdp.ui.components.gamepadButtons
 import kotlinx.coroutines.launch
@@ -90,7 +91,12 @@ fun SettingsScreen(
     val snackbar = remember { SnackbarHostState() }
     val title = stringResource(R.string.action_settings)
     val back: @Composable () -> Unit = {
-        QdpIconButton(onClick = onBack, icon = R.drawable.ic_arrow_back, description = stringResource(R.string.action_back))
+        QdpIconButton(
+            onClick = onBack,
+            icon = R.drawable.ic_arrow_back,
+            description = stringResource(R.string.action_back),
+            modifier = Modifier.padding(start = EDGE_ICON_BUTTON_PADDING),
+        )
     }
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection).gamepadButtons(),
