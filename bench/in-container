@@ -347,8 +347,12 @@ apply_profile lan
         | grep -m1 PCI_ID | cut -d= -f2 || echo none)"
     echo "- QDP's encoder: $(grep -ho 'encoder="[^"]*"' "$logs"/*-qdp-*-server.log 2> /dev/null \
         | head -1 | cut -d'"' -f2 || echo unknown)"
+    rounds_measured="$rounds rounds"
+    if [ "$rounds" = 1 ]; then
+        rounds_measured="1 round"
+    fi
     echo "- Screen: $size at $(echo "${refreshes[*]}" | sed 's/ /, /g') Hz," \
-        "$seconds seconds a run, $rounds rounds"
+        "$seconds seconds a run, $rounds_measured"
     echo "- Packages: $(pacman -Q mutter gnome-remote-desktop freerdp tigervnc mesa \
         | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
 } > "$results/report.md"

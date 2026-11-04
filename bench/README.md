@@ -20,6 +20,7 @@ which the container runs.
 
 The report is written to `bench/results/TIME/report.md`, beside each run's
 measurements and logs. Ctrl+C stops the benchmark at once.
+[Benchmark results](../docs/benchmarks.md) has one run's report.
 
 ## Options
 

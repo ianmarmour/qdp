@@ -23,7 +23,8 @@ Windows, macOS, Android, iPhone and iPad.
   with the latest codecs, wherever the device supports it. It uses
   multi-threading, SIMD and advanced memory sharing techniques to keep
   everything as fast as possible, and leverages QUIC datagrams to keep network
-  transmission low latency and optimized.
+  transmission low latency and optimized. The
+  [benchmarks](docs/benchmarks.md) compare it with RDP and VNC.
 - **Multi Platform** - From day one, QDP was designed with multi-platform
   usage in mind. We offer servers for Windows, Linux and macOS, and clients
   for all modern platforms, including mobile. We aim to bring every new
