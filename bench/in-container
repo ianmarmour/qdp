@@ -7,7 +7,7 @@
 set -euo pipefail
 
 size=${QDP_BENCH_SIZE:-1920x1080}
-seconds=${QDP_BENCH_SECONDS:-30}
+seconds=${QDP_BENCH_SECONDS:-15}
 rounds=${QDP_BENCH_ROUNDS:-1}
 read -ra protocols <<< "${QDP_BENCH_PROTOCOLS:-local qdp rdp vnc}"
 read -ra profiles <<< "${QDP_BENCH_PROFILES:-lan wan}"
@@ -25,8 +25,14 @@ mkdir -p "$logs" "$runs"
 user=bench
 password=benchpas
 
+# An interruption, from Ctrl+C or the container stopping, stops everything
+# started at once. Bash runs the trap only between commands, so the long
+# ones run in the background and are waited for.
+trap 'trap - INT TERM; kill 0' INT TERM
+
 cd /src
-cargo build --release --locked -p qdp-cli -p qdp-bench
+cargo build --release --locked -p qdp-cli -p qdp-bench &
+wait $!
 bin=$CARGO_TARGET_DIR/release
 
 # The X11 display of the client's session, once it has one.
@@ -62,8 +68,12 @@ spawn() {
     pid=$!
 }
 
-# Stops the processes whose IDs are given.
+# Stops the processes whose IDs are given, if any: waiting for none would
+# wait for every process started.
 stop() {
+    if [ "$#" = 0 ]; then
+        return 0
+    fi
     kill "$@" 2> /dev/null || true
     wait "$@" 2> /dev/null || true
 }
@@ -186,24 +196,22 @@ start_gnome_remote_desktop() {
     pid=$server
 }
 
-# Starts what protocol $1 needs: a host's session with the probe on its
-# screen, the protocol's server there, and its viewer full screen on the
-# client's screen. Sets $processes to the server and the viewer, as the
-# measurer's options, and $pids to every process to stop afterwards. The
-# local baseline has neither: a probe on the client's own screen stands in.
+# Starts what protocol $1 needs: a host's session, the protocol's server
+# there, and its viewer full screen on the client's screen, which stay up
+# while the probe shows each scene over each network profile. Sets
+# $processes to the server and the viewer, as the measurer's options, and
+# $pids to every process to stop afterwards. The local baseline needs
+# neither: the probe goes on the client's own screen.
 start_protocol() {
-    log=$logs/$run
-    local server viewer probe
+    log=$logs/$refresh-$1-$round
+    local server viewer
     case $1 in
         local)
-            spawn client "$log-probe.log" "$bin/qdp-bench" probe --scene "$scene"
-            processes=() pids=("$pid")
+            processes=() pids=()
             return 0
             ;;
         qdp)
             start_session host monitor no-x11
-            spawn host "$log-probe.log" "$bin/qdp-bench" probe --scene "$scene"
-            probe=$pid
             spawn host "$log-server.log" "$bin/qdp" serve --source gnome --token bench \
                 --listen 127.0.0.1:4433 --identity "$state/host/qdp" \
                 --advertise off --pairing off
@@ -236,8 +244,6 @@ start_protocol() {
             fi
             viewer=$pid
             wait_for has_monitor host
-            spawn host "$log-probe.log" "$bin/qdp-bench" probe --scene "$scene"
-            probe=$pid
             ;;
         *)
             echo "unknown protocol $1" >&2
@@ -245,7 +251,19 @@ start_protocol() {
             ;;
     esac
     processes=(--process "server=$server" --process "viewer=$viewer")
-    pids=("$viewer" "$server" "$probe")
+    pids=("$viewer" "$server")
+}
+
+# Starts the probe showing $scene where protocol $1 shows it: on the
+# host's screen, or for the local baseline, the client's. Sets $probe to
+# it.
+start_probe() {
+    local session=host
+    if [ "$1" = local ]; then
+        session=client
+    fi
+    spawn "$session" "$logs/$run-probe.log" "$bin/qdp-bench" probe --scene "$scene"
+    probe=$pid
 }
 
 # Stops what protocol $1 started.
@@ -259,35 +277,40 @@ stop_protocol() {
 for refresh in "${refreshes[@]}"; do
     start_session client monitor x11
     for round in $(seq "$rounds"); do
-        for profile in "${profiles[@]}"; do
-            if ! apply_profile "$profile"; then
-                echo "skipping the $profile profile" >&2
+        # Each round starts one protocol later, so that none always runs
+        # first or last.
+        count=${#protocols[@]}
+        for index in $(seq 0 $((count - 1))); do
+            protocol=${protocols[$(((index + round - 1) % count))]}
+            if ! start_protocol "$protocol"; then
+                echo "starting $protocol failed; see $logs" >&2
+                stop_protocol "$protocol"
                 continue
             fi
-            for scene in "${scenes[@]}"; do
-                # Each round starts one protocol later, so that none always
-                # runs first or last.
-                count=${#protocols[@]}
-                for index in $(seq 0 $((count - 1))); do
-                    protocol=${protocols[$(((index + round - 1) % count))]}
+            for profile in "${profiles[@]}"; do
+                if ! apply_profile "$profile"; then
+                    echo "skipping the $profile profile" >&2
+                    continue
+                fi
+                for scene in "${scenes[@]}"; do
                     echo "$refresh Hz, round $round, $profile, $scene: $protocol"
                     run=$refresh-$scene-$profile-$protocol-$round
+                    start_probe "$protocol"
                     measured=0
-                    if start_protocol "$protocol"; then
-                        in_session client "$bin/qdp-bench" measure \
-                            --protocol "$protocol" --profile "$profile" --scene "$scene" \
-                            --round "$round" --refresh "$refresh" --seconds "$seconds" \
-                            "${processes[@]}" --out "$runs/$run.toml" \
-                            &> "$log-measure.log" || measured=$?
-                    else
-                        measured=1
-                    fi
-                    stop_protocol "$protocol"
+                    in_session client "$bin/qdp-bench" measure \
+                        --protocol "$protocol" --profile "$profile" --scene "$scene" \
+                        --round "$round" --refresh "$refresh" --seconds "$seconds" \
+                        "${processes[@]}" --out "$runs/$run.toml" \
+                        &> "$logs/$run-measure.log" &
+                    wait $! || measured=$?
+                    stop "$probe"
                     if [ "$measured" != 0 ]; then
                         echo "measuring $protocol over $profile failed; see $logs" >&2
                     fi
                 done
             done
+            apply_profile lan
+            stop_protocol "$protocol"
         done
     done
     stop_session client
