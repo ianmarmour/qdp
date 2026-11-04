@@ -83,3 +83,4 @@ implementation of the Quick Desktop Protocol (QDP) in Rust.
   `git config user.email`. Agents must never commit under their own identity.
 - Every pull request description must include an easy-to-read, bulleted list
   of the changes it makes.
+- Delete a pull request's branch once it is merged.
