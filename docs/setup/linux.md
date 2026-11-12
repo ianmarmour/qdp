@@ -7,12 +7,25 @@ for each stream.
 ## Requirements
 
 - An x86-64 computer
-- For the app, GTK 4.14 and libadwaita 1.5 or later, as on Fedora 40 and
-  Ubuntu 24.04
+- For the app's AppImage, glibc 2.39 or later, as on SteamOS 3.7, Fedora 40
+  and Ubuntu 24.04
+- For the app's packages, GTK 4.14 and libadwaita 1.5 or later, as on
+  Fedora 40 and Ubuntu 24.04
 - For video on the GPU, its VA-API driver: Mesa's for AMD, and
   intel-media-driver for Intel
 
 ## Install
+
+The app's AppImage runs without installing, and brings the `qdp` command its
+streams need:
+
+```bash
+curl -LO https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.AppImage
+chmod +x qdp-gtk-linux-x86_64.AppImage
+./qdp-gtk-linux-x86_64.AppImage
+```
+
+To share this computer as well, install the command as below.
 
 On Fedora:
 
@@ -37,6 +50,12 @@ mkdir -p ~/.local/bin
 curl -L https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz | tar -xz -C ~/.local/bin
 ```
 
+## Steam Deck
+
+In Desktop Mode, download the AppImage and make it executable, as above or
+from its Properties in Dolphin. To use it in Game Mode, open Steam, choose
+Games > Add a Non-Steam Game to My Library, and browse to the AppImage.
+
 ## Input without the packages
 
 The packages let the host create the virtual input devices it needs. Without
@@ -53,8 +72,9 @@ sudo usermod -aG input "$USER"
 
 ## Upgrade and remove
 
-Install a newer package the same way to upgrade. To remove QDP, run
-`sudo dnf remove qdp-gtk qdp` or `sudo apt remove qdp`.
+Install a newer package, or download a newer AppImage, the same way to
+upgrade. To remove QDP, run `sudo dnf remove qdp-gtk qdp` or
+`sudo apt remove qdp`, or delete the AppImage.
 
 ## Next steps
 

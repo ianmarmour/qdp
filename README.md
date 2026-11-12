@@ -44,7 +44,7 @@ Install the QDP **server** on the computer you want to reach, and a
 
 | Platform | Server | Client |
 |---|---|---|
-| Linux | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.rpm), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.tar.gz) |
+| Linux | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) | [APPIMAGE](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.AppImage), [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.rpm), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.tar.gz) |
 | Windows | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) |
 | macOS (Apple silicon) | [BIN](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-arm64.tar.gz) | [APP](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-app.zip) |
 | Android | | [APK](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-android-arm64.apk) |

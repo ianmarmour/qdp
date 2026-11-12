@@ -170,13 +170,23 @@ jobs:
       - name: Build and package the Linux app
         if: github.event_name == 'push'
         # The tarball is laid out as the app installs, under a prefix:
-        # extracting it into ~/.local installs it for one user.
+        # extracting it into ~/.local installs it for one user. The AppImage
+        # packs the app with qdp and the libraries they need after the
+        # AppImage runtime, at a fixed release checked by its digest.
         run: |
           cargo build --release --locked -p qdp-gtk
           packaging/linux/stage-gtk.sh target/release/qdp-gtk qdp-gtk-stage
           tar -czf qdp-gtk-linux-x86_64.tar.gz -C qdp-gtk-stage bin share
           release=1
           packaging/linux/build-gtk-rpm.sh target/release/qdp-gtk "$release" qdp-gtk-linux-x86_64.rpm
+          sudo apt-get install -y --no-install-recommends \
+            patchelf squashfs-tools librsvg2-common adwaita-icon-theme
+          runtime="$RUNNER_TEMP/runtime-x86_64"
+          curl -fsSL -o "$runtime" \
+            https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  $runtime" | sha256sum -c
+          packaging/linux/build-appimage.sh target/release/qdp-gtk target/release/qdp \
+            "$RUNNER_TEMP/AppDir" "$runtime" qdp-gtk-linux-x86_64.AppImage
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
@@ -185,6 +195,7 @@ jobs:
           path: |
             qdp-gtk-linux-x86_64.tar.gz
             qdp-gtk-linux-x86_64.rpm
+            qdp-gtk-linux-x86_64.AppImage
           if-no-files-found: error
 
       - name: Build and package the gateway
