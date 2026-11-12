@@ -1,0 +1,10 @@
+#!/bin/sh
+# Starts the QDP app from its AppImage, with GTK finding the icons, settings
+# schemas and image loaders packed beside it rather than the system's.
+here=${APPDIR:-$(dirname "$(readlink -f "$0")")}
+export XDG_DATA_DIRS="$here/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export GDK_PIXBUF_MODULE_FILE="$here/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+# The system's GIO modules are built against its own GLib, not the one
+# packed here.
+export GIO_MODULE_DIR="$here/usr/lib/gio/modules"
+exec "$here/usr/bin/qdp-gtk" "$@"
