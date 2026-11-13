@@ -2984,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "qdp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "p256",
  "ring",
@@ -2994,7 +2994,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-android"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "jni-sys 0.3.1",
  "ndk",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "qdp",
  "qdp-codec",
@@ -3027,7 +3027,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-apple"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "qdp",
  "qdp-app",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-bench"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "libc",
  "qdp-codec",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "qdp",
  "qdp-app",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-codec"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "av1-grain",
  "libc",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "ashpd",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-gateway"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "ldap3",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-gtk"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "gtk4",
  "libadwaita",
@@ -3171,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-quic"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "qdp",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "libc",
@@ -3205,7 +3205,7 @@ dependencies = [
 
 [[package]]
 name = "qdp-windows"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "qdp",
  "qdp-app",
