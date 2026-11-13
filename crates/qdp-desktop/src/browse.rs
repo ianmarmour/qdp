@@ -1,6 +1,6 @@
 //! Finding hosts on the local network, which advertise themselves with
-//! DNS-SD as `_qdp._udp`: through Avahi on Linux, for the Linux app's list
-//! of computers and `qdp discover`.
+//! DNS-SD as `_qdp._udp`: over Multicast DNS of QDP's own on Linux, for the
+//! Linux app's list of computers and `qdp discover`.
 
 use std::net::SocketAddr;
 
@@ -31,12 +31,12 @@ pub enum Discovery {
 ///
 /// # Errors
 ///
-/// Fails if the system's DNS-SD service cannot be reached, or on systems
-/// this crate does not browse on yet.
+/// Fails if Multicast DNS cannot start, or on systems this crate does not
+/// browse on yet.
 pub async fn browse(report: impl FnMut(Discovery) + Send) -> Result<(), String> {
     #[cfg(all(target_os = "linux", feature = "discovery"))]
     {
-        crate::linux::avahi_browse::browse(report).await
+        crate::linux::mdns::browse(report).await
     }
     #[cfg(not(all(target_os = "linux", feature = "discovery")))]
     {

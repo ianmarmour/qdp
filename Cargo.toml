@@ -56,6 +56,9 @@ futures-lite = { version = "2.6.1", default-features = false, features = ["std"]
 # libudev's development files.
 gilrs = { version = "0.11.2", default-features = false, features = ["wgi"] }
 libc = { version = "0.2.172", default-features = false }
+# Multicast DNS on Linux, through which hosts advertise themselves and
+# clients find them without a system service such as Avahi.
+mdns-sd = { version = "0.21.7", default-features = false, features = ["async"] }
 # LDAP, for the gateway to check users against an organization's directory,
 # Active Directory included, over TLS with rustls.
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
@@ -140,7 +143,7 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
 unicode-normalization = { version = "0.1.24", default-features = false }
 # Windows' own interfaces, for screen capture and input on Windows hosts.
 windows = { version = "0.62.2", default-features = false, features = ["std", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
-# D-Bus on Linux hosts, for advertising through Avahi.
+# D-Bus on Linux, for desktop notifications and GNOME's screen sharing.
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 # Client-side decorations (wayland-csd-adwaita) give the window a title bar on
 # GNOME, which draws none for Wayland clients.

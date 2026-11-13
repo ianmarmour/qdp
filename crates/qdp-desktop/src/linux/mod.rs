@@ -12,10 +12,6 @@
 
 #[cfg(feature = "audio")]
 mod audio;
-#[cfg(feature = "discovery")]
-pub(crate) mod avahi;
-#[cfg(feature = "discovery")]
-pub(crate) mod avahi_browse;
 #[cfg(feature = "screen-capture")]
 mod desktop_layout;
 #[cfg(feature = "screen-capture")]
@@ -29,6 +25,8 @@ mod kde_protocols;
 mod keycodes;
 #[cfg(feature = "screen-capture")]
 mod kms;
+#[cfg(feature = "discovery")]
+pub(crate) mod mdns;
 #[cfg(feature = "screen-capture")]
 mod monitor_matching;
 #[cfg(feature = "screen-capture")]
