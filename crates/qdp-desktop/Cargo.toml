@@ -16,9 +16,10 @@ default = ["audio", "discovery", "gamepad", "notifications", "screen-capture"]
 # development files and libclang to build, and through cpal elsewhere,
 # AAudio on Android.
 audio = ["dep:cpal", "dep:pipewire"]
-# Advertises the host on the local network (Section 3.13): through Avahi on
-# Linux.
-discovery = ["dep:futures-lite", "dep:tokio", "dep:zbus"]
+# Advertises the host on the local network, and finds hosts there (Section
+# 3.13): on Linux, over Multicast DNS of its own, which needs no system
+# service such as Avahi.
+discovery = ["dep:mdns-sd", "dep:tokio"]
 # Shows desktop notifications, such as pairing codes: through the
 # freedesktop notification service on Linux.
 notifications = ["dep:tokio", "dep:zbus"]
@@ -65,6 +66,7 @@ arboard = { workspace = true, features = ["wayland-data-control"] }
 ashpd = { workspace = true, optional = true }
 futures-lite = { workspace = true, optional = true }
 libc.workspace = true
+mdns-sd = { workspace = true, optional = true }
 pipewire = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "sync"] }
 wayland-backend = { workspace = true, optional = true }
@@ -76,6 +78,9 @@ wayland-protocols-wlr = { workspace = true, optional = true }
 wl-clipboard-rs.workspace = true
 x11rb.workspace = true
 zbus = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 # Metal drawing, on Macs and iOS devices.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

@@ -163,7 +163,7 @@ struct Running {
 enum Search {
     /// It is.
     Searching,
-    /// It cannot be, as when Avahi does not run; searching is tried again
+    /// It cannot be, as when `qdp` cannot run; searching is tried again
     /// after [`SEARCH_RETRY_SECONDS`].
     Unavailable,
 }
@@ -239,8 +239,7 @@ impl Window {
             .build();
         header.pack_end(&menu_button);
 
-        let banner =
-            adw::Banner::new("QDP can’t search the network for computers. Is Avahi running?");
+        let banner = adw::Banner::new("QDP can’t search the network for computers right now.");
         let page = adw::PreferencesPage::new();
         let stack = gtk::Stack::new();
         stack.add_named(
@@ -255,7 +254,7 @@ impl Window {
             &status_page(
                 "network-offline-symbolic",
                 "Can’t Search the Network",
-                "QDP finds computers through Avahi, which isn’t running. Start it, or add a computer by its address.",
+                "QDP can’t search this network for computers right now. Add a computer by its address.",
             ),
             Some(UNAVAILABLE_PAGE),
         );

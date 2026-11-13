@@ -20,7 +20,7 @@ doc = false
 default = ["audio", "discovery", "gamepad", "notifications", "screen-capture", "window"]
 # Plays and captures sound; on Linux it needs PipeWire's development files.
 audio = ["qdp-desktop/audio"]
-# Advertises hosts on the local network; on Linux through Avahi.
+# Advertises hosts on the local network, and finds them there.
 discovery = ["qdp-desktop/discovery"]
 # Captures the client's gamepads; on Linux it needs libudev's development
 # files.

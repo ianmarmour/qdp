@@ -1,6 +1,6 @@
 //! Advertising the host on the local network with DNS-SD (Section 3.13), so
-//! that clients list it without the user typing its address: through Avahi
-//! on Linux, which GNOME, KDE and most distributions run.
+//! that clients list it without the user typing its address: over Multicast
+//! DNS of QDP's own on Linux, whether or not the system runs Avahi.
 
 use std::net::SocketAddr;
 
@@ -19,13 +19,13 @@ pub struct Advertisement {
     pub record: ServiceRecord,
 }
 
-/// A service being advertised. Dropping it stops advertising when the
-/// process leaves the bus; [`Advertising::withdraw`] stops at once.
+/// A service being advertised. Dropping it stops advertising;
+/// [`Advertising::withdraw`] also waits until clients are told.
 #[derive(Debug)]
 pub struct Advertising {
     /// The platform's advertisement.
     #[cfg(all(target_os = "linux", feature = "discovery"))]
-    inner: crate::linux::avahi::Advertising,
+    inner: crate::linux::mdns::Advertising,
 }
 
 impl Advertising {
@@ -38,13 +38,12 @@ impl Advertising {
 
 /// Starts advertising `advertisement` on the local network. Under a name
 /// another service holds, the service takes the next free one, such as
-/// `studio #2`.
+/// `studio (2)`.
 ///
 /// # Errors
 ///
-/// Fails if the host listens on one address only, if the system has no
-/// DNS-SD service, such as when Avahi is not running, or on systems this
-/// crate does not advertise on yet.
+/// Fails if the host listens on one address only, if Multicast DNS cannot
+/// start, or on systems this crate does not advertise on yet.
 pub async fn advertise(advertisement: Advertisement) -> Result<Advertising, String> {
     if !advertisement.address.ip().is_unspecified() {
         return Err(format!(
@@ -54,9 +53,7 @@ pub async fn advertise(advertisement: Advertisement) -> Result<Advertising, Stri
     }
     #[cfg(all(target_os = "linux", feature = "discovery"))]
     {
-        crate::linux::avahi::advertise(advertisement)
-            .await
-            .map(|inner| Advertising { inner })
+        crate::linux::mdns::advertise(&advertisement).map(|inner| Advertising { inner })
     }
     #[cfg(not(all(target_os = "linux", feature = "discovery")))]
     {
