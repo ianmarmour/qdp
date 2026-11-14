@@ -14,7 +14,7 @@ use qdp::message::{
     PointerMode, StreamHeader, VideoCodec, VideoCodecCapability, VideoCodecFlags,
 };
 use qdp::registry::ErrorCode;
-use qdp::session::{AuthResponse, HostConfig, HostEvent};
+use qdp::session::{AuthResponse, HostConfig, HostEvent, SessionError};
 use qdp::time::{SessionClock, answer_ping};
 use qdp::video::{FrameKind, SentWhen, VideoSender};
 use qdp::wire::VarInt;
@@ -377,7 +377,7 @@ async fn serve_session(
     // once the desktop has opened, which may be never.
     let quic = driver.connection().quic().clone();
     let opened = tokio::select! {
-        opened = open() => opened?,
+        opened = open() => opened,
         reason = quic.closed() => {
             info!(%reason, "the client left while the desktop opened");
             return Ok(HostSummary::default());
@@ -386,7 +386,10 @@ async fn serve_session(
     let OpenedDesktop {
         mut source,
         mut injector,
-    } = opened;
+    } = match opened {
+        Ok(opened) => opened,
+        Err(error) => return Err(end_after_delivery(&mut driver, error).await),
+    };
     let worker = clipboard
         .map(|shared| ClipboardWorker::spawn(shared.clipboard))
         .transpose()
@@ -590,6 +593,19 @@ async fn next_setup_event(driver: &mut HostDriver) -> Result<Option<HostEvent>, 
         Err(error) if is_normal_close(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Ends the session with `error` once the client has what the host sent it
+/// before, the result of its authentication among it, rather than dropping
+/// that with the connection: a client that just paired keeps the host, and
+/// is not asked for a code again, and learns why the session ended.
+async fn end_after_delivery(driver: &mut HostDriver, error: RuntimeError) -> RuntimeError {
+    driver
+        .session()
+        .close(SessionError::new(error.close_code(), error.to_string()));
+    // Flushing writes what is queued, then closes once it is delivered.
+    let _ = driver.flush().await;
+    error
 }
 
 /// Records an authentication attempt's outcome in the connection's
