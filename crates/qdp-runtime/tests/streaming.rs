@@ -2973,6 +2973,53 @@ async fn pairing_with_the_shown_code_authenticates() {
     check_frames(&result.unwrap());
 }
 
+/// A client that pairs with a host whose screen then fails to open learns it
+/// paired, and so keeps the host and is not asked for a code again, and why
+/// the session ended: the host delivers the result of the pairing before it
+/// closes the connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_is_kept_when_the_desktop_fails_to_open() {
+    let (identity, authenticator, log) = pairing_host();
+    let host_key = identity.key_pin().unwrap();
+    let desktop = HostDesktop {
+        input_classes: input_classes(&NoInput, PassthroughPolicy::default()),
+        clipboard: None,
+        audio: HostAudio::default(),
+        open: Box::new(|| {
+            Box::pin(async { Err(RuntimeError::Capture("no screen to capture".to_owned())) })
+        }),
+    };
+    let (address, _, _host) = start_host_on(identity, authenticator, desktop);
+    let client = TlsIdentity::generate_self_signed(vec!["client".to_owned()]).unwrap();
+    let client_key = client.key_pin().unwrap();
+    let paired = Arc::new(Mutex::new(None));
+    let options = pairing_options(client_key, &log, false, &paired);
+    let result = tokio::time::timeout(
+        TEST_TIMEOUT,
+        stream_verified(
+            address,
+            HostVerification::Pairing,
+            options,
+            None,
+            Some(client),
+        ),
+    )
+    .await
+    .expect("the session finishes in time");
+    let Err(error) = result else {
+        panic!("the session ends with the desktop's error");
+    };
+    assert!(
+        error.to_string().contains("no screen to capture"),
+        "the client learns why: {error}"
+    );
+    assert_eq!(*paired.lock().unwrap(), Some(host_key));
+    assert_eq!(
+        log.lock().unwrap().ended,
+        [PairingOutcome::Paired { client_key }]
+    );
+}
+
 /// A client whose user types another code is refused, and learns no key to
 /// pin; after three such failures in a row the host refuses to pair for a
 /// minute, even with the right code (Section 4.4.9).

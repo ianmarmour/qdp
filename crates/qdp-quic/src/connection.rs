@@ -21,7 +21,9 @@ const CONTROL_READ_CHUNK: usize = 64 << 10;
 
 /// How long an endpoint that ends a session waits for its last control
 /// messages, such as a failed `AUTH_RESULT`, to be acknowledged before
-/// closing the connection, which discards unsent stream data.
+/// closing the connection, which discards unsent stream data; and how long
+/// one whose peer finished the control stream waits for the reason the peer
+/// closes the connection with.
 const FINAL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The QUIC application error code sent if a QDP code cannot be represented,
@@ -207,7 +209,16 @@ impl QdpConnection {
     pub(crate) async fn read_control(&mut self) -> Result<Bytes, TransportError> {
         match self.control_recv.read_chunk(CONTROL_READ_CHUNK, true).await {
             Ok(Some(chunk)) => Ok(chunk.bytes),
-            Ok(None) | Err(quinn::ReadError::Reset(_)) => Err(TransportError::ControlStreamClosed),
+            // A peer that ends the session finishes the control stream, so
+            // that its last messages arrive, and then closes the connection
+            // with its reason, which this waits for.
+            Ok(None) => {
+                match tokio::time::timeout(FINAL_DELIVERY_TIMEOUT, self.connection.closed()).await {
+                    Ok(error) => Err(TransportError::Connection(error)),
+                    Err(_) => Err(TransportError::ControlStreamClosed),
+                }
+            }
+            Err(quinn::ReadError::Reset(_)) => Err(TransportError::ControlStreamClosed),
             Err(error) => Err(error.into()),
         }
     }
