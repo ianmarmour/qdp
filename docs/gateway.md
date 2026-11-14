@@ -21,6 +21,13 @@ curl -LO https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gateway-
 sudo apt install ./qdp-gateway-linux-x86_64.deb
 ```
 
+On Arch Linux and Arch-based systems such as CachyOS:
+
+```bash
+curl -LO https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gateway-linux-x86_64.pkg.tar.zst
+sudo pacman -U ./qdp-gateway-linux-x86_64.pkg.tar.zst
+```
+
 On Windows Server, install
 [`qdp-gateway-windows-x64.msi`](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gateway-windows-x64.msi).
 

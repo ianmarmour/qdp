@@ -148,14 +148,15 @@ jobs:
         if: github.event_name == 'push'
         run: tar -czf qdp-linux-x86_64.tar.gz -C target/release qdp
 
-      - name: Package as an RPM and a Debian package
+      - name: Package as an RPM, a Debian package and an Arch package
         if: github.event_name == 'push'
         # A version's packages are its first release.
         run: |
-          sudo apt-get install -y --no-install-recommends rpm
+          sudo apt-get install -y --no-install-recommends rpm libarchive-tools
           release=1
           packaging/linux/build-rpm.sh target/release/qdp "$release" qdp-linux-x86_64.rpm
           packaging/linux/build-deb.sh qdp target/release/qdp "$release" qdp-linux-x86_64.deb
+          packaging/linux/build-arch.sh qdp target/release/qdp "$release" qdp-linux-x86_64.pkg.tar.zst
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
@@ -165,6 +166,7 @@ jobs:
             qdp-linux-x86_64.tar.gz
             qdp-linux-x86_64.rpm
             qdp-linux-x86_64.deb
+            qdp-linux-x86_64.pkg.tar.zst
           if-no-files-found: error
 
       - name: Build and package the Linux app
@@ -208,6 +210,8 @@ jobs:
             qdp-gateway-linux-x86_64.rpm
           packaging/linux/build-deb.sh qdp-gateway target/release/qdp-gateway "$release" \
             qdp-gateway-linux-x86_64.deb
+          packaging/linux/build-arch.sh qdp-gateway target/release/qdp-gateway "$release" \
+            qdp-gateway-linux-x86_64.pkg.tar.zst
 
       - name: Try the Debian packages
         if: github.event_name == 'push'
@@ -223,6 +227,11 @@ jobs:
           sudo apt-get purge -y qdp qdp-gateway
           test ! -e /usr/bin/qdp && test ! -e /usr/bin/qdp-gateway
 
+      - name: Try the Arch packages
+        if: github.event_name == 'push'
+        # In Arch's own image, with their dependencies from its repositories.
+        run: packaging/linux/try-arch.sh qdp-linux-x86_64.pkg.tar.zst qdp-gateway-linux-x86_64.pkg.tar.zst
+
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
         with:
@@ -231,6 +240,7 @@ jobs:
             qdp-gateway-linux-x86_64.tar.gz
             qdp-gateway-linux-x86_64.rpm
             qdp-gateway-linux-x86_64.deb
+            qdp-gateway-linux-x86_64.pkg.tar.zst
           if-no-files-found: error
 
   windows:

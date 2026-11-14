@@ -7,8 +7,8 @@ what to set up on each system; `qdp help` lists every option.
 
 The host runs as a service, which keeps it running in the background:
 
-- **Linux:** the RPM and Debian package install the service; turn it on with
-  `sudo systemctl enable --now qdp`. Without the packages,
+- **Linux:** the RPM, Debian and Arch packages install the service; turn it
+  on with `sudo systemctl enable --now qdp`. Without the packages,
   `sudo qdp service install` sets it up. It runs from boot, with the
   [login screen](#streaming-the-login-screen) included, and its pairing codes
   show on the logged-in desktop and in `journalctl -u qdp -f`.
