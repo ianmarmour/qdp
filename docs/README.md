@@ -43,7 +43,7 @@ internet, and grant access to endpoints.
 | [Benchmarks](../bench/README.md) | Measuring QDP's, RDP's and VNC's latency |
 | [Benchmark results](benchmarks.md) | A run of the benchmarks, on one machine |
 | [Releasing](releasing.md) | Continuous integration, releases, signing |
-| [Packaging](../packaging/README.md) | The RPMs, Debian packages and Windows installers |
+| [Packaging](../packaging/README.md) | The RPMs, Debian and Arch packages, and Windows installers |
 
 Each crate and app has a README of its own:
 [the architecture overview](architecture.md#crates) lists them.

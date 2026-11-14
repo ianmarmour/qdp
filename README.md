@@ -44,7 +44,7 @@ Install the QDP **server** on the computer you want to reach, and a
 
 | Platform | Server | Client |
 |---|---|---|
-| Linux | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) | [APPIMAGE](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.AppImage), [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.rpm), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.tar.gz) |
+| Linux | [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.rpm), [DEB](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.deb), [ARCH](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.pkg.tar.zst), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.tar.gz) | [APPIMAGE](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.AppImage), [RPM](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.rpm), [TARBALL](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.tar.gz) |
 | Windows | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) | [MSI](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-windows-x64.msi) |
 | macOS (Apple silicon) | [BIN](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-arm64.tar.gz) | [APP](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-macos-app.zip) |
 | Android | | [APK](https://github.com/ianmarmour/qdp/releases/latest/download/qdp-android-arm64.apk) |
@@ -83,7 +83,7 @@ on each platform step by step.
 | [`crates/qdp-android`](crates/qdp-android/README.md), [`android`](android/README.md) | The Android app and its core |
 | [`crates/qdp-apple`](crates/qdp-apple/README.md), [`apple`](apple/README.md) | The Mac, iPhone and iPad apps and their core |
 | [`crates/qdp-windows`](crates/qdp-windows/README.md), [`windows`](windows/README.md) | The Windows app and its core |
-| [`packaging`](packaging/README.md) | RPMs, Debian packages and Windows installers |
+| [`packaging`](packaging/README.md) | RPMs, Debian and Arch packages, and Windows installers |
 | [`docs`](docs/README.md) | User guides, developer guides and the specification |
 | [`branding`](branding/README.md) | The logo and app icons |
 

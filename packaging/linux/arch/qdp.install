@@ -1,0 +1,24 @@
+# pacman's install script for QDP. pacman's own hooks reload systemd and udev
+# at the end of each transaction, and a new service is off, as Arch has it.
+
+# The modules load and the rule applies now, so that input works before the
+# next boot.
+post_install() {
+  modprobe -a uinput uhid >/dev/null 2>&1 || true
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+  udevadm trigger --subsystem-match=misc >/dev/null 2>&1 || true
+}
+
+# Upgrading restarts a running service with the new command.
+post_upgrade() {
+  post_install
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl try-restart qdp.service >/dev/null 2>&1 || true
+  fi
+}
+
+# Removing QDP stops its service and turns it off.
+pre_remove() {
+  systemctl --no-reload disable --now qdp.service >/dev/null 2>&1 || true
+}

@@ -43,6 +43,14 @@ sudo apt install ./qdp-linux-x86_64.deb
 curl -L https://github.com/ianmarmour/qdp/releases/latest/download/qdp-gtk-linux-x86_64.tar.gz | tar -xz -C ~/.local
 ```
 
+On Arch Linux, CachyOS and other Arch-based systems, install the command, and
+the app's AppImage for the app:
+
+```bash
+curl -LO https://github.com/ianmarmour/qdp/releases/latest/download/qdp-linux-x86_64.pkg.tar.zst
+sudo pacman -U ./qdp-linux-x86_64.pkg.tar.zst
+```
+
 Elsewhere, extract the command onto your `PATH`, and set up input as below:
 
 ```bash
@@ -73,8 +81,8 @@ sudo usermod -aG input "$USER"
 ## Upgrade and remove
 
 Install a newer package, or download a newer AppImage, the same way to
-upgrade. To remove QDP, run `sudo dnf remove qdp-gtk qdp` or
-`sudo apt remove qdp`, or delete the AppImage.
+upgrade. To remove QDP, run `sudo dnf remove qdp-gtk qdp`,
+`sudo apt remove qdp` or `sudo pacman -R qdp`, or delete the AppImage.
 
 ## Next steps
 
